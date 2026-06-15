@@ -13,6 +13,7 @@ by a board reset.
 """
 import json
 import os
+import re
 
 import paths
 
@@ -56,6 +57,30 @@ def get_profile(pid: str | None) -> dict | None:
     if not pid:
         return None
     return next((p for p in list_profiles() if p.get("id") == pid), None)
+
+
+def parse_states(states) -> list:
+    """Normalize a states value (a string like 'VA MD GA FL' or a list) to a clean
+    list of uppercase tokens. Comma- and whitespace-separated both work."""
+    toks = re.split(r"[,\s]+", states) if isinstance(states, str) else (states or [])
+    return [str(s).strip().upper() for s in toks if str(s).strip()]
+
+
+def save_profile(pid: str, phone=None, states=None) -> dict:
+    """Update a profile's phone and/or states in profiles.json (id + name preserved).
+    `states` may be a string ('VA MD GA') or a list."""
+    profs = list_profiles()
+    p = next((x for x in profs if x.get("id") == pid), None)
+    if not p:
+        raise ValueError(f"unknown dispatcher profile: {pid}")
+    if phone is not None:
+        p["phone"] = str(phone).strip()
+    if states is not None:
+        p["states"] = parse_states(states)
+    os.makedirs(PROFILES_DIR, exist_ok=True)
+    with open(PROFILES_PATH, "w", encoding="utf-8") as f:
+        json.dump(profs, f, indent=2)
+    return p
 
 
 def active_id() -> str | None:

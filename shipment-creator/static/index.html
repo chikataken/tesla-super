@@ -23,6 +23,9 @@
   .btn.live{background:#7a1f1f;border-color:#a83232;color:#fff;font-weight:650}
   .btn.live:hover{background:#982828}
   .lrow .btn.live{padding:4px 10px;font-size:12px;margin-left:8px}
+  .profrow{display:grid;grid-template-columns:80px 130px 1fr auto;gap:10px;align-items:center;margin-bottom:8px}
+  .profrow .pname{font-weight:600;font-size:13.5px}
+  .profrow .btn{padding:6px 12px;font-size:13px}
   .tabs{display:flex;gap:4px;margin-left:auto}
   .tab{background:none;border:1px solid transparent;color:var(--muted);
     padding:7px 14px;border-radius:9px;cursor:pointer;font-size:14px}
@@ -446,6 +449,14 @@
         <button class="btn green" id="saveSetBtn" onclick="saveSettings()">Save settings</button>
         <span class="count" id="setMsg" style="margin-left:12px"></span>
       </div>
+
+      <div class="full"><h2 class="seth">Dispatcher profiles</h2></div>
+      <div class="full hint">
+        Assign each dispatcher a phone (fills the &lt;dispatcher&gt; text in the
+        load-board and order instructions) and the pickup states they pull from the
+        Excel — e.g. <b>VA MD GA FL</b>. Leave states blank for no filter.
+      </div>
+      <div class="full" id="profilesEdit"></div>
 
       <div class="full"><h2 class="seth">Clear board</h2></div>
       <div class="full hint">
@@ -1173,12 +1184,29 @@ let ACTIVE_PROFILE=null;
 async function loadProfiles(){
   let d; try{ d=await fetch('/api/profiles').then(r=>r.json()); }catch(e){ return; }
   ACTIVE_PROFILE=d.active||null;
+  renderProfilesEditor(d.profiles||[]);
   const sel=$('#profileSel'); if(!sel) return;
   sel.innerHTML='<option value="">Select dispatcher…</option>'+
     (d.profiles||[]).map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
   sel.value=ACTIVE_PROFILE||'';
   sel.classList.toggle('unset', !ACTIVE_PROFILE);     // glow until one is chosen
   updateProfileImg();
+}
+// Settings tab: editable phone + states per dispatcher.
+function renderProfilesEditor(profs){
+  const wrap=$('#profilesEdit'); if(!wrap) return;
+  wrap.innerHTML=(profs||[]).map(p=>`<div class="profrow">
+    <span class="pname">${esc(p.name||p.id)}</span>
+    <input id="pph_${esc(p.id)}" type="text" placeholder="phone" value="${esc(p.phone||'')}">
+    <input id="pst_${esc(p.id)}" type="text" placeholder="states e.g. VA MD GA FL" value="${esc((p.states||[]).join(' '))}">
+    <button class="btn" onclick="saveProfile('${esc(p.id)}')">Save</button>
+  </div>`).join('') || '<span class="hint">No profiles.</span>';
+}
+async function saveProfile(id){
+  const phone=$('#pph_'+id).value, states=$('#pst_'+id).value;
+  try{ await api('/api/profile/save',{id, phone, states});
+    toast('Saved '+id); await loadProfiles(); syncTally(); }   // refresh editor/dropdown + recount
+  catch(e){ /* api() already toasted */ }
 }
 function updateProfileImg(){
   const img=$('#profileImg'); if(!img) return;

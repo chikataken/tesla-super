@@ -305,6 +305,20 @@ def api_profile_set(body: dict = Body(...)):
     return {"ok": True, "active": profiles.active_id()}
 
 
+@app.post("/api/profile/save")
+def api_profile_save(body: dict = Body(...)):
+    """Save a dispatcher's phone (fills the <dispatcher> token) and pickup-state filter
+    from the Settings tab. `states` accepts 'VA MD GA FL' or a list."""
+    import profiles
+    try:
+        p = profiles.save_profile((body or {}).get("id"),
+                                  phone=body.get("phone"), states=body.get("states"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())   # state filter changed
+    return {"ok": True, "profile": p}
+
+
 @app.get("/api/profile-image/{pid}")
 def api_profile_image(pid: str):
     """Serve a dispatcher's avatar from profiles/images/<id>.<ext> (case-insensitive
