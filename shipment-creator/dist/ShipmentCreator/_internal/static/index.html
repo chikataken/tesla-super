@@ -470,6 +470,15 @@
         <span class="count" id="clearMsg" style="margin-left:12px"></span>
       </div>
 
+      <div class="full"><h2 class="seth">Test post (LIVE)</h2></div>
+      <div class="full hint">
+        Posts the <b>topmost shipment</b> on the board to SuperDispatch as a single real
+        order (production) — the same one-shipment live test, tucked away here.
+      </div>
+      <div class="full">
+        <button class="btn live" id="postLiveBtn" onclick="postLiveTop()">Post topmost shipment LIVE</button>
+      </div>
+
       <div class="full"><h2 class="seth">One-time sign-in</h2></div>
       <div class="full hint">
         Opens Chrome on the shared login profile at both the Tesla Vendor Portal and
@@ -641,19 +650,16 @@ function pruneRead(nums){           // drop read-state for shipments no longer o
   for(const n of [...READ]) if(!nums.has(n)){ READ.delete(n); changed=true; }
   if(changed) localStorage.setItem('readShipments', JSON.stringify([...READ]));
 }
-function listRow(o, isTop){
+function listRow(o){
   const p=(o.pickup&&o.pickup.venue)||{}, d=(o.delivery&&o.delivery.venue)||{};
   const route=`<b>${p.city||'?'}, ${p.state||''}</b> → <b>${d.city||'?'}, ${d.state||''}</b>`;
   const sd=routeSdClass(o);
   const unread=isUnread(o.number)?' unread':'';
   const m=matchesForRoute(routeKey(o));
   const title=sd?` title="${m.length} existing SuperDispatch shipment(s) on this route — open to consolidate"`:'';
-  // The topmost shipment gets a LIVE post button — a single-order prod test.
-  const live=isTop?`<button class="btn live" title="LIVE: post ONLY this shipment to SuperDispatch (production)" onclick="postLive(event,'${esc(o.number)}')">Post LIVE</button>`:'';
   return `<div class="lrow ${sd}${unread}"${title} onclick="openRoute('${esc(o.number)}')">
     <span class="lroute">${route}</span>
     <div class="vbubs">${vinBubbles(o)}</div>
-    ${live}
     <span class="chev">›</span>
   </div>`;
 }
@@ -947,7 +953,7 @@ function renderList(){
   const total=sorted.length+ghosts.length;
   $('#count').textContent=total+' shipment'+(total===1?'':'s');
   $('#list').innerHTML=total
-    ? sorted.map((o,i)=>listRow(o,i===0)).join('')+ghosts.map(consolGhostRow).join('')
+    ? sorted.map(listRow).join('')+ghosts.map(consolGhostRow).join('')
     : '<div class="empty">No staged shipments. Click <b>Excel +</b> (top bar) to choose a sheet and start.</div>';
   updateSortUI(); updateBar();
 }
@@ -1230,13 +1236,19 @@ async function clearBoard(){
   catch(e){ toast('Could not clear'); }
   finally{ if(btn) btn.disabled=false; setTimeout(()=>{ if($('#clearMsg')) $('#clearMsg').textContent=''; },2500); }
 }
-// LIVE post of a single shipment (prod test) — only on the topmost row.
-async function postLive(ev, number){
-  ev.stopPropagation();                               // don't open the route
+// LIVE post of a single shipment (prod test). Lives in the Settings tab now; posts
+// the topmost shipment on the board.
+async function postLive(number){
   if(!confirm('LIVE post shipment '+number+' to SuperDispatch (PRODUCTION)?\nThis creates one real order.')) return;
   try{ const r=await api('/api/post-live',{number});
     toast((r.vins||0)+' VIN(s) successfully posted to SuperDispatch');
   }catch(e){ /* api() already toasted the error */ }
+}
+function topNumber(){ const s=sortOrders(ORDERS||[]); return s.length?s[0].number:null; }
+async function postLiveTop(){
+  const num=topNumber();
+  if(!num){ toast('No shipments on the board to post'); return; }
+  await postLive(num);
 }
 
 // ----- consolidation: stage to-be VINs onto an existing SD shipment (matches come
