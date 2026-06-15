@@ -11,8 +11,7 @@ per-card driver dropdown — search the name, pick the matching option.
 
 SAFE BY DEFAULT:
   * Dry-run unless --apply (dry-run only counts + reports, never submits).
-  * Hard safety check: if more than ~20 "today" units (work day not over),
-    it ABORTS with no changes.
+  * Runs at any time — no "work day isn't over" cap on the number of units.
 
 Usage (or via clean.bat / clean.sh / `run.bat cleanup`):
     python tesla_cleanup.py             # dry-run: counts + plan   (headless)
@@ -45,7 +44,6 @@ from playwright.sync_api import Page
 from auth import browser_context
 
 DASHBOARD_URL = "https://suppliers.teslamotors.com/logistics/dispatchdashboard2"
-SAFETY_MAX = 20
 # The board's search is slow to return rows; wait up to this long for shipment cards
 # to appear before counting (so we never count an empty, still-loading grid and exit
 # early). A genuinely empty result just waits this out. Override with SHIPMENTS_WAIT_S.
@@ -452,10 +450,6 @@ def main(apply: bool):
             eta_n, pickup_n = count_badges(page)
             print(f"Pass {passes + 1}: ETA Today={eta_n}  Pickup Date Today={pickup_n}")
 
-            if passes == 0 and (eta_n + pickup_n) > SAFETY_MAX:
-                print(f"\nABORT: {eta_n + pickup_n} 'today' units (> {SAFETY_MAX}). "
-                      f"Work day isn't over — no changes made. Notify the user.")
-                return
             if eta_n + pickup_n == 0:
                 break
             if not apply:
