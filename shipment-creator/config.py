@@ -5,7 +5,11 @@ from dotenv import load_dotenv
 
 import paths
 
-load_dotenv()
+# Shared credentials live in <repo-root>/secrets/.env so both tools read one file.
+_SECRETS_ENV = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "secrets", ".env")
+load_dotenv(_SECRETS_ENV)   # shared, authoritative source
+load_dotenv()               # app-local .env fallback (legacy)
 # Layer saved GUI settings (settings.json + Windows Credential Manager) underneath
 # real environment variables, so a normal user can configure the app without a
 # .env file. Real env vars and .env still win (setdefault).

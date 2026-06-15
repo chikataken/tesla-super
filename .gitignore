@@ -12,6 +12,8 @@ instance.json
 output/
 **/output/
 *.pdf
+# Extensionless customer spreadsheet that slipped past *.xlsx once — keep it out.
+shipment-creator/238EF110
 
 # ───── python ─────
 .venv/

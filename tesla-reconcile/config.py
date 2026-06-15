@@ -1,8 +1,17 @@
-"""Central configuration, loaded from environment (.env)."""
+"""Central configuration, loaded from environment.
+
+Credentials are read from the shared repo-root ``secrets/.env`` first (one place
+for both tools), then any app-local ``.env`` as a fallback. Real environment
+variables always win over both.
+"""
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# Shared credentials live in <repo-root>/secrets/.env so both tools read one file.
+_SECRETS_ENV = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "secrets", ".env")
+load_dotenv(_SECRETS_ENV)   # shared, authoritative source
+load_dotenv()               # app-local .env fallback (legacy)
 
 
 def _bool(name: str, default: str = "false") -> bool:
