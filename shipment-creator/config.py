@@ -77,7 +77,10 @@ CHROME_PATH = os.getenv("CHROME_PATH", "").strip()
 #                         normal browser, unlike HEADLESS which gets flagged),
 #                         but parked off-screen and minimized. It still shows in
 #                         the taskbar; don't click it mid-run.
-WINDOW_MODE = os.getenv("WINDOW_MODE", "visible").strip().lower()
+# Default to "ghost" on Windows (the packaged app's platform) so automated runs are
+# hidden off-screen without any .env; "visible" elsewhere for dev. The one-time login
+# flow forces "visible", and the CLI --headed flag overrides for watching a run.
+WINDOW_MODE = os.getenv("WINDOW_MODE", "ghost" if os.name == "nt" else "visible").strip().lower()
 BOL_DIR = os.getenv("BOL_DIR", os.path.join(paths.OUTPUT_DIR, "bols"))
 # Purge each downloaded BOL PDF as soon as its data has been read into a staged
 # order (default). Set KEEP_BOLS=true to retain them in BOL_DIR (e.g. for the

@@ -252,6 +252,30 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
             print(f"{tag} {vin}: ERROR {type(exc).__name__}: {exc}")
 
 
+async def _park_offscreen(ctx) -> None:
+    """Force the automation window off-screen via CDP (ghost mode).
+
+    The --window-position launch flag isn't enough on Windows: Chrome's startup
+    WindowSizer drags an off-screen window back onto a connected display, and a
+    persistent profile can restore the last visible bounds. Setting the bounds over
+    CDP after startup is authoritative. windowState stays "normal" (NOT minimized) so
+    Chrome's occlusion logic doesn't freeze the background tabs the BOL pull drives."""
+    pages = list(ctx.pages) or [await ctx.new_page()]
+    moved: set = set()
+    for page in pages:
+        try:
+            sess = await ctx.new_cdp_session(page)
+            wid = (await sess.send("Browser.getWindowForTarget"))["windowId"]
+            if wid in moved:
+                continue
+            await sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {
+                "left": -32000, "top": -32000, "width": 1560, "height": 920,
+                "windowState": "normal"}})
+            moved.add(wid)
+        except Exception:                               # noqa: BLE001 - best-effort hide
+            pass
+
+
 async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
                sd_scan_pairs=None, sd_hits=None) -> dict:
     vins = list(dict.fromkeys(v for v in vins if v))   # dedupe, PRESERVE caller order
@@ -284,6 +308,11 @@ async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
             pages = list(ctx.pages)
             while len(pages) < workers:
                 pages.append(await ctx.new_page())
+
+            # Ghost mode: drag the window off-screen via CDP now (authoritative — the
+            # --window-position launch flag is unreliable on Windows). No-op if headless.
+            if config.AUTH_MODE == "cdp" and config.WINDOW_MODE == "ghost" and not config.HEADLESS:
+                await _park_offscreen(ctx)
 
             tasks = [
                 _worker(i + 1, pages[i], chunks[i], seen, lock, results, on_bol, need_by)
