@@ -83,7 +83,15 @@ def main():
         config.WINDOW_MODE = "visible"
         config.HEADLESS = False
 
+    import profiles
+    _profile = profiles.active_profile()
     rows, report = excel_ingest.read_rows(args.excel, args.sheet)
+    rows = profiles.filter_rows(rows, _profile)        # only the dispatcher's states
+    if _profile:
+        kept = profiles.allowed_states(_profile)
+        print(f"Dispatcher profile: {_profile.get('name')} "
+              f"({'states ' + ','.join(sorted(kept)) if kept else 'no state filter'}) "
+              f"-> {len(rows)} VIN(s) after filtering.")
     shipments, warnings = grouping.build_shipments(rows)
     _preview(shipments, report, warnings)
 
@@ -294,9 +302,11 @@ def main():
                   "payloads, then re-run with --live to send them.")
         else:
             created = 0
+            dispatcher = profiles.dispatcher_phone(_profile)
             for payload in payloads:
                 try:
-                    res = sd_api.create_order(payload, dry_run=False)
+                    body = sd_api.to_sd_order(payload, dispatcher=dispatcher)
+                    res = sd_api.create_order(body, dry_run=False)
                     guid = res.get("guid") or (res.get("data") or {}).get("guid")
                     print(f"  [{payload['number']}] created -> guid={guid}")
                     created += 1

@@ -35,8 +35,10 @@ CHROME_PATH = os.getenv("CHROME_PATH", "").strip()
 #   "visible" (default) — normal window.
 #   "ghost"             — still a real HEADED Chrome (so bot detection sees a
 #                         normal browser, unlike HEADLESS which gets flagged),
-#                         but parked off-screen and minimized. It still shows in
-#                         the taskbar; don't click it mid-run.
+#                         but dragged off-screen via CDP after startup so it shows
+#                         on no monitor (NOT minimized — minimizing would let
+#                         occlusion logic freeze the tabs). It still shows in the
+#                         taskbar; don't click it mid-run.
 WINDOW_MODE = os.getenv("WINDOW_MODE", "visible").strip().lower()
 USER_DATA_DIR = os.getenv("USER_DATA_DIR", "./.auth")
 HEADLESS = _bool("HEADLESS", "false")

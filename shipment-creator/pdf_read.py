@@ -26,7 +26,10 @@ _STATES = {
     "Virginia","Washington","West Virginia","Wisconsin","Wyoming",
     "District of Columbia",
 }
-_PHONE = re.compile(r"\d{3}[)\-.\s].*?\d{4}")
+# A US phone with OR without separators: optional +1, 3-digit area (optionally
+# parenthesized), then 3 + 4 digits, each group optionally split by space/dot/dash.
+# Catches "6026205933", "(602)620-5933", "602-620-5933", "602.620.5933", "602 620 5933".
+_PHONE = re.compile(r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}")
 _ZIP = re.compile(r"\b\d{5}\b")
 # Tesla VIN -> model (WMI + line) and model-year (10th char).
 _TESLA_MODEL = {"5YJ3": "Model 3", "7SA3": "Model 3", "5YJY": "Model Y", "7SAY": "Model Y",

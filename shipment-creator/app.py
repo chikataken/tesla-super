@@ -23,7 +23,7 @@ import time
 from typing import Optional
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 import paths
 
@@ -203,6 +203,9 @@ def api_run(opts: dict = Body(...)):
     """Start the pipeline and stream its console output. The subprocess is owned by
     a background thread (not this request), so it keeps running and reporting
     progress even if the client disconnects/refreshes. Only one run at a time."""
+    import profiles
+    if not profiles.active_id():
+        raise HTTPException(400, "Select a dispatcher profile before running an Excel.")
     if not _run_lock.acquire(blocking=False):
         raise HTTPException(409, "A run is already in progress.")
     try:
@@ -282,6 +285,41 @@ def api_env():
     return {"sd_env": config.SD_ENV, "default_excel": config.DEFAULT_EXCEL}
 
 
+# ----------------------- dispatcher profiles --------------------------------
+@app.get("/api/profiles")
+def api_profiles():
+    """The dispatcher profiles (for the top-left dropdown) + the active selection."""
+    import profiles
+    return {"profiles": profiles.list_profiles(), "active": profiles.active_id()}
+
+
+@app.post("/api/profile")
+def api_profile_set(body: dict = Body(...)):
+    """Select (persist) the active dispatcher. Pass {"id": null} to clear it."""
+    import profiles
+    try:
+        profiles.set_active((body or {}).get("id"))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())   # filter changed
+    return {"ok": True, "active": profiles.active_id()}
+
+
+@app.get("/api/profile-image/{pid}")
+def api_profile_image(pid: str):
+    """Serve a dispatcher's avatar from profiles/images/<id>.<ext> (case-insensitive
+    on the filename, so 'Soyo.png' matches profile id 'soyo'), if present."""
+    import profiles
+    base = os.path.join(profiles.PROFILES_DIR, "images")
+    exts = {"png", "jpg", "jpeg", "webp", "gif"}
+    if os.path.isdir(base):
+        for fn in os.listdir(base):
+            stem, ext = os.path.splitext(fn)
+            if stem.lower() == pid.lower() and ext.lower().lstrip(".") in exts:
+                return FileResponse(os.path.join(base, fn))
+    raise HTTPException(404, "no image for that profile")
+
+
 # ----------------------- settings + one-time login --------------------------
 @app.get("/api/settings")
 def api_settings_get():
@@ -308,16 +346,14 @@ def api_settings_set(body: dict = Body(...)):
 
 @app.post("/api/login")
 def api_login(body: dict = Body(default=None)):
-    """Open the persistent-profile Chrome at the Tesla portal (and SuperDispatch, if
-    asked) so the user can sign in once. Cookies persist in the profile for later
-    automated runs. Returns the URLs opened so the UI can show a manual fallback."""
+    """Open the persistent-profile Chrome at BOTH the Tesla portal and SuperDispatch
+    so the user can sign in once. Cookies persist in the profile for later automated
+    runs. Returns the URLs opened so the UI can show a manual fallback."""
     import config
     import chrome_cdp
     config.WINDOW_MODE = "visible"                     # login is always interactive
     config.HEADLESS = False
-    targets = [config.TESLA_DASHBOARD_URL]
-    if body and body.get("superdispatch"):
-        targets.append(config.SD_WEB_BASE)
+    targets = [config.TESLA_DASHBOARD_URL, config.SD_WEB_BASE]
     try:
         opened = chrome_cdp.open_urls(targets)
     except FileNotFoundError as e:
@@ -445,7 +481,9 @@ def _excel_vins() -> set:
         return _excel_cache["vins"]
     try:
         import excel_ingest
+        import profiles
         rows, _ = excel_ingest.read_rows(path, sheet)
+        rows = profiles.filter_rows(rows, profiles.active_profile())   # dispatcher's states only
         vins = {r.vin for r in rows if r.ok and r.vin}
     except Exception:                                   # noqa: BLE001
         vins = set()
@@ -472,7 +510,11 @@ def api_tally():
     excel = _excel_vins()
     total = len(excel)
     board = _board_vins()
-    processed = len(excel & board) if total else len(board)
+    # Spared VINs count as processed too: setting one aside must NOT drop the counter
+    # or hide the Post button (spares simply won't be posted).
+    spares = {s.get("vin") for s in _load_spares() if s.get("vin")}
+    seen = board | spares
+    processed = len(excel & seen) if total else len(seen)
     path, _sheet = _active_excel()
     return {"processed": processed, "total": total,
             "running": _run_progress["running"],
@@ -487,7 +529,8 @@ def api_post(body: dict = Body(...)):
     each stamped with its computed pickup/delivery date windows, and returns them for
     review. It does NOT send anything yet (dry-run). Wire the real create + the
     consolidation PATCHes (consolidations.json) here later."""
-    import transit
+    import sd_api
+    import profiles
     files = _staged_files()
     board = []
     if files:
@@ -496,33 +539,133 @@ def api_post(body: dict = Body(...)):
                 board = json.load(f)
         except (OSError, ValueError):
             board = []
+    dispatcher = profiles.dispatcher_phone()
     payloads = []
     for o in board:
-        pstate = ((o.get("pickup") or {}).get("venue") or {}).get("state")
-        dstate = ((o.get("delivery") or {}).get("venue") or {}).get("state")
-        w = transit.shipment_windows(o.get("need_by_ts"), pstate, dstate) \
-            if o.get("need_by_ts") is not None else None
-        total, per = _effective_prices(o)              # override split across units, or per-VIN
-        vehicles = [{**v, "price": per if per is not None else v.get("price")}
-                    for v in (o.get("vehicles") or [])]
-        payloads.append({
-            "number": o.get("number"),
-            "transport_type": o.get("transport_type", "OPEN"),
-            "inspection_type": o.get("inspection_type", "standard"),
-            "price": total,
-            "pickup": {**(o.get("pickup") or {}),
-                       "date_window": (w or {}).get("pickup"),
-                       "notes": o.get("pickup_notes", "")},      # SD "Notes for carrier"
-            "delivery": {**(o.get("delivery") or {}),
-                         "date_window": (w or {}).get("delivery"),
-                         "notes": o.get("delivery_notes", "")},
-            "vehicles": vehicles,
-        })
+        total, _per = _effective_prices(o)             # override total, else sum of rates
+        # The exact SuperDispatch create body: one carrier payment (no per-VIN price),
+        # the check/15-day payment block, and the instruction templates.
+        payloads.append(sd_api.to_sd_order(o, total=total, dispatcher=dispatcher))
     # TODO (next): also read consolidations.json and PATCH staged VINs onto the
     # matched existing SD orders (build_vehicles_merge), then actually POST these.
     consol = _load_json(CONSOL_PATH, [])
     return {"ok": True, "dry_run": True, "count": len(payloads),
             "consolidations": len(consol), "payloads": payloads}
+
+
+@app.post("/api/post-live")
+def api_post_live(body: dict = Body(...)):
+    """LIVE — actually POST ONE shipment to SuperDispatch (a prod test of a single
+    order). Builds the exact create body for the given order number, fills the active
+    dispatcher's phone into the instructions, sends it, and returns the new guid."""
+    import sd_api
+    import profiles
+    number = (body or {}).get("number")
+    if not number:
+        raise HTTPException(400, "number is required")
+    _path, batch = _load_batch()
+    o = _find(batch, number)
+    if not o:
+        raise HTTPException(404, "that shipment isn't on the board")
+    total, _per = _effective_prices(o)
+    payload = sd_api.to_sd_order(o, total=total, dispatcher=profiles.dispatcher_phone())
+    try:
+        res = sd_api.create_order(payload, dry_run=False)
+    except sd_api.SDError as e:
+        raise HTTPException(502, f"SuperDispatch rejected the order: {e}")
+    return {"ok": True, "number": number, "vins": len(o.get("vehicles") or [])}
+
+
+@app.post("/api/post-all")
+def api_post_all(body: dict = Body(default=None)):
+    """LIVE — post EVERY staged shipment to SuperDispatch, then clear the board
+    (spares are kept). New shipments are created and any staged consolidations are
+    merged onto their existing SD orders. Anything that fails to post stays on the
+    board for a retry. Returns only the count of VINs posted (no guids/ids)."""
+    import sd_api
+    import profiles
+    import config
+    dispatcher = profiles.dispatcher_phone()
+
+    path = _staged_files()[0] if _staged_files() else None
+    board = []
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                board = json.load(f)
+        except (OSError, ValueError):
+            board = []
+
+    posted_vins, kept_orders, failures = 0, [], []
+    for o in board:
+        try:
+            total, _per = _effective_prices(o)
+            payload = sd_api.to_sd_order(o, total=total, dispatcher=dispatcher)
+            sd_api.create_order(payload, dry_run=False)
+            posted_vins += len(o.get("vehicles") or [])
+        except sd_api.SDError as e:
+            kept_orders.append(o)
+            failures.append({"number": o.get("number"), "error": str(e)})
+
+    # Staged consolidations -> ADD the new VIN(s) onto an existing posted order. Only
+    # TWO things change: the vehicles list (existing kept with their guids, new VINs
+    # appended — no per-VIN price) and the order total. Everything else is left intact.
+    kept_consol = []
+    for entry in _load_json(CONSOL_PATH, []):
+        add = entry.get("add") or []
+        try:
+            existing = sd_api.get_order(entry.get("order_guid"))
+            new_vehicles = [
+                {**{k: a[k] for k in ("vin", "make", "model", "year") if a.get(k) is not None},
+                 "type": config.vehicle_type(a.get("model"))}
+                for a in add]
+            merge = sd_api.build_vehicles_merge(existing, new_vehicles)
+            # New total carrier payment: explicit override, else current SD total + added rates.
+            if entry.get("price_override") is not None:
+                merge["price"] = round(float(entry["price_override"]), 2)
+            else:
+                base = float(existing.get("price") or 0)
+                added = sum(float(a["price"]) for a in add if a.get("price") is not None)
+                merge["price"] = round(base + added, 2)
+            sd_api.patch_order(entry["order_guid"], merge)   # merge-patch: only vehicles + price
+            posted_vins += len(add)
+        except Exception as e:                          # noqa: BLE001
+            kept_consol.append(entry)
+            failures.append({"number": entry.get("number"), "error": str(e)})
+
+    # Clear the board (KEEP spares). Failed items are kept so they can be retried.
+    if path:
+        if kept_orders:
+            _save_json(path, kept_orders)
+        else:
+            for fp in glob.glob(os.path.join(ORDERS_DIR, "*.json")):
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+    try:
+        if os.path.exists(SEARCH_PATH):
+            os.remove(SEARCH_PATH)                      # SD matches are informational
+    except OSError:
+        pass
+    if kept_consol:
+        _save_json(CONSOL_PATH, kept_consol)
+    else:
+        try:
+            if os.path.exists(CONSOL_PATH):
+                os.remove(CONSOL_PATH)
+        except OSError:
+            pass
+    # Fully posted with nothing left -> reset to the blank "Excel +" state (spares stay).
+    if not kept_orders and not kept_consol:
+        try:
+            if os.path.exists(ACTIVE_EXCEL_PATH):
+                os.remove(ACTIVE_EXCEL_PATH)
+        except OSError:
+            pass
+        _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())
+
+    return {"ok": True, "posted_vins": posted_vins, "failed": failures}
 
 
 # ----------------------- editing the staged batch -----------------------
@@ -938,6 +1081,8 @@ def api_consolidation_stage(body: dict = Body(...)):
     order = next((o for o in search.get("orders", []) if o.get("guid") == guid), None)
     if not order:
         raise HTTPException(400, "that order isn't in the latest search — run a VIN search first")
+    if order.get("loadboard_status") == "accepted":
+        raise HTTPException(400, "that order is already accepted by a carrier — VINs can't be added to it")
 
     path, batch = _load_batch()
     moved = []

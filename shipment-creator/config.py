@@ -84,6 +84,81 @@ BOL_DIR = os.getenv("BOL_DIR", os.path.join(paths.OUTPUT_DIR, "bols"))
 # download-only flow, which never reads them and so never purges regardless).
 KEEP_BOLS = os.getenv("KEEP_BOLS", "false").strip().lower() in {"1", "true", "yes"}
 
+# After the first download pass, re-attempt any VIN whose BOL didn't land (transient
+# search/download timeouts, a momentarily wedged tab) this many more times within the
+# SAME run — so a few stragglers don't force a manual "resume" click. 0 disables.
+BOL_RETRY_ROUNDS = max(0, int(os.getenv("BOL_RETRY_ROUNDS", "2")))
+
+# ---------------------------------------------------------------------------
+# Carrier-facing order content (posted to SuperDispatch)
+# ---------------------------------------------------------------------------
+# The PO number (purchase_order_number) prints on the carrier BOL / dispatch sheet,
+# so it IS carrier-visible. We leave it blank by default to avoid exposing Tesla's
+# internal SHP id to carriers. Set SD_SEND_PO=true to send the full SHP instead.
+SD_SEND_PO = os.getenv("SD_SEND_PO", "false").strip().lower() in {"1", "true", "yes"}
+
+# SuperDispatch requires every vehicle to carry a `type` (enum, lowercase — verified
+# against a live order: a Model 3 is "sedan"). Map the decoded Tesla model to its SD
+# type; anything unknown falls back to a known-good default so the order isn't rejected.
+VEHICLE_TYPE_BY_MODEL = {
+    "Model 3": "sedan",
+    "Model S": "sedan",
+    "Model Y": "suv",
+    "Model X": "suv",
+}
+DEFAULT_VEHICLE_TYPE = "sedan"
+
+
+def vehicle_type(model: str | None) -> str:
+    return VEHICLE_TYPE_BY_MODEL.get((model or "").strip(), DEFAULT_VEHICLE_TYPE)
+
+
+# Carrier payment: ONE total (the sum of the per-VIN Excel rates) — per-vehicle
+# prices are never sent, only the order total. Paid by check on 15-day terms.
+# method/terms are SuperDispatch payment enums (verified against a live order).
+PAYMENT_METHOD = "check"
+PAYMENT_TERMS = "15_days"            # SuperDispatch enum for "15 business days"
+PAYMENT_NOTES = (
+    "Accounting:\n"
+    "310-387-4475\n"
+    "accounting@tfitrans.com\n"
+    "After sending invoice, send a text message to accounting\n"
+    "2 BUSINESS DAYS -5% fees or 15 days no fee (Deluxe E-check)\n"
+    "Text is preferred (faster than email)\n"
+    "Drivers must upload a picture of the VIN on the windshield for all units "
+    "at PICK UP AND DELIVERY LOCATIONS."
+)
+
+# The <dispatcher> token in the templates below is filled per the selected
+# dispatcher profile (feature TBD). Until that exists it stays literal, unless
+# DISPATCHER is set in the environment.
+DISPATCHER = os.getenv("DISPATCHER", "<dispatcher>")
+
+# Shown on the load board, BEFORE a carrier books the load.
+LOADBOARD_INSTRUCTIONS = "PLEASE SEND A TEXT TO <dispatcher> TO BOOK THIS LOAD"
+
+# Shown on the order itself, AFTER a carrier books it.
+ORDER_INSTRUCTIONS = (
+    "!! PLEASE READ CAREFULLY !!\n"
+    "After accepting load send driver info for TESLA LOGISTICS APP\n"
+    "(Full name, phone #, and email) to <dispatcher>\n"
+    "\n"
+    "Drivers must upload a photo of the windshield VIN # (all units) at both "
+    "PICK UP AND DELIVERY on SuperDispatch and Tesla LOGISTICS APP\n"
+    "Failure to comply may result in delayed payment and a 10% deduction from "
+    "total payment\n"
+    "\n"
+    "IF THE VEHICLE DOES NOT HAVE A KEY CARD OR BATTERY IS UNDER 20%, PLEASE "
+    "NOTIFY US!\n"
+    "For all other questions contact TFI Trans dispatch: (TEXT ONLY) <dispatcher>"
+)
+
+
+def render_dispatcher(text: str, dispatcher: str | None = None) -> str:
+    """Fill the <dispatcher> token in a template. The per-profile value is wired
+    later; for now it falls back to the DISPATCHER env var (or the literal token)."""
+    return (text or "").replace("<dispatcher>", dispatcher or DISPATCHER)
+
 # Default spreadsheet used when none is specified (CLI --excel / GUI field):
 # "formatted.xlsx" sitting next to this program (the shipment-creator folder).
 # Override with EXCEL_PATH in .env to point elsewhere.

@@ -237,7 +237,8 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
                 continue
             path = await _download_bol(tag, page, card, shp, vin)
             async with lock:
-                seen[shp] = path
+                if path:                              # only cache successful BOLs —
+                    seen[shp] = path                  # caching None poisons sibling VINs
             results[vin] = {"shp": shp, "path": path, "need_by": nb,
                             "status": "downloaded" if path else "download failed"}
             if path and on_bol:                       # parse this BOL as it lands
@@ -315,6 +316,27 @@ async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
             extra = " + 1 SD-scan tab" if sd_page else ""
             print(f"Running {workers} tab(s) over {len(vins)} VIN(s){extra}...")
             await asyncio.gather(*tasks)
+
+            # Retry recoverable misses within the SAME run so a few transient failures
+            # (search/download timeouts, a momentarily wedged tab) don't leave
+            # stragglers that force a manual "resume". Each round re-navigates the tab,
+            # which clears a stuck state; already-downloaded VINs are skipped.
+            for rnd in range(1, config.BOL_RETRY_ROUNDS + 1):
+                failed = [v for v in vins if not (results.get(v) or {}).get("path")]
+                if not failed:
+                    break
+                print(f"\nRetry {rnd}/{config.BOL_RETRY_ROUNDS}: re-attempting "
+                      f"{len(failed)} VIN(s) that didn't land yet: {failed}")
+                rw = max(1, min(workers, len(failed)))
+                rchunks = [failed[i::rw] for i in range(rw)]
+                await asyncio.gather(*[
+                    _worker(i + 1, pages[i], rchunks[i], seen, lock, results, on_bol, need_by)
+                    for i in range(rw)
+                ])
+            leftover = [v for v in vins if not (results.get(v) or {}).get("path")]
+            if leftover:
+                print(f"\n{len(leftover)} VIN(s) still have no BOL after "
+                      f"{config.BOL_RETRY_ROUNDS} retr(ies): {leftover}")
         finally:
             print("\nDone. Press Enter to close the browser...")
             try:

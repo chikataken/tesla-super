@@ -5,6 +5,19 @@ settings.json
 **/settings.json
 instance.json
 **/instance.json
+active_profile.json
+**/active_profile.json
+# Real dispatcher profiles hold phone numbers; commit only the .example template.
+profiles/profiles.json
+**/profiles/profiles.json
+# Dispatcher avatar images (binaries) — keep the folder's README, not the images.
+profiles/images/*.png
+profiles/images/*.jpg
+profiles/images/*.jpeg
+profiles/images/*.webp
+profiles/images/*.gif
+**/profiles/images/*.png
+**/profiles/images/*.jpg
 
 # ───── customer data: input sheets + staged output (PII) ─────
 *.xlsx

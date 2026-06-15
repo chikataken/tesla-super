@@ -346,6 +346,88 @@ def order_payload(ship, number: str | None = None, transport_type: str = "OPEN")
     }
 
 
+def _sd_datetime(iso_date: str) -> str:
+    """A 'YYYY-MM-DD' window date -> SuperDispatch's datetime format
+    ('2026-05-26T16:00:00.000+0000'). Noon UTC keeps the calendar date correct in
+    every US timezone (midnight UTC would roll the displayed date back a day)."""
+    return f"{iso_date}T12:00:00.000+0000"
+
+
+def _sum_costs(vehicles: list) -> float | None:
+    """Sum the per-VIN costs into the order total (the carrier payment)."""
+    ps = []
+    for v in vehicles:
+        c = v.get("price")
+        if c is None:
+            continue
+        try:
+            ps.append(float(c))
+        except (TypeError, ValueError):
+            pass
+    return round(sum(ps), 2) if ps else None
+
+
+def to_sd_order(order: dict, total: float | None = None,
+                dispatcher: str | None = None) -> dict:
+    """Convert a staged board order into the exact SuperDispatch create-order body.
+
+    - Carrier payment is a SINGLE total (sum of the per-VIN Excel rates). Per-vehicle
+      prices are NOT sent, so SuperDispatch shows only the order total.
+    - Adds the standard payment block (check / 15-day terms / accounting notes) and
+      the load-board + order instruction templates (<dispatcher> filled per profile).
+    - Notes nest INSIDE the venue stop (SD reads pickup.notes / delivery.notes), not
+      as the top-level pickup_notes/delivery_notes the staged board carries.
+    - purchase_order_number is blanked unless SD_SEND_PO is set (it's carrier-visible).
+    """
+    veh = order.get("vehicles") or []
+    if total is None:
+        total = _sum_costs(veh)
+    vehicles = []
+    for v in veh:                                   # no per-vehicle price
+        nv = {k: v[k] for k in ("vin", "make", "model", "year") if v.get(k) is not None}
+        nv["type"] = config.vehicle_type(v.get("model"))   # SD requires a vehicle type
+        vehicles.append(nv)
+
+    # Pickup/delivery date windows from the order's need-by + route transit time.
+    import transit
+    nb = order.get("need_by_ts")
+    pstate = ((order.get("pickup") or {}).get("venue") or {}).get("state")
+    dstate = ((order.get("delivery") or {}).get("venue") or {}).get("state")
+    win = transit.shipment_windows(nb, pstate, dstate) if nb is not None else None
+
+    def stop(side: str, legacy_notes_key: str, wkey: str) -> dict:
+        s = order.get(side) or {}
+        out = {"date_type": s.get("date_type") or "estimated", "venue": s.get("venue") or {}}
+        notes = s.get("notes") or order.get(legacy_notes_key) or ""
+        if notes:
+            out["notes"] = notes
+        w = (win or {}).get(wkey)
+        if w:                                       # SD's scheduled date window (ISO datetimes)
+            out["scheduled_at"] = _sd_datetime(w["earliest"])
+            out["scheduled_ends_at"] = _sd_datetime(w["latest"])
+        return out
+
+    return {
+        "number": order.get("number"),
+        "purchase_order_number": (order.get("purchase_order_number", "") or ""
+                                  ) if config.SD_SEND_PO else "",
+        "transport_type": order.get("transport_type", "OPEN"),
+        "inspection_type": order.get("inspection_type", "standard"),
+        "price": total,                             # the single carrier payment
+        "payment": {
+            "method": config.PAYMENT_METHOD,
+            "terms": config.PAYMENT_TERMS,
+            "notes": config.PAYMENT_NOTES,
+        },
+        "instructions": config.render_dispatcher(config.ORDER_INSTRUCTIONS, dispatcher),
+        "loadboard_instructions": config.render_dispatcher(
+            config.LOADBOARD_INSTRUCTIONS, dispatcher),
+        "pickup": stop("pickup", "pickup_notes", "pickup"),
+        "delivery": stop("delivery", "delivery_notes", "delivery"),
+        "vehicles": vehicles,
+    }
+
+
 def _unwrap_object(resp: dict) -> dict:
     """SuperDispatch wraps single resources as {"data": {"object": {...}}}.
     Return the inner object (or the response itself if it isn't wrapped).

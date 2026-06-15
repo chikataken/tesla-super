@@ -16,6 +16,13 @@
     display:flex;align-items:center;gap:14px;position:sticky;top:0;background:var(--bg);z-index:5}
   header h1{font-size:16px;margin:0;font-weight:650}
   .pill{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:3px 10px}
+  .profsel{background:#0b0d12;border:1px solid var(--line);color:var(--text);border-radius:9px;
+    padding:6px 10px;font-size:13.5px;cursor:pointer}
+  .profsel:focus{outline:none;border-color:var(--accent)}
+  .profsel.unset{border-color:var(--accent);box-shadow:0 0 0 2px rgba(79,140,255,.18)}
+  .btn.live{background:#7a1f1f;border-color:#a83232;color:#fff;font-weight:650}
+  .btn.live:hover{background:#982828}
+  .lrow .btn.live{padding:4px 10px;font-size:12px;margin-left:8px}
   .tabs{display:flex;gap:4px;margin-left:auto}
   .tab{background:none;border:1px solid transparent;color:var(--muted);
     padding:7px 14px;border-radius:9px;cursor:pointer;font-size:14px}
@@ -65,6 +72,8 @@
   .sortbtn:hover{background:var(--card2)}
   .sortbtn.active{border-color:var(--accent)}
   .sortbtn .dir{color:var(--accent);font-size:11.5px;font-variant-numeric:tabular-nums;min-width:30px;text-align:right}
+  /* active dispatcher's avatar — a little narrower than the sort buttons, centered */
+  .profimg{display:block;width:84%;margin:14px auto 0;border-radius:12px}
   .orders-main{flex:1;min-width:0}
   @media(max-width:720px){.orders-layout{flex-direction:column}.sidebar{width:100%;position:static}.spares{width:100%;position:static}}
 
@@ -230,8 +239,8 @@
     border:1px solid var(--line);color:var(--text);padding:9px 16px;border-radius:10px;
     font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:40}
 
-  .form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;display:grid;
-    grid-template-columns:1fr 1fr;gap:14px 18px;margin-bottom:16px}
+  .form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;
+    grid-template-columns:1fr 1fr;gap:10px 16px;margin-bottom:16px;max-width:560px}
   .form label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
   .form .full{grid-column:1/-1}
   .checks{display:flex;gap:20px;flex-wrap:wrap;align-items:center}
@@ -339,11 +348,24 @@
   .lrow.sd-green:hover{background:rgba(55,201,122,.14)}
   .lrow.sd-amber{border-color:var(--warn);background:rgba(224,163,65,.07)}
   .lrow.sd-amber:hover{background:rgba(224,163,65,.13)}
+  /* Gmail-style unread: brighter background + bold; READ rows stay in the muted
+     "dead" state. Coexists with the posted(amber)/accepted(green) outline — the
+     colored border stays, the unread highlight layers a brighter fill + accent bar. */
+  .lrow.unread{font-weight:650;box-shadow:inset 3px 0 0 0 var(--accent)}
+  .lrow.unread .lroute,.lrow.unread .lroute b{color:var(--text)}
+  .lrow.unread:not(.sd-green):not(.sd-amber){background:var(--card2)}
+  .lrow.unread.sd-amber{background:rgba(224,163,65,.18)}
+  .lrow.unread.sd-green{background:rgba(55,201,122,.20)}
+  .sdlocked{opacity:.7;font-style:italic}
 </style>
 </head>
 <body>
 <header>
   <h1>TFI TRANS</h1>
+  <select id="profileSel" class="profsel" onchange="setProfile(this.value)"
+          title="Dispatcher profile — select before uploading an Excel">
+    <option value="">Select dispatcher…</option>
+  </select>
   <span class="pill" id="env"></span>
   <div class="tabs">
     <div id="tally" class="tally"></div>
@@ -362,6 +384,7 @@
         <button class="sortbtn active" data-sort="urgency">Most urgent<span class="dir"></span></button>
         <button class="sortbtn" data-sort="origin">Origin state<span class="dir"></span></button>
         <button class="sortbtn" data-sort="dest">Destination state<span class="dir"></span></button>
+        <img id="profileImg" class="profimg" alt="" hidden onerror="this.hidden=true">
       </aside>
       <div class="orders-main">
         <div class="toolbar" id="listbar">
@@ -405,7 +428,7 @@
   <div class="panel" id="settings">
     <div class="form">
       <div class="full"><h2 class="seth">SuperDispatch</h2></div>
-      <div>
+      <div class="full">
         <label>Environment</label>
         <select id="set_env" style="width:100%">
           <option value="test">Test (sandbox)</option>
@@ -413,36 +436,37 @@
         </select>
       </div>
       <div><label>Client ID</label><input id="set_cid" type="text" style="width:100%" placeholder="SuperDispatch client id"></div>
-      <div class="full">
+      <div>
         <label>Client Secret</label>
         <input id="set_secret" type="password" style="width:100%" placeholder="enter to set">
-        <div class="hint" id="secretHint"></div>
       </div>
-
-      <div class="full"><h2 class="seth">Files &amp; Chrome</h2></div>
-      <div class="full">
-        <label>Default Excel file path</label>
-        <input id="set_excel" type="text" style="width:100%" placeholder="C:\Users\you\Documents\sheet.xlsx">
-      </div>
-      <div><label>Chrome path (optional)</label><input id="set_chrome" type="text" style="width:100%" placeholder="auto-detect"></div>
-      <div><label>Login profile folder</label><input id="set_profile" type="text" style="width:100%" placeholder="C:\tesla-profile"></div>
+      <div class="full hint" id="secretHint" style="margin-top:-4px"></div>
 
       <div class="full">
         <button class="btn green" id="saveSetBtn" onclick="saveSettings()">Save settings</button>
         <span class="count" id="setMsg" style="margin-left:12px"></span>
       </div>
 
-      <div class="full"><h2 class="seth">One-time sign-in</h2></div>
+      <div class="full"><h2 class="seth">Clear board</h2></div>
       <div class="full hint">
-        Opens Chrome on the shared login profile so you can sign in to the Tesla
-        Vendor Portal once. Your password is typed into Tesla's own page — it is never
-        stored by this app. Cookies persist for future runs.
-      </div>
-      <div class="full checks">
-        <label><input type="checkbox" id="set_sd_login"> also open SuperDispatch</label>
+        Deletes the current board (all Excel VINs), every SuperDispatch match, and all
+        staged consolidations/connections — back to a blank slate. Your dispatcher
+        profile and credentials are kept. (The <b>Excel +</b> button does this too when
+        you load a new sheet.)
       </div>
       <div class="full">
-        <button class="btn" id="loginBtn" onclick="doLogin()">Sign in to Tesla</button>
+        <button class="btn" id="clearBtn" onclick="clearBoard()">Clear board, matches &amp; connections</button>
+        <span class="count" id="clearMsg" style="margin-left:12px"></span>
+      </div>
+
+      <div class="full"><h2 class="seth">One-time sign-in</h2></div>
+      <div class="full hint">
+        Opens Chrome on the shared login profile at both the Tesla Vendor Portal and
+        SuperDispatch so you can sign in once. Your password is typed into each site's
+        own page — it is never stored by this app. Cookies persist for future runs.
+      </div>
+      <div class="full">
+        <button class="btn" id="loginBtn" onclick="doLogin()">Sign in to Tesla &amp; SuperDispatch</button>
         <span class="count" id="loginMsg" style="margin-left:12px"></span>
       </div>
     </div>
@@ -596,15 +620,29 @@ function routeSdClass(o){
   if(m.some(x=>x.loadboard_status==='accepted')) return 'sd-green';
   return '';
 }
-function listRow(o){
+// ----- unread state (Gmail-like): a shipment is "unread" until you open it.
+// Persisted per browser; pruned to the current board so a fresh run re-flags them. -----
+const READ = new Set(JSON.parse(localStorage.getItem('readShipments')||'[]'));
+function isUnread(num){ return !!num && !READ.has(num); }
+function markRead(num){ if(num && !READ.has(num)){ READ.add(num); localStorage.setItem('readShipments', JSON.stringify([...READ])); } }
+function pruneRead(nums){           // drop read-state for shipments no longer on the board
+  let changed=false;
+  for(const n of [...READ]) if(!nums.has(n)){ READ.delete(n); changed=true; }
+  if(changed) localStorage.setItem('readShipments', JSON.stringify([...READ]));
+}
+function listRow(o, isTop){
   const p=(o.pickup&&o.pickup.venue)||{}, d=(o.delivery&&o.delivery.venue)||{};
   const route=`<b>${p.city||'?'}, ${p.state||''}</b> → <b>${d.city||'?'}, ${d.state||''}</b>`;
   const sd=routeSdClass(o);
+  const unread=isUnread(o.number)?' unread':'';
   const m=matchesForRoute(routeKey(o));
   const title=sd?` title="${m.length} existing SuperDispatch shipment(s) on this route — open to consolidate"`:'';
-  return `<div class="lrow ${sd}"${title} onclick="openRoute('${esc(o.number)}')">
+  // The topmost shipment gets a LIVE post button — a single-order prod test.
+  const live=isTop?`<button class="btn live" title="LIVE: post ONLY this shipment to SuperDispatch (production)" onclick="postLive(event,'${esc(o.number)}')">Post LIVE</button>`:'';
+  return `<div class="lrow ${sd}${unread}"${title} onclick="openRoute('${esc(o.number)}')">
     <span class="lroute">${route}</span>
     <div class="vbubs">${vinBubbles(o)}</div>
+    ${live}
     <span class="chev">›</span>
   </div>`;
 }
@@ -797,16 +835,20 @@ function matchCard(o){
   const accepted = o.loadboard_status==='accepted';
   const ring = accepted ? 'accepted' : 'posted';
   const lines = existing.map(v=>sdVinLine(v, ring)).join('') + adds.map(addVinLine).join('');
-  const drop = adds.length ? '' : '<div class="vrow sddrop muted">drag your to-be VINs here</div>';
-  return `<div class="card matchcard ${ring}" data-guid="${o.guid}"
-      ondragover="onMatchOver(event)" ondragleave="onMatchLeave(event)" ondrop="onMatchDrop(event,'${g}')">
+  // Accepted orders are locked: a carrier already took the load, so no VINs can be added.
+  const note = accepted
+    ? '<div class="vrow sdlocked muted">Accepted by a carrier — VINs can\'t be added</div>'
+    : (adds.length ? '' : '<div class="vrow sddrop muted">drag your to-be VINs here</div>');
+  const dropAttrs = accepted ? ''
+    : `ondragover="onMatchOver(event)" ondragleave="onMatchLeave(event)" ondrop="onMatchDrop(event,'${g}')"`;
+  return `<div class="card matchcard ${ring}${accepted?' locked':''}" data-guid="${o.guid}" ${dropAttrs}>
     <div class="head">
       <span class="num">${o.number||'(no #)'}</span>
       <span class="dates" title="Scheduled on SuperDispatch">Pickup <b>${sdLegWindow(o.pickup)}</b> · Delivery <b>${sdLegWindow(o.delivery)}</b></span>
       <span class="cnt">${existing.length+adds.length} unit${(existing.length+adds.length)===1?'':'s'}</span>
       ${matchPriceField(o)}
     </div>
-    <div class="bubbles">${lines||'<div class="vrow muted">no VINs</div>'}${drop}</div>
+    <div class="bubbles">${lines||'<div class="vrow muted">no VINs</div>'}${note}</div>
   </div>`;
 }
 
@@ -894,7 +936,7 @@ function renderList(){
   const total=sorted.length+ghosts.length;
   $('#count').textContent=total+' shipment'+(total===1?'':'s');
   $('#list').innerHTML=total
-    ? sorted.map(listRow).join('')+ghosts.map(consolGhostRow).join('')
+    ? sorted.map((o,i)=>listRow(o,i===0)).join('')+ghosts.map(consolGhostRow).join('')
     : '<div class="empty">No staged shipments. Click <b>Excel +</b> (top bar) to choose a sheet and start.</div>';
   updateSortUI(); updateBar();
 }
@@ -920,6 +962,7 @@ function renderRoute(){
 }
 function openRoute(number){
   const o=ORDERS.find(x=>x.number===number); if(!o) return;
+  markRead(number);                       // opening it marks it read (Gmail-style)
   VIEW={mode:'route', key:routeKey(o), label:routeLabel(o)};
   SEL.clear(); PENDING=null; render(); window.scrollTo(0,0);
 }
@@ -953,6 +996,7 @@ async function load(){
     ]);
     ORDERS=od.orders||[]; SPARES=(sp&&sp.spares)||[];
     CSEARCH=(cm&&cm.search)||{orders:[]}; CMATCHES=CSEARCH.orders||[]; CSTAGED=(cm&&cm.staged)||[];
+    pruneRead(new Set(ORDERS.map(o=>o.number)));   // forget read-state for posted/removed shipments
     render(); syncTally();
   }
   catch(e){ $('#list').innerHTML='<div class="empty">Could not load orders.</div>'; }
@@ -1095,9 +1139,6 @@ async function loadSettings(){
   let s; try{ s=await fetch('/api/settings').then(r=>r.json()); }catch(e){ return; }
   $('#set_env').value   = s.SD_ENV || 'test';
   $('#set_cid').value   = s.SUPERDISPATCH_CLIENT_ID || '';
-  $('#set_excel').value = s.EXCEL_PATH || '';
-  $('#set_chrome').value= s.CHROME_PATH || '';
-  $('#set_profile').value = s.CDP_PROFILE_DIR || '';
   $('#set_secret').value = '';
   $('#secretHint').textContent = s.has_secret
     ? 'A secret is saved. Leave blank to keep it; type a new one to replace.'
@@ -1105,9 +1146,7 @@ async function loadSettings(){
 }
 async function saveSettings(){
   const btn=$('#saveSetBtn'); btn.disabled=true; $('#setMsg').textContent='Saving…';
-  const body={ SD_ENV:$('#set_env').value, SUPERDISPATCH_CLIENT_ID:$('#set_cid').value.trim(),
-    EXCEL_PATH:$('#set_excel').value.trim(), CHROME_PATH:$('#set_chrome').value.trim(),
-    CDP_PROFILE_DIR:$('#set_profile').value.trim() };
+  const body={ SD_ENV:$('#set_env').value, SUPERDISPATCH_CLIENT_ID:$('#set_cid').value.trim() };
   const sec=$('#set_secret').value.trim();
   if(sec) body.SUPERDISPATCH_CLIENT_SECRET=sec;       // only send when set (don't wipe)
   try{
@@ -1122,11 +1161,54 @@ async function saveSettings(){
 async function doLogin(){
   const btn=$('#loginBtn'); btn.disabled=true; $('#loginMsg').textContent='Opening Chrome…';
   try{
-    await api('/api/login', {superdispatch: $('#set_sd_login').checked});
-    $('#loginMsg').textContent='Chrome opened — sign in there, then close it.';
-    toast('Sign in to Tesla in the Chrome window that opened');
+    await api('/api/login', {});
+    $('#loginMsg').textContent='Chrome opened — sign in to both tabs, then close it.';
+    toast('Sign in to Tesla and SuperDispatch in the Chrome window that opened');
   }catch(e){ $('#loginMsg').textContent = e.message || 'Could not open Chrome.'; }
   finally{ btn.disabled=false; }
+}
+
+// ----- dispatcher profiles (top-left dropdown) -----
+let ACTIVE_PROFILE=null;
+async function loadProfiles(){
+  let d; try{ d=await fetch('/api/profiles').then(r=>r.json()); }catch(e){ return; }
+  ACTIVE_PROFILE=d.active||null;
+  const sel=$('#profileSel'); if(!sel) return;
+  sel.innerHTML='<option value="">Select dispatcher…</option>'+
+    (d.profiles||[]).map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  sel.value=ACTIVE_PROFILE||'';
+  sel.classList.toggle('unset', !ACTIVE_PROFILE);     // glow until one is chosen
+  updateProfileImg();
+}
+function updateProfileImg(){
+  const img=$('#profileImg'); if(!img) return;
+  if(ACTIVE_PROFILE){ img.src='/api/profile-image/'+encodeURIComponent(ACTIVE_PROFILE)+'?t='+Date.now(); img.hidden=false; }
+  else { img.hidden=true; img.removeAttribute('src'); }
+}
+async function setProfile(id){
+  try{ const r=await api('/api/profile',{id:id||null}); ACTIVE_PROFILE=r.active||null;
+    $('#profileSel').classList.toggle('unset', !ACTIVE_PROFILE);
+    updateProfileImg();
+    if(ACTIVE_PROFILE){ const o=$('#profileSel').selectedOptions[0]; toast('Dispatcher: '+(o?o.text:ACTIVE_PROFILE)); }
+    syncTally();
+  }catch(e){}
+}
+// Clear everything (board VINs, SD matches, staged connections) — settings "Clear board".
+async function clearBoard(){
+  if(!confirm('Clear the current board, all SuperDispatch matches, and staged connections?\nThis cannot be undone.')) return;
+  const btn=$('#clearBtn'); if(btn) btn.disabled=true;
+  try{ await fetch('/api/reset',{method:'POST'}); await load(); toast('Cleared the board, matches & connections');
+    if($('#clearMsg')) $('#clearMsg').textContent='Cleared.'; }
+  catch(e){ toast('Could not clear'); }
+  finally{ if(btn) btn.disabled=false; setTimeout(()=>{ if($('#clearMsg')) $('#clearMsg').textContent=''; },2500); }
+}
+// LIVE post of a single shipment (prod test) — only on the topmost row.
+async function postLive(ev, number){
+  ev.stopPropagation();                               // don't open the route
+  if(!confirm('LIVE post shipment '+number+' to SuperDispatch (PRODUCTION)?\nThis creates one real order.')) return;
+  try{ const r=await api('/api/post-live',{number});
+    toast((r.vins||0)+' VIN(s) successfully posted to SuperDispatch');
+  }catch(e){ /* api() already toasted the error */ }
 }
 
 // ----- consolidation: stage to-be VINs onto an existing SD shipment (matches come
@@ -1152,7 +1234,10 @@ async function unstageConsol(vin){
 //   • running & VINs landing  -> GREEN fill + blinking dots
 //   • stalled / stopped early -> AMBER fill, click to resume (re-read the Excel)
 //   • all VINs processed      -> green "Post to SuperDispatch" button
-const STALL_MS = 30000;          // no new VINs for this long while "running" => stalled
+const STALL_MS = 60000;          // no new VINs for this long while "running" => stalled.
+                                 // Kept above a single VIN's worst-case retry (search +
+                                 // BOL-download timeouts) so a slow tail isn't mistaken
+                                 // for a stuck run while the pipeline is still working.
 const RUN_DEFAULTS = {create:true, download_bols:false, live:false, workers:4, limit:0, sheet:''};
 let _runPoll=null, _runStarted=0, _lastProcessed=-1, _lastChange=0;
 
@@ -1213,6 +1298,11 @@ async function startRun(excelPath){
 // blue Excel+ / the small "+" : pick a file and run it FRESH. Loading a new sheet
 // replaces the current board, so confirm first when one already exists.
 async function pickAndRun(){
+  if(!ACTIVE_PROFILE){
+    toast('Select a dispatcher profile first (top-left).');
+    const sel=$('#profileSel'); if(sel){ sel.classList.add('unset'); sel.focus(); }
+    return;
+  }
   let t; try{ t=await fetch('/api/tally').then(r=>r.json()); }catch(e){ t={}; }
   if(t && t.total && !confirm('Load a different Excel? This clears the current board.')) return;
   let r; try{ r=await fetch('/api/pick-excel',{method:'POST'}).then(x=>x.json()); }
@@ -1231,10 +1321,18 @@ async function resumeRun(){
   toast('Resuming '+(t.active_excel_name||'Excel')+'…');
   await startRun(t.active_excel);
 }
-async function doPost(){      // dummy for now — exercises the (dry-run) post backend
-  try{ const r=await api('/api/post',{});
-    toast(`Built ${r.count} shipment payload(s) — dry-run, nothing sent (post not wired yet).`); }
-  catch(e){}
+// Post EVERYTHING live to SuperDispatch, then clear the board (spares are kept).
+async function doPost(){
+  if(!confirm('Post ALL staged shipments LIVE to SuperDispatch (production)?\nThis creates real orders, then clears the board. Spares are kept; anything that fails stays on the board.')) return;
+  const el=$('#tally'); if(el) el.innerHTML='<span class="counter green"><span class="lbl">Posting…</span></span>';
+  try{
+    const r=await api('/api/post-all',{});
+    let msg=(r.posted_vins||0)+' VIN(s) successfully posted to SuperDispatch';
+    if(r.failed && r.failed.length) msg+=` — ${r.failed.length} failed (kept on the board)`;
+    toast(msg);
+  }catch(e){ /* api() already toasted */ }
+  await load();        // board cleared server-side -> re-render (spares remain)
+  syncTally();
 }
 function _priceVal(value){ const v=value.trim(); return v===''?null:v.replace(/[^0-9.]/g,''); }
 async function setOrderPrice(number, value){
@@ -1284,6 +1382,7 @@ function startLive(){
 fetch('/api/env').then(r=>r.json()).then(d=>{
   $('#env').textContent='SD_ENV: '+d.sd_env;
 }).catch(()=>{});
+loadProfiles();      // populate the dispatcher dropdown + restore the active one
 load();
 startLive();
 syncRunBar();        // if a run is already in progress, pick up its progress bar

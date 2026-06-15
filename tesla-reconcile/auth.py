@@ -139,6 +139,43 @@ def close_chrome(browser, proc) -> None:
 
 
 # --------------------------------------------------------------------------
+# Ghost mode: force the window off-screen *after* startup
+# --------------------------------------------------------------------------
+# Coordinates far off any monitor on the Windows virtual desktop (valid range is
+# roughly ±32767). Width/height are kept normal so the window is a real, painted
+# window — just nowhere a display can show it.
+_OFFSCREEN = {"left": -32000, "top": -32000, "width": 1560, "height": 920,
+              "windowState": "normal"}
+
+
+def _park_offscreen(ctx) -> None:
+    """Move the automation window off-screen via CDP.
+
+    The --window-position launch flag is NOT enough on Windows: Chrome's startup
+    WindowSizer drags any off-screen window back onto a connected display (so on a
+    two-monitor setup a sliver stays visible), and a persistent profile can restore
+    the last *visible* bounds and ignore the flag entirely. Setting the bounds over
+    CDP after startup bypasses the sizer and is authoritative. windowState stays
+    "normal" (NOT minimized) so Chrome's occlusion logic doesn't freeze the
+    background tabs mid-run — the whole reason we hide rather than minimize."""
+    # Need at least one page target to resolve a window id. An auto-launched
+    # Chrome has its initial tab here; if not, anchor one so the window exists and
+    # is parked before the caller opens its tabs (which reuse this same window).
+    pages = list(ctx.pages) or [ctx.new_page()]
+    moved: set = set()
+    for page in pages:
+        try:
+            sess = ctx.new_cdp_session(page)
+            wid = sess.send("Browser.getWindowForTarget")["windowId"]
+            if wid in moved:
+                continue
+            sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": _OFFSCREEN})
+            moved.add(wid)
+        except Exception:                                # noqa: BLE001 - best-effort hide
+            pass
+
+
+# --------------------------------------------------------------------------
 # The context manager every script uses
 # --------------------------------------------------------------------------
 @contextmanager
@@ -148,6 +185,10 @@ def browser_context():
             proc = ensure_chrome()
             browser = p.chromium.connect_over_cdp(config.CDP_URL)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            # In ghost mode, drag the window off-screen now (and keep it there) so
+            # it never shows on either monitor. No-op under true --headless.
+            if config.WINDOW_MODE == "ghost" and not config.HEADLESS:
+                _park_offscreen(ctx)
             try:
                 yield ctx
             finally:
