@@ -162,16 +162,39 @@ def _norm(s: str) -> str:
     return re.sub(r"\s*\[\d+\]\s*$", "", " ".join((s or "").split())).lower()
 
 
-def _apply_multiselect(page: Page, label: str, want, select_all: bool = False) -> None:
-    """Open `label` and make its selection EXACTLY right. With select_all, every option
-    ends selected; otherwise exactly the options whose text is in `want` are selected
-    and all others deselected. Selected state is read from each tsl-option's class
-    ('tsl-option-selected'); clicking toggles, so we only click options that must
-    change — meaning Delivered gets unchecked if it was on, and never re-checked."""
+def _wait_options(page: Page, settle_ms: int = 500, timeout_ms: int = 8000) -> int:
+    """Wait for the open dropdown's options to finish rendering. The alert options load
+    their [count] badges asynchronously and can appear in batches, so we wait until the
+    option count is non-zero AND stable across two checks (or the timeout). Returns the
+    final option count."""
+    opts = page.locator(".cdk-overlay-pane tsl-option")
+    last, waited = -1, 0
+    while waited < timeout_ms:
+        c = opts.count()
+        if c > 0 and c == last:
+            return c
+        last = c
+        page.wait_for_timeout(settle_ms)
+        waited += settle_ms
+    return opts.count()
+
+
+def _apply_multiselect(page: Page, label: str, want=None,
+                       select_all: bool = False, exclude=None) -> None:
+    """Open `label` and make its selection EXACTLY right, then close cleanly.
+
+    - select_all=True selects every option EXCEPT any whose text is in `exclude`
+      (so an excluded option gets unchecked if it was on, and never re-checked).
+    - otherwise exactly the options whose text is in `want` are selected, all others
+      deselected.
+    Selected state is read from each tsl-option's 'tsl-option-selected' class; clicking
+    toggles, so we only click the options that must change."""
     if not _open_filter(page, label):
         print(f"  WARN: '{label}' filter not found — leaving it as-is.")
         return
+    _wait_options(page)                                     # let all options render first
     wants = {_norm(w) for w in (want or [])}
+    excludes = {_norm(e) for e in (exclude or [])}
     opts = page.locator(".cdk-overlay-pane tsl-option")
     for i in range(opts.count()):
         o = opts.nth(i)
@@ -182,7 +205,7 @@ def _apply_multiselect(page: Page, label: str, want, select_all: bool = False) -
         if not t:
             continue
         selected = "tsl-option-selected" in (o.get_attribute("class") or "")
-        should = True if select_all else (t in wants)
+        should = (t not in excludes) if select_all else (t in wants)
         if should != selected:                              # only click what must change
             try:
                 o.scroll_into_view_if_needed()
@@ -194,8 +217,9 @@ def _apply_multiselect(page: Page, label: str, want, select_all: bool = False) -
 
 
 def configure_filters(page: Page) -> None:
-    """Alerts = all; Status = Tendered + In Transit + At Destination (NEVER Delivered)."""
-    _apply_multiselect(page, "Alerts", None, select_all=True)
+    """Alerts = every option EXCEPT 'No Action Needed'; Status = Tendered + In Transit
+    + At Destination (NEVER Delivered)."""
+    _apply_multiselect(page, "Alerts", select_all=True, exclude=["No Action Needed"])
     _apply_multiselect(page, "Status", STATUS_WANT)
 
 
