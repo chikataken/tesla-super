@@ -1,0 +1,9 @@
+playwright>=1.44
+anthropic>=0.40
+python-dotenv>=1.0
+Pillow>=10.0
+pytesseract>=0.3.10     # fallback OCR engine (set OCR_ENGINE=tesseract to use)
+easyocr>=1.7            # DEFAULT OCR engine — deep-learning scene-text reader; reads
+                        # photographed VIN stickers / windshield strips far better than
+                        # Tesseract. Pulls in torch (large download, ~1GB).
+pgeocode>=0.4          # offline US ZIP -> lat/long for the delivery-ZIP distance check

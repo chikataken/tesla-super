@@ -1,0 +1,173 @@
+"""
+Persistent-auth browser context.
+
+Two modes, selected by AUTH_MODE in .env:
+
+* "cdp" (default on Windows) — attach over CDP to the REAL installed Chrome.
+  If nothing is listening on the debug port, a Chrome is auto-launched on a
+  dedicated persistent profile (CDP_PROFILE_DIR) and closed again when done.
+  Because it's the real browser on a real, logged-in profile,
+  navigator.webdriver stays false, the fingerprint/codecs/cookies are genuine,
+  and Tesla's captcha doesn't stall the run. The captcha only appears once, at
+  the manual login, which a human does (run_login.py).
+
+* "launch" (default elsewhere; what worked on the Mac) — Playwright launches a
+  persistent context on USER_DATA_DIR (bundled Chromium, or the real installed
+  browser if BROWSER_CHANNEL is set).
+
+Either way: log in manually once and the profile persists the session.
+No passwords are ever stored or typed by the script.
+"""
+from contextlib import contextmanager
+import os
+import subprocess
+import time
+import urllib.request
+
+from playwright.sync_api import sync_playwright
+
+import config
+
+
+# --------------------------------------------------------------------------
+# CDP helpers
+# --------------------------------------------------------------------------
+def _cdp_alive(endpoint: str) -> bool:
+    try:
+        with urllib.request.urlopen(endpoint + "/json/version", timeout=1):
+            return True
+    except Exception:
+        return False
+
+
+def _find_chrome() -> str:
+    if config.CHROME_PATH:
+        return config.CHROME_PATH
+    candidates = [
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/usr/bin/google-chrome",
+    ]
+    for c in candidates:
+        if c and "%" not in c and os.path.exists(c):
+            return c
+    raise FileNotFoundError(
+        "Google Chrome not found — set CHROME_PATH in .env to the full path of chrome.exe"
+    )
+
+
+def ensure_chrome():
+    """Make sure a real Chrome is listening on config.CDP_URL.
+
+    Returns the Popen handle if WE launched it (so the caller closes it when
+    done), or None if one was already running (we leave that one alone).
+    """
+    if _cdp_alive(config.CDP_URL):
+        return None
+    port = config.CDP_URL.rsplit(":", 1)[-1].strip("/")
+    args = [
+        _find_chrome(),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={config.CDP_PROFILE_DIR}",
+        "--window-size=1560,920",
+        "--no-first-run",
+        "--no-default-browser-check",
+    ]
+    if config.WINDOW_MODE == "ghost":
+        # Real headed Chrome, just parked OFF-SCREEN where you can't see it —
+        # fingerprint stays normal (true headless gets detected).
+        # NOT minimized: on Windows, Chrome's native occlusion detection treats
+        # a minimized/hidden window as occluded and FREEZES or discards its tabs
+        # (fatal when multiple tabs run at once). CalculateNativeWinOcclusion=off
+        # plus the backgrounding flags keep every tab live while the window stays
+        # hidden off-screen.
+        args += [
+            "--window-position=-32000,-32000",
+            "--disable-features=CalculateNativeWinOcclusion",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+        ]
+    if config.HEADLESS:
+        args.append("--headless=new")
+    proc = subprocess.Popen(args)
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if _cdp_alive(config.CDP_URL):
+            return proc
+        time.sleep(0.25)
+    proc.kill()
+    raise RuntimeError(f"Chrome did not open the CDP endpoint {config.CDP_URL} within 30s")
+
+
+def close_chrome(browser, proc) -> None:
+    """Shut the automation Chrome down when the run ends — ALWAYS.
+
+    CDP_PROFILE_DIR is a dedicated automation profile, so any Chrome serving the
+    endpoint is ours — including one left over from a previous run that crashed
+    before cleanup (we attach to it with proc=None, and merely detaching used to
+    leave its window and tabs up forever). So: ask the browser to close, VERIFY
+    the endpoint actually went dark, and only if it didn't, kill the process
+    tree (Windows needs taskkill /T — proc.kill() hits just the parent)."""
+    try:
+        browser.new_browser_cdp_session().send("Browser.close")
+    except Exception:
+        pass
+    try:
+        browser.close()              # drop our CDP connection either way
+    except Exception:
+        pass
+    deadline = time.time() + 8
+    while time.time() < deadline and _cdp_alive(config.CDP_URL):
+        time.sleep(0.25)
+    if _cdp_alive(config.CDP_URL):
+        if proc is not None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True)
+            else:
+                proc.kill()
+        else:
+            print("WARN: automation Chrome did not close — close the window manually.")
+    if proc is not None:
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------
+# The context manager every script uses
+# --------------------------------------------------------------------------
+@contextmanager
+def browser_context():
+    with sync_playwright() as p:
+        if config.AUTH_MODE == "cdp":
+            proc = ensure_chrome()
+            browser = p.chromium.connect_over_cdp(config.CDP_URL)
+            ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+            try:
+                yield ctx
+            finally:
+                close_chrome(browser, proc)
+            return
+
+        # --- "launch" mode (the original Mac path) ---
+        kwargs = dict(
+            user_data_dir=config.USER_DATA_DIR,
+            headless=config.HEADLESS,
+            viewport={"width": 1560, "height": 900},
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        # Optionally drive the REAL installed browser (e.g. BROWSER_CHANNEL=chrome)
+        # instead of Playwright's bundled Chromium — full networking/codecs and far
+        # less likely to be flagged by hCaptcha / bot-detection. Empty = bundled.
+        if config.BROWSER_CHANNEL:
+            kwargs["channel"] = config.BROWSER_CHANNEL
+        ctx = p.chromium.launch_persistent_context(**kwargs)
+        try:
+            yield ctx
+        finally:
+            ctx.close()

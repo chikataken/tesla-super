@@ -1,0 +1,309 @@
+"""
+Parse an Excel sheet -> group VINs into shipments -> preview.
+
+    python main.py --excel sheet.xlsx
+    python main.py --excel sheet.xlsx --sheet "Loads"
+
+This stage writes nothing. Later stages (Tesla BOL download, SuperDispatch API
+create) plug in after this preview looks right.
+"""
+import argparse
+import sys
+
+# Accept non-ASCII output on a legacy Windows console; no-op on macOS/Linux.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+import config
+import excel_ingest
+import grouping
+
+
+def _preview(shipments, report, warnings):
+    print("=" * 64)
+    print("COLUMN MAPPING (canonical <- your header):")
+    for canonical, header in sorted(report.column_mapping.items()):
+        print(f"   {canonical:18} <- {header!r}")
+    if report.unmapped_headers:
+        print(f"   (unmapped columns ignored: {report.unmapped_headers})")
+    if report.missing_required:
+        print(f"   !! MISSING REQUIRED COLUMNS: {report.missing_required}")
+
+    print("-" * 64)
+    print(f"Rows: {report.total_rows} total, {report.good_rows} good, "
+          f"{len(report.bad_rows)} with errors")
+    for r in report.bad_rows:
+        print(f"   row {r.row_number}: {'; '.join(r.errors)}")
+
+    if warnings:
+        print("-" * 64)
+        print("GROUPING WARNINGS:")
+        for w in warnings:
+            print(f"   {w}")
+
+    print("-" * 64)
+    print(f"SHIPMENTS: {len(shipments)}")
+    for s in shipments:
+        vins = ", ".join(v.vin for v in s.vehicles)
+        pu = f"{s.pickup.get('city','?')}, {s.pickup.get('state','?')} {s.pickup.get('zip','')}"
+        do = f"{s.delivery.get('city','?')}, {s.delivery.get('state','?')} {s.delivery.get('zip','')}"
+        price = f"${s.price:,.2f}" if s.price is not None else "—"
+        print(f"   [{s.group_key}]  {len(s.vehicles)} veh  {pu}  ->  {do}  "
+              f"{price}  (rows {s.source_rows})")
+        if len(s.vehicles) > 1:
+            print(f"        VINs: {vins}")
+    print("=" * 64)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--excel", default=config.DEFAULT_EXCEL,
+                    help="Path to the .xlsx sheet (defaults to config.DEFAULT_EXCEL)")
+    ap.add_argument("--sheet", default=None, help="Worksheet name (default: first)")
+    ap.add_argument("--download-bols", action="store_true",
+                    help="After preview, open Tesla and download a BOL per VIN's "
+                         "most-recent shipment (deduped by shipment).")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="With --download-bols, only process the first N VINs (0 = all).")
+    ap.add_argument("--workers", type=int, default=4,
+                    help="Parallel browser tabs for BOL downloads (default 4).")
+    ap.add_argument("--create", action="store_true",
+                    help="Build SuperDispatch order payloads from the shipments.")
+    ap.add_argument("--live", action="store_true",
+                    help="With --create, actually POST the orders (otherwise dry-run).")
+    ap.add_argument("--headed", action="store_true",
+                    help="Force a visible, interactive browser window for this run — "
+                         "overrides WINDOW_MODE=ghost / HEADLESS so you can watch it "
+                         "and click things yourself.")
+    args = ap.parse_args()
+    if args.headed:
+        config.WINDOW_MODE = "visible"
+        config.HEADLESS = False
+
+    rows, report = excel_ingest.read_rows(args.excel, args.sheet)
+    shipments, warnings = grouping.build_shipments(rows)
+    _preview(shipments, report, warnings)
+
+    if args.download_bols:
+        import tesla_bol
+        vins = [r.vin for r in rows if r.ok]
+        if args.limit:
+            vins = vins[:args.limit]
+        print(f"\nDownloading BOLs for {len(vins)} VIN(s) on {args.workers} tab(s)...")
+        results = tesla_bol.download_for(vins, workers=args.workers)
+        ok = sum(1 for v in results.values() if v["path"])
+        print(f"\nBOLs: {ok}/{len(results)} VIN(s) have a saved BOL.")
+
+    if args.create:
+        import json
+        import pdf_read
+        import sd_api
+        import tesla_bol
+        dry = not args.live
+
+        import os
+        import datetime
+        import glob
+        import paths
+        orders_dir = os.path.join(paths.OUTPUT_DIR, "orders")
+        os.makedirs(orders_dir, exist_ok=True)
+
+        # Persistence: load the current board (newest staged file) and PRESERVE it.
+        # New VINs are appended as their own new orders; manual splits/positions and
+        # already-staged VINs are left exactly as they are.
+        prior_files = sorted(glob.glob(os.path.join(orders_dir, "*.json")),
+                             key=os.path.getmtime, reverse=True)
+        base = []
+        if prior_files:
+            try:
+                with open(prior_files[0]) as f:
+                    base = json.load(f)
+            except (OSError, ValueError):
+                base = []
+        known_vins = {v.get("vin") for o in base for v in o.get("vehicles", [])
+                      if v.get("vin")}
+        base_numbers = {o.get("number") for o in base if o.get("number")}
+
+        # VINs set aside in the spare workspace (output/spares.json) live off the
+        # board on purpose — treat them as known so a re-run doesn't resurrect them.
+        try:
+            with open(os.path.join(paths.OUTPUT_DIR, "spares.json")) as f:
+                known_vins |= {s.get("vin") for s in json.load(f) if s.get("vin")}
+        except (OSError, ValueError):
+            pass
+
+        # Excel supplies ONLY vin -> (cost, shipment number), in spreadsheet order.
+        # Everything else (route, venue, vehicle) comes from the BOL.
+        ordered_all = [(r.vin, r.get("price"), (r.get("group_id") or "").strip())
+                       for r in rows if r.ok]
+        ordered = [t for t in ordered_all if t[0] not in known_vins]   # skip staged
+        skipped = len(ordered_all) - len(ordered)
+        # Download/populate order: alphabetical by pickup STATE, city as tiebreaker
+        # (from the Excel), so same-state shipments come through together — instead of
+        # spreadsheet order. (tesla_bol preserves this order; it no longer re-sorts.)
+        _pk = {r.vin: ((r.get("pickup_state") or "").strip().lower(),
+                       (r.get("pickup_city") or "").strip().lower())
+               for r in rows if r.ok}
+        ordered.sort(key=lambda t: _pk.get(t[0], ("zzzz", "zzzz")))
+        if args.limit:
+            ordered = ordered[:args.limit]               # limit the NEW VINs
+        vins = [v for v, _, _ in ordered]
+
+        stage = os.path.join(orders_dir,
+                              f"orders_{datetime.datetime.now():%Y%m%d-%H%M%S}.json")
+
+        rec_by_vin = {}
+        bols = set()
+        need_by = {}                                   # vin -> 'Need By' date (from dashboard)
+
+        def _restage():
+            """(Re)group the NEW VINs parsed so far and write base + new to the staged
+            file, so the GUI fills in live as BOLs arrive while everything already on
+            the board stays put. New orders are numbered to avoid existing numbers, so
+            same-route new VINs become their OWN orders rather than joining old ones."""
+            for vin, rec in rec_by_vin.items():        # stamp Need By onto each record
+                if need_by.get(vin):
+                    rec["need_by"] = need_by[vin]
+            orders = sd_api.group_by_route(ordered, rec_by_vin, reserved=base_numbers)
+            payloads = [sd_api.order_payload_from_route(num, chunk) for num, chunk in orders]
+            with open(stage, "w") as f:
+                json.dump(base + payloads, f, indent=2, default=str)
+            return payloads
+
+        # Parse each BOL the moment it lands and restage, so orders appear as they
+        # download instead of all at the end.
+        def _on_bol(shp, path):
+            bols.add(shp)
+            routes_here = set()                         # (pickup_zip, delivery_zip) this BOL adds
+            for rec in pdf_read.extract_records(path):
+                rec_by_vin[rec["vin"]] = rec
+                pz = (rec.get("pickup") or {}).get("zip")
+                dz = (rec.get("delivery") or {}).get("zip")
+                if pz and dz:
+                    routes_here.add((pz, dz))
+            # Purge the BOL PDF now that its data has been read — the staged order
+            # carries everything we need, so the file is just clutter. Set
+            # KEEP_BOLS=true to retain them. (Best-effort: never fail the run on this.)
+            if not config.KEEP_BOLS and path:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            payloads = _restage()
+            # ON THE SPOT: if this BOL's route(s) match a scanned candidate, resolve its
+            # GUID + exact address now and post the match — don't wait for the end.
+            matched = 0
+            if config.SD_SCAN and sd_hits and routes_here:
+                try:
+                    matched = _reconcile_sd(base + payloads, routes_here)
+                except Exception as exc:                # noqa: BLE001
+                    print(f"    SD reconcile error: {exc}")
+            tail = f"; {matched} SD match(es) so far" if matched else ""
+            print(f"    parsed {shp}: {len(rec_by_vin)} new vehicle(s) so far "
+                  f"-> {len(payloads)} new order(s) (+{len(base)} kept){tail}")
+
+        # Prepare the SD scan zip-pairs up front so the scan can run CONCURRENTLY
+        # with the BOL downloads (the scan only needs the Excel routes, not the
+        # BOLs). The exact-address comparison still happens afterwards, once the
+        # board's BOL addresses exist.
+        sd_scan_pairs = None
+        sd_hits: list = []
+        if config.SD_SCAN:
+            sd_scan_pairs = {(r.get("pickup_zip"), r.get("delivery_zip")) for r in rows
+                             if r.ok and r.get("pickup_zip") and r.get("delivery_zip")}
+            print(f"Will scan Posted + Accepted + Pending for {len(sd_scan_pairs)} route "
+                  f"zip-pair(s), concurrently with the BOL downloads.")
+
+        # Incremental SuperDispatch reconcile state. _on_bol calls _reconcile_sd ON THE
+        # SPOT for each BOL's route; a final sweep at the end catches any candidate whose
+        # BOL landed before the concurrent scan had finished populating sd_hits.
+        sd_resolved = {}          # guid -> resolved SD order (stamped loadboard_status)
+        sd_tried_vins = set()     # candidate VINs already looked up (never re-resolved)
+        sd_stats = {"auth_error": None}
+
+        def _reconcile_sd(board_now, route_zips=None):
+            """Resolve scan candidates -> GUID + EXACT address and (re)write
+            output/consolidation_search.json. With route_zips, resolve ONLY the
+            candidates on those (pickup_zip, dropoff_zip) routes (per-BOL, on the spot);
+            without it, resolve every still-pending candidate (final sweep). Returns the
+            count of orders that match a board route exactly (posted/accepted/pending)."""
+            if not config.SD_SCAN:
+                return 0
+            import consolidation
+            todo = {h["vin"]: h["loadboard_status"] for h in sd_hits
+                    if h["vin"] not in sd_tried_vins
+                    and (route_zips is None
+                         or (h.get("pickup_zip"), h.get("dropoff_zip")) in route_zips)}
+            if todo:
+                sd_tried_vins.update(todo)
+                try:
+                    res = consolidation.find_orders_for_vins(list(todo), throttle_s=0)
+                    sd_stats["auth_error"] = res.auth_error or sd_stats["auth_error"]
+                    for o in res.orders:                  # stamp which tab found it
+                        for v in (o.get("vehicles") or []):
+                            vv = v.get("vin")
+                            if vv and vv in todo:
+                                o["loadboard_status"] = todo[vv]
+                                break
+                        if o.get("guid"):
+                            sd_resolved[o["guid"]] = o
+                except Exception as exc:                  # noqa: BLE001
+                    print(f"    SD resolve error: {exc}")
+            annotated = consolidation.match_against_routes(
+                list(sd_resolved.values()), board_now, use_street=True,
+                my_vins=[h["vin"] for h in sd_hits]) if sd_resolved else []
+            with open(os.path.join(paths.OUTPUT_DIR, "consolidation_search.json"), "w") as f:
+                json.dump({"orders": annotated, "checked_vins": len(sd_tried_vins),
+                           "found_vins": [], "not_found_vins": [], "errors": [],
+                           "auth_error": sd_stats["auth_error"]}, f, indent=2, default=str)
+            return sum(1 for a in annotated if a.get("is_candidate"))
+
+        if skipped:
+            print(f"\nSkipping {skipped} VIN(s) already on the board.")
+        print(f"Fetching BOLs for {len(vins)} new VIN(s) (source of shipment info)...")
+        _restage()                                     # preserve base up front
+        if vins:
+            tesla_bol.download_for(vins, workers=args.workers, on_bol=_on_bol,
+                                   need_by=need_by, sd_scan_pairs=sd_scan_pairs,
+                                   sd_hits=sd_hits)
+        elif config.SD_SCAN:
+            # No new VINs to download -> no concurrent BOL run; scan standalone.
+            import sd_scrape
+            sd_hits = sd_scrape.scan_loadboard(sd_scan_pairs)
+        payloads = _restage()                          # final
+        print(f"\n=== {len(payloads)} new order(s) from {len(bols)} BOL(s); "
+              f"{skipped} VIN(s) skipped; {len(base) + len(payloads)} order(s) total "
+              f"on the board (SD_ENV={config.SD_ENV}) -> {stage} ===")
+
+        # Final SD reconcile sweep — the per-BOL pass (in _on_bol) already matched on the
+        # spot; this catches any scan candidate whose BOL landed before the concurrent
+        # scan finished populating sd_hits. Best-effort: logs and is skipped on error.
+        if config.SD_SCAN:
+            try:
+                total = _reconcile_sd(base + payloads, None)
+                print(f"  SD matches: {total} order(s) match a board route exactly "
+                      f"(posted/accepted/pending) -> output/consolidation_search.json")
+            except Exception as e:                       # noqa: BLE001
+                print(f"  loadboard reconcile skipped (error): {e}")
+
+        if dry:
+            print("DRY-RUN — nothing sent. Open the file above to review the exact "
+                  "payloads, then re-run with --live to send them.")
+        else:
+            created = 0
+            for payload in payloads:
+                try:
+                    res = sd_api.create_order(payload, dry_run=False)
+                    guid = res.get("guid") or (res.get("data") or {}).get("guid")
+                    print(f"  [{payload['number']}] created -> guid={guid}")
+                    created += 1
+                except sd_api.SDError as e:
+                    print(f"  [{payload['number']}] ERROR: {e}")
+            print(f"\nCreated {created}/{len(payloads)} orders.")
+
+
+if __name__ == "__main__":
+    main()
