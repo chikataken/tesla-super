@@ -46,6 +46,10 @@ from auth import browser_context
 
 DASHBOARD_URL = "https://suppliers.teslamotors.com/logistics/dispatchdashboard2"
 SAFETY_MAX = 20
+# The board's search is slow to return rows; wait up to this long for shipment cards
+# to appear before counting (so we never count an empty, still-loading grid and exit
+# early). A genuinely empty result just waits this out. Override with SHIPMENTS_WAIT_S.
+SHIPMENTS_TIMEOUT_MS = int(os.getenv("SHIPMENTS_WAIT_S", "60")) * 1000
 
 BADGE_ETA_TODAY = "ETA Today"
 BADGE_PICKUP_TODAY = "Pickup Date Today"
@@ -234,16 +238,39 @@ def _click_search(page: Page) -> None:
 
 
 # ----------------------- page actions -----------------------
+def _wait_for_shipments(page: Page, timeout_ms: int = SHIPMENTS_TIMEOUT_MS) -> int:
+    """Wait for the search results to populate. The query is slow, so we wait (up to
+    timeout) for the first shipment card to appear, then let the row count settle. Fast
+    when results come back quickly; patient when slow. Returns the card count (0 means
+    a genuinely empty result after the full wait)."""
+    grid = page.locator(".grid-entry")
+    waited = 0
+    while waited < timeout_ms:                      # phase 1: wait for the first card
+        if grid.count() > 0:
+            break
+        page.wait_for_timeout(1000)
+        waited += 1000
+    last = -1                                        # phase 2: let lazy rows settle
+    for _ in range(12):
+        c = grid.count()
+        if c == last:
+            break
+        last = c
+        page.wait_for_timeout(800)
+    return grid.count()
+
+
 def load_dashboard(page: Page):
     page.goto(DASHBOARD_URL)
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(3500)
-    # Set the filters every load (a fresh page may reset them): Alerts = all, Status =
-    # Tendered / In Transit / At Destination (NOT Delivered), then run the search.
+    # Set the filters every load (a fresh page may reset them): Alerts = all except
+    # 'No Action Needed', Status = Tendered / In Transit / At Destination, then search.
     configure_filters(page)
     _click_search(page)
     page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(3000)
+    n = _wait_for_shipments(page)                   # patient: the board is slow to fill
+    print(f"  shipments loaded: {n}")
 
 
 def count_badges(page: Page) -> tuple[int, int]:
