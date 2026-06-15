@@ -114,21 +114,112 @@ def _fill_dates(dialog, placeholder: str, value: str, page: Page):
         page.wait_for_timeout(1800)                 # spinner loads Time/Reason options
 
 
+# ----------------------- search filters (Alerts / Status) -----------------------
+# Status has exactly four options (verified live): Tendered, In Transit, Delivered,
+# At Destination. We pull the three in-flight ones and DELIBERATELY exclude Delivered
+# (a delivered shipment is done — never bump its dates). Alerts is selected in full.
+STATUS_WANT = ["Tendered", "In Transit", "At Destination"]      # NOT "Delivered"
+
+
+def _close_overlay(page: Page) -> None:
+    """Fully close any open dropdown overlay. After selecting options, this portal can
+    leave a transparent `.cdk-overlay-backdrop` that swallows the NEXT click — so the
+    second dropdown (Status) never opens. Escape, then click the backdrop away, until
+    it's gone."""
+    for _ in range(3):
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
+        page.wait_for_timeout(200)
+        bd = page.locator(".cdk-overlay-backdrop")
+        try:
+            if bd.count() == 0:
+                return
+            bd.first.click(timeout=800)
+        except Exception:
+            return
+        page.wait_for_timeout(200)
+
+
+def _open_filter(page: Page, label: str) -> bool:
+    """Open the Alerts/Status multiselect that follows the given label text."""
+    _close_overlay(page)                                # clear any stale overlay first
+    ctrl = page.locator(
+        f"xpath=(//*[normalize-space(text())={label!r}])[1]"
+        "/following::*[self::tsl-multiselect or self::tsl-select][1]").first
+    try:
+        ctrl.scroll_into_view_if_needed()
+        ctrl.click()
+        page.wait_for_timeout(600)
+        return True
+    except Exception:
+        return False
+
+
+def _norm(s: str) -> str:
+    """Lowercase + collapse whitespace, dropping any trailing '[count]' badge."""
+    return re.sub(r"\s*\[\d+\]\s*$", "", " ".join((s or "").split())).lower()
+
+
+def _apply_multiselect(page: Page, label: str, want, select_all: bool = False) -> None:
+    """Open `label` and make its selection EXACTLY right. With select_all, every option
+    ends selected; otherwise exactly the options whose text is in `want` are selected
+    and all others deselected. Selected state is read from each tsl-option's class
+    ('tsl-option-selected'); clicking toggles, so we only click options that must
+    change — meaning Delivered gets unchecked if it was on, and never re-checked."""
+    if not _open_filter(page, label):
+        print(f"  WARN: '{label}' filter not found — leaving it as-is.")
+        return
+    wants = {_norm(w) for w in (want or [])}
+    opts = page.locator(".cdk-overlay-pane tsl-option")
+    for i in range(opts.count()):
+        o = opts.nth(i)
+        try:
+            t = _norm(o.inner_text())
+        except Exception:
+            continue
+        if not t:
+            continue
+        selected = "tsl-option-selected" in (o.get_attribute("class") or "")
+        should = True if select_all else (t in wants)
+        if should != selected:                              # only click what must change
+            try:
+                o.scroll_into_view_if_needed()
+                o.click()
+                page.wait_for_timeout(200)
+            except Exception:
+                pass
+    _close_overlay(page)                                    # close cleanly for the next dropdown
+
+
+def configure_filters(page: Page) -> None:
+    """Alerts = all; Status = Tendered + In Transit + At Destination (NEVER Delivered)."""
+    _apply_multiselect(page, "Alerts", None, select_all=True)
+    _apply_multiselect(page, "Status", STATUS_WANT)
+
+
+def _click_search(page: Page) -> None:
+    try:
+        page.get_by_role("button", name="Search", exact=True).first.click()
+    except Exception:
+        try:
+            page.locator("button.search-btn").first.click()
+        except Exception:
+            pass
+
+
 # ----------------------- page actions -----------------------
 def load_dashboard(page: Page):
     page.goto(DASHBOARD_URL)
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(3500)
-    # If the grid is empty, click the blue Search ONCE (change no other filter).
-    if page.get_by_text(BADGE_ETA_TODAY).count() == 0 and \
-       page.get_by_text(BADGE_PICKUP_TODAY).count() == 0 and \
-       page.locator(".grid-entry").count() == 0:
-        try:
-            page.get_by_role("button", name="Search", exact=True).first.click()
-            page.wait_for_load_state("networkidle")
-            page.wait_for_timeout(3000)
-        except Exception:
-            pass
+    # Set the filters every load (a fresh page may reset them): Alerts = all, Status =
+    # Tendered / In Transit / At Destination (NOT Delivered), then run the search.
+    configure_filters(page)
+    _click_search(page)
+    page.wait_for_load_state("networkidle")
+    page.wait_for_timeout(3000)
 
 
 def count_badges(page: Page) -> tuple[int, int]:
