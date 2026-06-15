@@ -7,7 +7,8 @@
 # this same exe with a --pipeline marker (see app.py) to run the pipeline.
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-datas = [('static', 'static')]          # the single-file frontend, served at /
+datas = [('static', 'static'),          # the single-file frontend, served at /
+         ('profiles', 'profiles')]      # dispatcher profiles.json + avatar images (seed)
 binaries = []
 hiddenimports = []
 
@@ -35,7 +36,7 @@ hiddenimports += [
 hiddenimports += [
     'app', 'main', 'config', 'settings_store', 'paths', 'chrome_cdp', 'auth',
     'tesla_bol', 'sd_api', 'sd_scrape', 'consolidation', 'excel_ingest',
-    'grouping', 'models', 'pdf_read', 'transit',
+    'grouping', 'models', 'pdf_read', 'transit', 'profiles',
 ]
 
 a = Analysis(

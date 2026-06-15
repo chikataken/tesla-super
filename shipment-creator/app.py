@@ -324,9 +324,10 @@ def api_profile_image(pid: str):
     """Serve a dispatcher's avatar from profiles/images/<id>.<ext> (case-insensitive
     on the filename, so 'Soyo.png' matches profile id 'soyo'), if present."""
     import profiles
-    base = os.path.join(profiles.PROFILES_DIR, "images")
     exts = {"png", "jpg", "jpeg", "webp", "gif"}
-    if os.path.isdir(base):
+    for base in profiles.image_dirs():
+        if not os.path.isdir(base):
+            continue
         for fn in os.listdir(base):
             stem, ext = os.path.splitext(fn)
             if stem.lower() == pid.lower() and ext.lower().lstrip(".") in exts:

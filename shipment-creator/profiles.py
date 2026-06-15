@@ -14,6 +14,7 @@ by a board reset.
 import json
 import os
 import re
+import shutil
 
 import paths
 
@@ -22,6 +23,10 @@ PROFILES_PATH = os.path.join(PROFILES_DIR, "profiles.json")
 # Active selection lives at the data-dir root (NOT under output/), so a board reset
 # leaves the chosen dispatcher in place.
 ACTIVE_PATH = os.path.join(paths.DATA_DIR, "active_profile.json")
+# Bundled (read-only) copy shipped with the app. In dev this is the same source
+# folder; in the frozen build it's PyInstaller's unpack dir, used to seed the
+# writable copy and to fall back for avatar images.
+_BUNDLED_DIR = paths.resource_path("profiles")
 
 # Seeded on first run if profiles.json doesn't exist yet. Fill in `phone` (the number
 # the <dispatcher> token becomes) and `states` (2-letter codes this dispatcher pulls
@@ -38,8 +43,24 @@ def _seed_if_missing() -> None:
     if os.path.exists(PROFILES_PATH):
         return
     os.makedirs(PROFILES_DIR, exist_ok=True)
+    # Prefer the bundled profiles.json (carries the configured phones/states) over the
+    # bare defaults — but never copy a file onto itself (dev: bundle == writable).
+    bundled = os.path.join(_BUNDLED_DIR, "profiles.json")
+    if os.path.exists(bundled) and os.path.abspath(bundled) != os.path.abspath(PROFILES_PATH):
+        shutil.copyfile(bundled, PROFILES_PATH)
+        return
     with open(PROFILES_PATH, "w", encoding="utf-8") as f:
         json.dump(DEFAULT_PROFILES, f, indent=2)
+
+
+def image_dirs() -> list:
+    """Folders to look in for a dispatcher avatar: the writable profiles dir first,
+    then the bundled one (frozen build), de-duped."""
+    dirs = [os.path.join(PROFILES_DIR, "images")]
+    bundled = os.path.join(_BUNDLED_DIR, "images")
+    if os.path.abspath(bundled) != os.path.abspath(dirs[0]):
+        dirs.append(bundled)
+    return dirs
 
 
 def list_profiles() -> list:
