@@ -90,6 +90,12 @@ def ensure_chrome():
             "--disable-renderer-backgrounding",
             "--disable-background-timer-throttling",
         ]
+    elif not config.HEADLESS:
+        # Visible (--headed): force an ON-SCREEN position. The persistent profile may
+        # have a saved OFF-SCREEN placement from a previous ghost run, which Chrome
+        # would otherwise restore — leaving the "visible" window where you can't see it.
+        b = _onscreen_bounds()
+        args.append(f"--window-position={b['left']},{b['top']}")
     if config.HEADLESS:
         args.append("--headless=new")
     proc = subprocess.Popen(args)
@@ -148,6 +154,46 @@ _OFFSCREEN = {"left": -32000, "top": -32000, "width": 1560, "height": 920,
               "windowState": "normal"}
 
 
+def _onscreen_bounds() -> dict:
+    """A visible, centered window placement on the primary monitor (safe default if
+    the screen size can't be read)."""
+    sw, sh = 1920, 1080
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        try:
+            u.SetProcessDPIAware()
+        except Exception:                                # noqa: BLE001
+            pass
+        sw, sh = int(u.GetSystemMetrics(0)), int(u.GetSystemMetrics(1))
+    except Exception:                                    # noqa: BLE001 - non-Windows / no ctypes
+        pass
+    return {"left": max(0, (sw - 1560) // 2), "top": max(0, (sh - 920) // 2),
+            "width": 1560, "height": 920, "windowState": "normal"}
+
+
+def _show_onscreen(ctx) -> None:
+    """Force the automation window ON-SCREEN via CDP (visible / --headed mode).
+
+    Mirror of _park_offscreen: the --window-position launch flag can be ignored when a
+    persistent profile restores an off-screen placement (left by a prior ghost run),
+    and it can't help at all when we attach to an already-running Chrome. Setting the
+    bounds over CDP after startup is authoritative, so the window is actually visible."""
+    bounds = _onscreen_bounds()
+    pages = list(ctx.pages) or [ctx.new_page()]
+    moved: set = set()
+    for page in pages:
+        try:
+            sess = ctx.new_cdp_session(page)
+            wid = sess.send("Browser.getWindowForTarget")["windowId"]
+            if wid in moved:
+                continue
+            sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": bounds})
+            moved.add(wid)
+        except Exception:                                # noqa: BLE001 - best-effort show
+            pass
+
+
 def _park_offscreen(ctx) -> None:
     """Move the automation window off-screen via CDP.
 
@@ -185,10 +231,14 @@ def browser_context():
             proc = ensure_chrome()
             browser = p.chromium.connect_over_cdp(config.CDP_URL)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            # In ghost mode, drag the window off-screen now (and keep it there) so
-            # it never shows on either monitor. No-op under true --headless.
-            if config.WINDOW_MODE == "ghost" and not config.HEADLESS:
-                _park_offscreen(ctx)
+            # Place the window: ghost -> off-screen (hidden); visible/--headed ->
+            # on-screen (override any restored off-screen bounds). No-op under
+            # true --headless (no window).
+            if not config.HEADLESS:
+                if config.WINDOW_MODE == "ghost":
+                    _park_offscreen(ctx)
+                else:
+                    _show_onscreen(ctx)
             try:
                 yield ctx
             finally:
