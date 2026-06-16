@@ -60,6 +60,9 @@ BADGE_DRIVER_NEEDED = "Driver Needed"           # only assign a driver when THIS
 # For now we leave ETAs ALONE and only bump pickup dates. Flip to True (or set
 # PROCESS_ETA=true in the env) to re-enable the ETA-Today bump.
 PROCESS_ETA = os.getenv("PROCESS_ETA", "false").strip().lower() in {"1", "true", "yes"}
+# Max shipments selected per "Update Pickup Date" dialog (the popup renders one block
+# per selected shipment, so we update the board in batches this size).
+PICKUP_CHUNK = 50
 
 # Driver assignment: every "Driver Needed" unit (its driver field reads "No Driver
 # Selected") gets this driver. Override with CLEANUP_DRIVER in .env. The name is
@@ -266,6 +269,62 @@ def _wait_for_shipments(page: Page, timeout_ms: int = SHIPMENTS_TIMEOUT_MS) -> i
     return grid.count()
 
 
+def _set_page_size_max(page: Page) -> None:
+    """Set the paginator's 'Items per page' to its LARGEST option (e.g. 500) so the
+    entire result set lives on ONE page. Otherwise the board shows 50 at a time and we
+    only ever act on page 1 — pages 2..N get missed."""
+    try:
+        ctrl = page.locator(
+            "xpath=(//*[contains(normalize-space(.),'Items per page')])[last()]"
+            "/following::*[self::tsl-select or self::mat-select or self::select][1]").first
+        ctrl.scroll_into_view_if_needed()
+        ctrl.click()
+        page.wait_for_timeout(700)
+        opts = page.locator(".cdk-overlay-pane tsl-option, .cdk-overlay-pane mat-option, "
+                            ".cdk-overlay-pane [role='option']")
+        best_i, best = -1, -1
+        for i in range(opts.count()):
+            t = " ".join((opts.nth(i).inner_text() or "").split())
+            if t.isdigit() and int(t) > best:
+                best, best_i = int(t), i
+        if best_i >= 0:
+            opts.nth(best_i).scroll_into_view_if_needed()
+            opts.nth(best_i).click()
+            print(f"  page size -> {best}")
+        _close_overlay(page)
+    except Exception as e:                          # noqa: BLE001
+        print(f"  WARN: couldn't set page size ({type(e).__name__}) — using 50/page")
+
+
+def _result_total(page: Page):
+    """Parse the paginator's 'X - Y of N' into N (total results), or None."""
+    try:
+        txt = " ".join((page.locator("[class*=paginat]").first.inner_text() or "").split())
+        m = re.search(r"of\s+(\d+)", txt)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _wait_for_full_page(page: Page, timeout_ms: int = 120000) -> int:
+    """After switching to the big page size, wait until EVERY result row is rendered
+    (match the 'of N' total), nudging lazy rendering. The big page is slow to fill."""
+    total = _result_total(page)
+    waited = 0
+    while waited < timeout_ms:
+        page.mouse.wheel(0, 8000)
+        c = page.locator(".grid-entry").count()
+        if total and c >= total:
+            break
+        if not total and c > 0:                     # no indicator -> settle on any rows
+            break
+        page.wait_for_timeout(2000)
+        waited += 2000
+    page.mouse.wheel(0, -400000)                    # back to the top
+    page.wait_for_timeout(500)
+    return page.locator(".grid-entry").count()
+
+
 def load_dashboard(page: Page):
     page.goto(DASHBOARD_URL)
     page.wait_for_load_state("networkidle")
@@ -275,18 +334,17 @@ def load_dashboard(page: Page):
     configure_filters(page)
     _click_search(page)
     page.wait_for_load_state("networkidle")
-    n = _wait_for_shipments(page)                   # patient: the board is slow to fill
-    print(f"  shipments loaded: {n}")
+    _wait_for_shipments(page)                       # page-1 results appear (quick)
+    _set_page_size_max(page)                        # put ALL results on one page
+    total = _wait_for_full_page(page)               # patient: the big page is slow to fill
+    print(f"  shipments loaded (all pages): {total}")
 
 
 def count_badges(page: Page) -> tuple[int, int]:
-    """(ETA Today count, Pickup Date Today + Pickup Date Late count). Pickup includes
-    LATE because both pickup badges use the same "Update Pickup Date" action and are
-    bumped together — a late unit was being skipped before."""
-    for _ in range(8):                # render lazy rows
-        page.mouse.wheel(0, 5000)
-        page.wait_for_timeout(350)
-    page.mouse.wheel(0, -60000)
+    """(ETA Today count, Pickup Date Today + Pickup Date Late count) across the WHOLE
+    board — load_dashboard has already put every result on one page and rendered it,
+    so these counts cover all pages, not just the first 50. Pickup includes LATE
+    because both pickup badges share the one "Update Pickup Date" action."""
     eta = page.get_by_text(BADGE_ETA_TODAY, exact=True).count()
     pickup = (page.get_by_text(BADGE_PICKUP_TODAY, exact=True).count()
               + page.get_by_text(BADGE_PICKUP_LATE, exact=True).count())
@@ -297,14 +355,15 @@ def select_cards(page: Page, badge_text: str) -> int:
     return select_cards_any(page, [badge_text])
 
 
-def select_cards_any(page: Page, badge_texts: list[str]) -> int:
-    """Check the 'Select All Stops' box on every card containing ANY of badge_texts,
-    each card EXACTLY ONCE (so a card matching two badges isn't toggled back off).
-    Lets us select all Pickup Date Today + Pickup Date Late units, then hit "Update
-    Pickup Date" a single time."""
+def select_cards_any(page: Page, badge_texts: list[str], limit: int | None = None) -> int:
+    """Check the 'Select All Stops' box on cards containing ANY of badge_texts, each
+    card EXACTLY ONCE. With `limit`, stop after that many (so one Update dialog handles
+    a manageable batch — the popup renders one block per selected shipment)."""
     cards = page.locator(".grid-entry")
     n = 0
     for i in range(cards.count()):
+        if limit and n >= limit:
+            break
         c = cards.nth(i)
         try:
             text = c.inner_text()
@@ -343,20 +402,29 @@ def process_eta(page: Page, eta_date: str) -> int:
 
 
 def process_pickup(page: Page, pickup_date: str) -> int:
-    # Select Pickup Date Today AND Pickup Date Late together, then Update once.
-    n = select_cards_any(page, [BADGE_PICKUP_TODAY, BADGE_PICKUP_LATE])
-    if n == 0:
-        return 0
-    page.get_by_role("button", name="Update Pickup Date").first.click()
-    page.wait_for_timeout(1200)
-    dlg = _dialog(page)
-    _fill_dates(dlg, "Mon DD YYYY", pickup_date, page)
-    try:
-        _set_dropdowns(page, dlg, "Select Reason", "Other")
-    except Exception:
-        print("  WARN: 'Other' unavailable for a pickup block — pick a reason manually")
-    submit_dialog(page)
-    return n
+    """Bump every Pickup Date Today/Late unit on the board to `pickup_date`. Works in
+    CHUNKS of PICKUP_CHUNK: select that many, Update once, submit, then re-scan — so the
+    whole board (all pages, now on one page) is processed without overloading the update
+    dialog (which renders one block per selected shipment)."""
+    total = 0
+    for _ in range(40):                               # chunk cap (40 * chunk units)
+        n = select_cards_any(page, [BADGE_PICKUP_TODAY, BADGE_PICKUP_LATE],
+                             limit=PICKUP_CHUNK)
+        if n == 0:
+            break
+        page.get_by_role("button", name="Update Pickup Date").first.click()
+        page.wait_for_timeout(1200)
+        dlg = _dialog(page)
+        _fill_dates(dlg, "Mon DD YYYY", pickup_date, page)
+        try:
+            _set_dropdowns(page, dlg, "Select Reason", "Other")
+        except Exception:
+            print("  WARN: 'Other' unavailable for a pickup block — pick a reason manually")
+        submit_dialog(page)
+        total += n
+        print(f"  pickup: bumped {n} (running {total})")
+        page.wait_for_timeout(1500)                   # let the grid re-render after submit
+    return total
 
 
 # ----------------------- driver assignment -----------------------
@@ -385,10 +453,8 @@ def _driver_needed_cards(page: Page) -> list:
 
 
 def count_driver_needed(page: Page) -> int:
-    for _ in range(8):                        # render lazy rows
-        page.mouse.wheel(0, 5000)
-        page.wait_for_timeout(300)
-    page.mouse.wheel(0, -60000)
+    # Rows are already fully rendered (load_dashboard put all results on one page),
+    # so this counts 'Driver Needed' across the whole board, not just the first 50.
     return len(_driver_needed_cards(page))
 
 
