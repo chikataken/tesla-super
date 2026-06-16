@@ -52,6 +52,7 @@ SHIPMENTS_TIMEOUT_MS = int(os.getenv("SHIPMENTS_WAIT_S", "60")) * 1000
 BADGE_ETA_TODAY = "ETA Today"
 BADGE_PICKUP_TODAY = "Pickup Date Today"
 BADGE_PICKUP_LATE = "Pickup Date Late"          # same "Update Pickup Date" action as Today
+BADGE_DRIVER_NEEDED = "Driver Needed"           # only assign a driver when THIS is shown
 
 # Driver assignment: every "Driver Needed" unit (its driver field reads "No Driver
 # Selected") gets this driver. Override with CLEANUP_DRIVER in .env. The name is
@@ -352,15 +353,28 @@ def process_pickup(page: Page, pickup_date: str) -> int:
 
 
 # ----------------------- driver assignment -----------------------
+# A driver is assigned ONLY to a card that shows the "Driver Needed" alert (and whose
+# driver field still reads "No Driver Selected"). We never touch a card that merely
+# has an empty driver field without that warning.
 # Each card (.grid-entry) carries one driver field: a tsl-multiselect whose trigger
 # reads "No Driver Selected" until a driver is picked. Clicking it opens
 # .tsl-multiselect-panel with a .tsl-multiselect-search-input ("Search...") and the
 # driver list as <tsl-option>s. The search is an Angular form, so it needs REAL
 # keystrokes (set-value is ignored) — same as the rest of this portal.
-def _unassigned_driver_fields(page: Page):
-    """Locator for every card driver field still showing 'No Driver Selected'."""
-    return page.locator(".grid-entry .tsl-multiselect-trigger").filter(
-        has_text=re.compile(re.escape(NO_DRIVER), re.I))
+def _driver_needed_cards(page: Page) -> list:
+    """Cards carrying the 'Driver Needed' alert AND still showing 'No Driver Selected'.
+    These — and only these — get a driver."""
+    cards = page.locator(".grid-entry")
+    out = []
+    for i in range(cards.count()):
+        c = cards.nth(i)
+        try:
+            t = c.inner_text()
+        except Exception:
+            continue
+        if BADGE_DRIVER_NEEDED in t and NO_DRIVER in t:
+            out.append(c)
+    return out
 
 
 def count_driver_needed(page: Page) -> int:
@@ -368,26 +382,27 @@ def count_driver_needed(page: Page) -> int:
         page.mouse.wheel(0, 5000)
         page.wait_for_timeout(300)
     page.mouse.wheel(0, -60000)
-    return _unassigned_driver_fields(page).count()
+    return len(_driver_needed_cards(page))
 
 
 def assign_drivers(page: Page, driver_name: str) -> int:
-    """Assign `driver_name` to every 'No Driver Selected' unit, one card at a time
-    (the grid re-renders after each pick, so we always act on the FIRST remaining
-    unassigned field). Returns the count assigned."""
+    """Assign `driver_name` to every card flagged 'Driver Needed' (and still showing
+    'No Driver Selected'), one at a time — the grid re-renders after each pick, so we
+    re-find the first remaining flagged card each loop. Returns the count assigned."""
     # Match the option whitespace-tolerantly ("JESSICA TFI  2246664226" etc.); the
     # search term is the first word, which filters the 500-long list to the driver.
     parts = driver_name.split()
     opt_re = re.compile(r"\s+".join(re.escape(p) for p in parts), re.I)
     term = parts[0] if parts else driver_name
-    fields = _unassigned_driver_fields(page)
 
     assigned = 0
     for _ in range(60):                       # hard cap so a stuck card can't loop forever
-        n = fields.count()
+        cards = _driver_needed_cards(page)    # re-find: only 'Driver Needed' cards qualify
+        n = len(cards)
         if n == 0:
             break
-        trig = fields.first
+        trig = cards[0].locator(".tsl-multiselect-trigger").filter(
+            has_text=re.compile(re.escape(NO_DRIVER), re.I)).first
         try:
             trig.scroll_into_view_if_needed()
             trig.click()
@@ -411,7 +426,7 @@ def assign_drivers(page: Page, driver_name: str) -> int:
             except Exception:
                 pass
             break
-        if fields.count() >= n:               # the field didn't clear -> stop (avoid a loop)
+        if len(_driver_needed_cards(page)) >= n:   # didn't clear -> stop (avoid a loop)
             print("  WARN: a unit's driver didn't stick — stopping the driver phase.")
             break
         assigned += 1
