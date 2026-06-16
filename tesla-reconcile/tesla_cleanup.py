@@ -23,8 +23,9 @@ Browser/CDP/login settings are shared with the rest of tesla-reconcile (auth.py,
 the C:\\tesla-profile CDP profile), so one `run.bat login` covers this too.
 
 CALIBRATED against the live page:
-  * cards = .grid-entry ; badges are plain text ("ETA Today" / "Pickup Date Today";
-    "ETA Late" is ignored because we only select cards containing the target text)
+  * cards = .grid-entry ; badges are plain text ("ETA Today" / "Pickup Date Today").
+    Selection is BY BADGE: a "Late ETA"-only card is left alone, but a card stacked
+    with BOTH "Late ETA" and "ETA Today" still gets bumped (it matches "ETA Today").
   * "Select All Stops" = the FIRST <tsl-checkbox> in a card (2nd is Shipment Stops)
   * action bar: buttons "Update ETA" / "Update Pickup Date"
   * ETA popup: date input placeholder "Choose date" (type "D Mon YYYY", real keys);
