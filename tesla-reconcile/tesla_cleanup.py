@@ -1,13 +1,15 @@
 """
 End-of-day Tesla "Dispatch Dashboard 2.0" cleanup  (selectors calibrated live).
 
-Bumps every shipment showing an "ETA Today" badge to tomorrow 16:00 (reason
-"Early Arrival") and every "Pickup Date Today" OR "Pickup Date Late" shipment to
-tomorrow (reason "Other") — both pickup badges share one "Update Pickup Date"
-action, so they're selected together and updated in one shot. Repeats until gone. ALSO assigns a driver
+Bumps every "Pickup Date Today" OR "Pickup Date Late" shipment to tomorrow (reason
+"Other") — both pickup badges share one "Update Pickup Date" action, so they're
+selected together and updated in one shot. Repeats until gone. ALSO assigns a driver
 (DRIVER_NAME, default "JESSICA TFI 2246664226"; override with CLEANUP_DRIVER) to
 every "Driver Needed" unit (its driver field reads "No Driver Selected") via the
 per-card driver dropdown — search the name, pick the matching option.
+
+ETAs are LEFT ALONE for now (PROCESS_ETA=False). When re-enabled, an "ETA Today"
+badge is bumped to tomorrow 16:00 (reason "Early Arrival").
 
 SAFE BY DEFAULT:
   * Dry-run unless --apply (dry-run only counts + reports, never submits).
@@ -54,6 +56,10 @@ BADGE_ETA_TODAY = "ETA Today"
 BADGE_PICKUP_TODAY = "Pickup Date Today"
 BADGE_PICKUP_LATE = "Pickup Date Late"          # same "Update Pickup Date" action as Today
 BADGE_DRIVER_NEEDED = "Driver Needed"           # only assign a driver when THIS is shown
+
+# For now we leave ETAs ALONE and only bump pickup dates. Flip to True (or set
+# PROCESS_ETA=true in the env) to re-enable the ETA-Today bump.
+PROCESS_ETA = os.getenv("PROCESS_ETA", "false").strip().lower() in {"1", "true", "yes"}
 
 # Driver assignment: every "Driver Needed" unit (its driver field reads "No Driver
 # Selected") gets this driver. Override with CLEANUP_DRIVER in .env. The name is
@@ -440,7 +446,8 @@ def main(apply: bool):
     import runlog
     print(f"Logging this run to {runlog.start('cleanup')}")
     eta_date, pickup_date = compute_dates()
-    print(f"Tomorrow -> ETA '{eta_date}'  |  Pickup '{pickup_date}'")
+    print(f"Tomorrow -> Pickup '{pickup_date}'" +
+          (f"  |  ETA '{eta_date}'" if PROCESS_ETA else "   (ETA: left alone)"))
     print(f"Driver for unassigned units: {DRIVER_NAME!r}")
     print(f"Mode: {'APPLY' if apply else 'DRY-RUN'}\n" + "=" * 56)
 
@@ -464,18 +471,25 @@ def main(apply: bool):
         eta_total = pickup_total = passes = 0
         while True:
             eta_n, pickup_n = count_badges(page)
-            print(f"Pass {passes + 1}: ETA Today={eta_n}  Pickup Date Today={pickup_n}")
+            eta_shown = eta_n if PROCESS_ETA else f"{eta_n} (left alone)"
+            print(f"Pass {passes + 1}: ETA Today={eta_shown}  Pickup Date Today/Late={pickup_n}")
 
-            if eta_n + pickup_n == 0:
+            pending = pickup_n + (eta_n if PROCESS_ETA else 0)   # only count what we act on
+            if pending == 0:
                 break
             if not apply:
-                print(f"\n[DRY-RUN] Would bump {eta_n} ETA Today -> {eta_date} 16:00 "
-                      f"(Early Arrival) and {pickup_n} Pickup Date Today/Late -> "
-                      f"{pickup_date} (Other). Re-run with --apply to submit.")
+                plan = []
+                if PROCESS_ETA and eta_n:
+                    plan.append(f"{eta_n} ETA Today -> {eta_date} 16:00 (Early Arrival)")
+                if pickup_n:
+                    plan.append(f"{pickup_n} Pickup Date Today/Late -> {pickup_date} (Other)")
+                print(f"\n[DRY-RUN] Would bump " + " and ".join(plan) +
+                      ". Re-run with --apply to submit.")
                 return
 
-            eta_total += process_eta(page, eta_date)
-            load_dashboard(page)
+            if PROCESS_ETA:
+                eta_total += process_eta(page, eta_date)
+                load_dashboard(page)
             pickup_total += process_pickup(page, pickup_date)
             load_dashboard(page)
 
@@ -484,9 +498,10 @@ def main(apply: bool):
                 print("Stopping after 10 passes (safety cap)."); break
 
         print("\n" + "=" * 56)
-        print(f"Done — no alerts left. Drivers assigned: {driver_total}, "
-              f"ETA updated: {eta_total}, Pickup updated: {pickup_total}, passes: {passes}. "
-              f"Tomorrow used: ETA '{eta_date}', Pickup '{pickup_date}'.")
+        eta_msg = f"ETA updated: {eta_total}, " if PROCESS_ETA else "ETA: left alone, "
+        print(f"Done. Drivers assigned: {driver_total}, {eta_msg}"
+              f"Pickup updated: {pickup_total}, passes: {passes}. "
+              f"Pickup date used: {pickup_date}.")
         # No prompt — once the badges are cleared, exit and close the browser.
 
 
