@@ -1,7 +1,7 @@
 """
 End-of-day Tesla "Dispatch Dashboard 2.0" cleanup  (selectors calibrated live).
 
-Bumps every shipment showing an "ETA Today" badge to tomorrow 14:00 (reason
+Bumps every shipment showing an "ETA Today" badge to tomorrow 16:00 (reason
 "Early Arrival") and every "Pickup Date Today" OR "Pickup Date Late" shipment to
 tomorrow (reason "Other") — both pickup badges share one "Update Pickup Date"
 action, so they're selected together and updated in one shot. Repeats until gone. ALSO assigns a driver
@@ -30,7 +30,7 @@ CALIBRATED against the live page:
   * action bar: buttons "Update ETA" / "Update Pickup Date"
   * ETA popup: date input placeholder "Choose date" (type "D Mon YYYY", real keys);
     entering the date triggers a spinner that loads Time/Reason; Time + Reason are
-    <tsl-option> dropdowns ("14:00" ; reason list = only "Team Driver"/"Early Arrival")
+    <tsl-option> dropdowns ("16:00" ; reason list = only "Team Driver"/"Early Arrival")
   * Pickup popup: date input placeholder "Mon DD YYYY"; reason list includes "Other"
   * submit button in either popup = "UPDATE" (distinct from the action-bar buttons)
 """
@@ -98,8 +98,8 @@ def _set_dropdowns(page: Page, dialog, trigger_text: str, option_text: str):
         t = trig.first
         t.scroll_into_view_if_needed()
         t.click()
-        # tsl-option text has surrounding whitespace (e.g. " 14:00 "), so the
-        # match must tolerate it — an anchored ^14:00$ fails.
+        # tsl-option text has surrounding whitespace (e.g. " 16:00 "), so the
+        # match must tolerate it — an anchored ^16:00$ fails.
         opt = page.locator("tsl-option").filter(
             has_text=re.compile(rf"^\s*{re.escape(option_text)}\s*$"))
         opt.first.scroll_into_view_if_needed()
@@ -330,7 +330,7 @@ def process_eta(page: Page, eta_date: str) -> int:
     page.wait_for_timeout(1200)
     dlg = _dialog(page)
     _fill_dates(dlg, "Choose date", eta_date, page)
-    _set_dropdowns(page, dlg, "Select Time", "14:00")
+    _set_dropdowns(page, dlg, "Select Time", "16:00")
     _set_dropdowns(page, dlg, "Select Reason", "Early Arrival")
     submit_dialog(page)
     return n
@@ -469,7 +469,7 @@ def main(apply: bool):
             if eta_n + pickup_n == 0:
                 break
             if not apply:
-                print(f"\n[DRY-RUN] Would bump {eta_n} ETA Today -> {eta_date} 14:00 "
+                print(f"\n[DRY-RUN] Would bump {eta_n} ETA Today -> {eta_date} 16:00 "
                       f"(Early Arrival) and {pickup_n} Pickup Date Today/Late -> "
                       f"{pickup_date} (Other). Re-run with --apply to submit.")
                 return
