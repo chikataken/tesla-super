@@ -83,8 +83,13 @@ def main():
         config.WINDOW_MODE = "visible"
         config.HEADLESS = False
 
+    import os
     import profiles
-    _profile = profiles.active_profile()
+    # This run is for ONE dispatcher: the web app passes SC_PROFILE; the CLI falls back
+    # to the globally-selected dispatcher. Drives BOTH the state filter and which board
+    # (output folder) we write to, so each dispatcher's flow stays independent.
+    _pid = (os.getenv("SC_PROFILE") or "").strip() or (profiles.active_id() or "")
+    _profile = profiles.get_profile(_pid)
     rows, report = excel_ingest.read_rows(args.excel, args.sheet)
     rows = profiles.filter_rows(rows, _profile)        # only the dispatcher's states
     if _profile:
@@ -116,7 +121,8 @@ def main():
         import datetime
         import glob
         import paths
-        orders_dir = os.path.join(paths.OUTPUT_DIR, "orders")
+        _pbase = paths.profile_output_dir(_pid)        # this dispatcher's own board folder
+        orders_dir = os.path.join(_pbase, "orders")
         os.makedirs(orders_dir, exist_ok=True)
 
         # Persistence: load the current board (newest staged file) and PRESERVE it.
@@ -138,7 +144,7 @@ def main():
         # VINs set aside in the spare workspace (output/spares.json) live off the
         # board on purpose — treat them as known so a re-run doesn't resurrect them.
         try:
-            with open(os.path.join(paths.OUTPUT_DIR, "spares.json")) as f:
+            with open(os.path.join(_pbase, "spares.json")) as f:
                 known_vins |= {s.get("vin") for s in json.load(f) if s.get("vin")}
         except (OSError, ValueError):
             pass
@@ -263,8 +269,41 @@ def main():
             annotated = consolidation.match_against_routes(
                 list(sd_resolved.values()), board_now, use_street=True,
                 my_vins=[h["vin"] for h in sd_hits]) if sd_resolved else []
-            with open(os.path.join(paths.OUTPUT_DIR, "consolidation_search.json"), "w") as f:
-                json.dump({"orders": annotated, "checked_vins": len(sd_tried_vins),
+            # ROUTE-LEVEL highlights: the scan already knows every posted/accepted/pending
+            # SD shipment whose ZIP-PAIR matches an Excel route. Surface those directly so a
+            # board route lights up (amber=posted, green=accepted) whenever the loadboard has
+            # a shipment on that route — even if the stricter street-level consolidation match
+            # (above) didn't fire and even if the per-VIN API resolve got rate-limited.
+            # We key by the BOARD order's own routeKey (board_route_key == the frontend's
+            # routeKey, byte-for-byte) and link scan hits to board orders by 5-digit-
+            # normalized zip pairs, so ZIP+4 vs 5-digit differences between the loadboard and
+            # the BOL don't break the match.
+            _rank = {"posted": 3, "accepted": 2, "pending": 1}
+
+            def _z5(z):
+                return str(z or "").strip()[:5]
+
+            _hit_status: dict = {}                # (pz5, dz5) -> strongest status seen
+            for h in sd_hits:
+                pz, dz = _z5(h.get("pickup_zip")), _z5(h.get("dropoff_zip"))
+                if not (pz and dz):
+                    continue
+                st = (h.get("loadboard_status") or "").strip().lower()
+                if _rank.get(st, 0) > _rank.get(_hit_status.get((pz, dz), ""), 0):
+                    _hit_status[(pz, dz)] = st
+            _route_status: dict = {}              # board routeKey -> strongest status
+            for b in board_now:
+                pz = _z5(((b.get("pickup") or {}).get("venue") or {}).get("zip"))
+                dz = _z5(((b.get("delivery") or {}).get("venue") or {}).get("zip"))
+                st = _hit_status.get((pz, dz))
+                if st:
+                    bk = consolidation.board_route_key(b)
+                    if _rank.get(st, 0) > _rank.get(_route_status.get(bk, ""), 0):
+                        _route_status[bk] = st
+            route_hits = [{"route": k, "loadboard_status": st} for k, st in _route_status.items()]
+            with open(os.path.join(_pbase, "consolidation_search.json"), "w") as f:
+                json.dump({"orders": annotated, "route_hits": route_hits,
+                           "checked_vins": len(sd_tried_vins),
                            "found_vins": [], "not_found_vins": [], "errors": [],
                            "auth_error": sd_stats["auth_error"]}, f, indent=2, default=str)
             return sum(1 for a in annotated if a.get("is_candidate"))

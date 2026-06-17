@@ -175,58 +175,26 @@ def _kill_tree(proc) -> None:
         proc.kill()
 
 
-# CDP_PROFILE_DIR is a dedicated automation profile, so any Chrome serving the
-# endpoint is ours — including one left over from a previous run that crashed
-# before cleanup (we attach to it with proc=None, and merely detaching used to
-# leave its window and tabs up forever). So both closers ask the browser to
-# close, VERIFY the endpoint actually went dark, and only then fall back to
-# killing the process tree.
-def close_chrome_sync(browser, proc) -> None:
-    """Sync API: close the automation Chrome when the run ends — always."""
+# CONCURRENCY: the automation Chrome is SHARED. Up to four dispatchers (Soyo, Kelly,
+# Duka, Burte) can have pulls in flight at once, each driving its own tabs in the SAME
+# logged-in Chrome. So when one run ends it must NOT close Chrome out from under the
+# others — it only DISCONNECTS its Playwright driver (browser.close() over CDP detaches
+# the client; it does not quit the browser it attached to). The single shared Chrome
+# process is owned by the web app, which kills it once at shutdown (app._on_shutdown).
+# `proc` is accepted for backward compatibility but intentionally not killed here.
+def close_chrome_sync(browser, proc=None) -> None:
+    """Sync API: DETACH from the shared automation Chrome when a run ends. Leaves the
+    browser running for any other concurrent run."""
     try:
-        browser.new_browser_cdp_session().send("Browser.close")
+        browser.close()                       # disconnects the CDP client; Chrome keeps running
     except Exception:
         pass
-    try:
-        browser.close()
-    except Exception:
-        pass
-    deadline = time.time() + 8
-    while time.time() < deadline and _cdp_alive(config.CDP_URL):
-        time.sleep(0.25)
-    if _cdp_alive(config.CDP_URL):
-        if proc is not None:
-            _kill_tree(proc)
-        else:
-            print("WARN: automation Chrome did not close — close the window manually.")
-    if proc is not None:
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass
 
 
-async def close_chrome_async(browser, proc) -> None:
-    """Async API: close the automation Chrome when the run ends — always."""
+async def close_chrome_async(browser, proc=None) -> None:
+    """Async API: DETACH from the shared automation Chrome when a run ends. Leaves the
+    browser running for any other concurrent run."""
     try:
-        session = await browser.new_browser_cdp_session()
-        await session.send("Browser.close")
+        await browser.close()                 # disconnects the CDP client; Chrome keeps running
     except Exception:
         pass
-    try:
-        await browser.close()
-    except Exception:
-        pass
-    deadline = time.time() + 8
-    while time.time() < deadline and _cdp_alive(config.CDP_URL):
-        await asyncio.sleep(0.25)
-    if _cdp_alive(config.CDP_URL):
-        if proc is not None:
-            _kill_tree(proc)
-        else:
-            print("WARN: automation Chrome did not close — close the window manually.")
-    if proc is not None:
-        try:
-            proc.wait(timeout=5)
-        except Exception:
-            pass

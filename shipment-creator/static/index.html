@@ -373,7 +373,6 @@
   <div class="tabs">
     <div id="tally" class="tally"></div>
     <button class="tab active" data-tab="orders">Orders</button>
-    <button class="tab" data-tab="consolidate">SD Matches</button>
     <button class="tab" data-tab="settings">Settings</button>
   </div>
 </header>
@@ -410,54 +409,9 @@
     </div>
   </div>
 
-  <!-- SD MATCHES (populated by the loadboard scan during a Run) -->
-  <div class="panel" id="consolidate">
-    <div class="toolbar">
-      <span class="count" id="cmsg"></span>
-      <button class="btn ghost" onclick="load()">Refresh</button>
-    </div>
-    <div class="muted" style="font-size:12px;margin:0 2px 12px">
-      Existing SuperDispatch shipments found by the loadboard scan (it runs as part of a
-      <b>Run</b>, matching the Excel's origin/dest zips). Ones whose exact addresses match a
-      staged route show in that route's focused view —
-      <span style="color:var(--warn)">yellow</span> ring if posted,
-      <span style="color:var(--good)">green</span> if accepted — where you can drag your to-be
-      VINs onto them to stage a consolidation.
-    </div>
-    <div id="cresults"></div>
-  </div>
-
   <!-- SETTINGS -->
   <div class="panel" id="settings">
     <div class="form">
-      <div class="full"><h2 class="seth">SuperDispatch</h2></div>
-      <div class="full">
-        <label>Environment</label>
-        <select id="set_env" style="width:100%">
-          <option value="test">Test (sandbox)</option>
-          <option value="production">Production (live)</option>
-        </select>
-      </div>
-      <div><label>Client ID</label><input id="set_cid" type="text" style="width:100%" placeholder="SuperDispatch client id"></div>
-      <div>
-        <label>Client Secret</label>
-        <input id="set_secret" type="password" style="width:100%" placeholder="enter to set">
-      </div>
-      <div class="full hint" id="secretHint" style="margin-top:-4px"></div>
-
-      <div class="full">
-        <button class="btn green" id="saveSetBtn" onclick="saveSettings()">Save settings</button>
-        <span class="count" id="setMsg" style="margin-left:12px"></span>
-      </div>
-
-      <div class="full"><h2 class="seth">Dispatcher profiles</h2></div>
-      <div class="full hint">
-        Assign each dispatcher a phone (fills the &lt;dispatcher&gt; text in the
-        load-board and order instructions) and the pickup states they pull from the
-        Excel — e.g. <b>VA MD GA FL</b>. Leave states blank for no filter.
-      </div>
-      <div class="full" id="profilesEdit"></div>
-
       <div class="full"><h2 class="seth">Clear board</h2></div>
       <div class="full hint">
         Deletes the current board (all Excel VINs), every SuperDispatch match, and all
@@ -631,13 +585,27 @@ function vinBubbles(o){
     return `<span class="vbub ${t.cls}" title="${title}"><span>${t.tag}</span></span>`;
   }).join('');
 }
-// Tint a route row when existing SuperDispatch shipments matched into it: AMBER if
-// any are posted (amber wins when both are present), else GREEN for accepted-only.
+// Strongest SD loadboard status the scan saw on this zip-pair route (independent of the
+// stricter street-level consolidation match). Lets a route light up whenever the
+// loadboard has a posted/accepted shipment on it, which is what we actually want to see.
+function routeHitStatus(key){
+  const hits=((CSEARCH&&CSEARCH.route_hits)||[]).filter(h=>h.route===key);
+  if(hits.some(h=>h.loadboard_status==='posted')) return 'posted';
+  if(hits.some(h=>h.loadboard_status==='accepted')) return 'accepted';
+  return '';
+}
+// Tint a route row when the loadboard has a shipment on this route: AMBER if any are
+// posted (amber wins when both are present), else GREEN for accepted-only. Considers BOTH
+// the scan's zip-pair hits and any street-matched consolidation candidates.
 function routeSdClass(o){
-  const m=matchesForRoute(routeKey(o));
-  if(!m.length) return '';
-  if(m.some(x=>x.loadboard_status==='posted' || x.is_posted_to_loadboard)) return 'sd-amber';
-  if(m.some(x=>x.loadboard_status==='accepted')) return 'sd-green';
+  const key=routeKey(o);
+  const m=matchesForRoute(key);
+  let posted = m.some(x=>x.loadboard_status==='posted' || x.is_posted_to_loadboard);
+  let accepted = m.some(x=>x.loadboard_status==='accepted');
+  const hs=routeHitStatus(key);
+  if(hs==='posted') posted=true; else if(hs==='accepted') accepted=true;
+  if(posted) return 'sd-amber';
+  if(accepted) return 'sd-green';
   return '';
 }
 // ----- unread state (Gmail-like): a shipment is "unread" until you open it.
@@ -656,7 +624,8 @@ function listRow(o){
   const sd=routeSdClass(o);
   const unread=isUnread(o.number)?' unread':'';
   const m=matchesForRoute(routeKey(o));
-  const title=sd?` title="${m.length} existing SuperDispatch shipment(s) on this route — open to consolidate"`:'';
+  const status=sd==='sd-amber'?'posted':(sd==='sd-green'?'accepted':'');
+  const title=sd?` title="SuperDispatch has a ${status} shipment on this route${m.length?` — ${m.length} matched to consolidate`:''}"`:'';
   return `<div class="lrow ${sd}${unread}"${title} onclick="openRoute('${esc(o.number)}')">
     <span class="lroute">${route}</span>
     <div class="vbubs">${vinBubbles(o)}</div>
@@ -1153,13 +1122,10 @@ async function onSpareDrop(ev){
 
 // ----- settings + one-time login -----
 async function loadSettings(){
-  let s; try{ s=await fetch('/api/settings').then(r=>r.json()); }catch(e){ return; }
-  $('#set_env').value   = s.SD_ENV || 'test';
-  $('#set_cid').value   = s.SUPERDISPATCH_CLIENT_ID || '';
-  $('#set_secret').value = '';
-  $('#secretHint').textContent = s.has_secret
-    ? 'A secret is saved. Leave blank to keep it; type a new one to replace.'
-    : 'No secret saved yet.';
+  // SuperDispatch credential fields were removed from the UI; nothing to populate here.
+  // (Credentials live in .env / settings.json.) Kept as a no-op so the Settings tab's
+  // open handler stays valid.
+  if(!$('#set_env')) return;
 }
 async function saveSettings(){
   const btn=$('#saveSetBtn'); btn.disabled=true; $('#setMsg').textContent='Saving…';
@@ -1187,10 +1153,33 @@ async function doLogin(){
 
 // ----- dispatcher profiles (top-left dropdown) -----
 let ACTIVE_PROFILE=null;
+let PROFILES=[];
+
+// CONCURRENCY: this window acts AS the dispatcher selected in its dropdown. Every
+// /api call carries that dispatcher in an X-Profile header, so the server resolves
+// THIS window's board + run independently of any other window. Two windows on two
+// dispatchers => two independent pulls at the same time. We wrap window.fetch once so
+// every existing call site (and the SSE excepted — it uses ?profile=) is covered.
+(function(){
+  const _fetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    try{
+      const url = (typeof input === 'string') ? input : (input && input.url) || '';
+      if(ACTIVE_PROFILE && /^\/api\//.test(url)){
+        init = Object.assign({}, init);
+        const h = new Headers((init && init.headers) || (typeof input !== 'string' ? input.headers : undefined) || {});
+        if(!h.has('X-Profile')) h.set('X-Profile', ACTIVE_PROFILE);
+        init.headers = h;
+      }
+    }catch(e){ /* fall through to a plain fetch */ }
+    return _fetch(input, init);
+  };
+})();
 async function loadProfiles(){
   let d; try{ d=await fetch('/api/profiles').then(r=>r.json()); }catch(e){ return; }
   ACTIVE_PROFILE=d.active||null;
-  renderProfilesEditor(d.profiles||[]);
+  PROFILES=d.profiles||[];
+  renderProfilesEditor();
   const sel=$('#profileSel'); if(!sel) return;
   sel.innerHTML='<option value="">Select dispatcher…</option>'+
     (d.profiles||[]).map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
@@ -1198,15 +1187,19 @@ async function loadProfiles(){
   sel.classList.toggle('unset', !ACTIVE_PROFILE);     // glow until one is chosen
   updateProfileImg();
 }
-// Settings tab: editable phone + states per dispatcher.
-function renderProfilesEditor(profs){
+// Settings tab: editable phone + states for the ACTIVE dispatcher ONLY — each
+// dispatcher's settings are private to their own profile (Kelly's show only under
+// Kelly). Saved to profiles.json, so they persist across restarts.
+function renderProfilesEditor(){
   const wrap=$('#profilesEdit'); if(!wrap) return;
-  wrap.innerHTML=(profs||[]).map(p=>`<div class="profrow">
+  const p=PROFILES.find(x=>x.id===ACTIVE_PROFILE);
+  if(!p){ wrap.innerHTML='<span class="hint">Select a dispatcher to edit their settings.</span>'; return; }
+  wrap.innerHTML=`<div class="profrow">
     <span class="pname">${esc(p.name||p.id)}</span>
     <input id="pph_${esc(p.id)}" type="text" placeholder="phone" value="${esc(p.phone||'')}">
     <input id="pst_${esc(p.id)}" type="text" placeholder="states e.g. VA MD GA FL" value="${esc((p.states||[]).join(' '))}">
     <button class="btn" onclick="saveProfile('${esc(p.id)}')">Save</button>
-  </div>`).join('') || '<span class="hint">No profiles.</span>';
+  </div>`;
 }
 async function saveProfile(id){
   const phone=$('#pph_'+id).value, states=$('#pst_'+id).value;
@@ -1223,7 +1216,10 @@ async function setProfile(id){
   try{ const r=await api('/api/profile',{id:id||null}); ACTIVE_PROFILE=r.active||null;
     $('#profileSel').classList.toggle('unset', !ACTIVE_PROFILE);
     updateProfileImg();
+    renderProfilesEditor();       // settings tab now shows THIS dispatcher's settings only
     if(ACTIVE_PROFILE){ const o=$('#profileSel').selectedOptions[0]; toast('Dispatcher: '+(o?o.text:ACTIVE_PROFILE)); }
+    startLive();                  // re-point the live stream at the new dispatcher's board
+    await load();                 // each dispatcher has its OWN board — show theirs
     syncTally();
   }catch(e){}
 }
@@ -1410,11 +1406,17 @@ async function liveReload(){
   await load();
   reopenCards(open);
 }
+// The live stream is pinned to the current dispatcher via ?profile= (EventSource can't
+// send headers), so each window watches ITS OWN board. Switching dispatcher tears the
+// old stream down and opens a new one for the new board.
+let _es=null;
 function startLive(){
   if(!('EventSource' in window)) return;         // very old browsers: stay on manual Refresh
+  try{ if(_es){ _es.close(); _es=null; } }catch(e){}
   try{
-    const es = new EventSource('/api/events');
-    es.addEventListener('changed', () => liveReload());
+    const q = ACTIVE_PROFILE ? ('?profile='+encodeURIComponent(ACTIVE_PROFILE)) : '';
+    _es = new EventSource('/api/events'+q);
+    _es.addEventListener('changed', () => liveReload());
     // the browser auto-reconnects on a dropped connection; nothing to handle here
   }catch(e){}
 }
@@ -1422,10 +1424,12 @@ function startLive(){
 fetch('/api/env').then(r=>r.json()).then(d=>{
   $('#env').textContent='SD_ENV: '+d.sd_env;
 }).catch(()=>{});
-loadProfiles();      // populate the dispatcher dropdown + restore the active one
-load();
-startLive();
-syncRunBar();        // if a run is already in progress, pick up its progress bar
+// restore the active dispatcher FIRST, then open the live stream for its board (so the
+// SSE carries ?profile= from the start), load that board, and pick up any run already
+// in progress for it.
+loadProfiles()
+  .then(()=>{ startLive(); load(); syncRunBar(); })
+  .catch(()=>{ startLive(); load(); });
 </script>
 </body>
 </html>

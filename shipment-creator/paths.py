@@ -56,6 +56,15 @@ def output_path(*parts: str) -> str:
     return p
 
 
+def profile_output_dir(profile: str | None = None) -> str:
+    """The OUTPUT_DIR for a given dispatcher profile id, so each dispatcher (Kelly,
+    Burte, …) keeps its OWN board (staged orders, spares, consolidations). Falls back
+    to the shared OUTPUT_DIR when no profile id is given — i.e. the legacy single-board
+    behavior, so nothing breaks before a profile is selected."""
+    pid = (profile or "").strip()
+    return os.path.join(OUTPUT_DIR, "profiles", pid) if pid else OUTPUT_DIR
+
+
 def resource_path(*parts: str) -> str:
     """Absolute path to a bundled, read-only resource (e.g. the static frontend)."""
     return os.path.join(RESOURCE_DIR, *parts)

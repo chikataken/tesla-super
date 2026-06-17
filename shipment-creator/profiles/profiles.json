@@ -2,30 +2,78 @@
   {
     "id": "soyo",
     "name": "Soyo",
-    "phone": "",
-    "states": []
+    "phone": "213-371-7347",
+    "states": [
+      "CT",
+      "WI",
+      "UT",
+      "IL",
+      "IN",
+      "OH",
+      "MI",
+      "KY",
+      "TN",
+      "MS",
+      "AL",
+      "SC",
+      "NC",
+      "NJ",
+      "RI",
+      "MA",
+      "NH",
+      "VT",
+      "ME",
+      "NY",
+      "PA"
+    ]
   },
   {
     "id": "kelly",
     "name": "Kelly",
-    "phone": "3103873241",
+    "phone": "310-387-3241",
     "states": [
       "VA",
       "MD",
       "GA",
-      "FL"
+      "FL",
+      "DE",
+      "WV",
+      "DC"
     ]
   },
   {
     "id": "duka",
     "name": "Duka",
-    "phone": "",
-    "states": []
+    "phone": "562-777-5654",
+    "states": [
+      "CA"
+    ]
   },
   {
     "id": "burte",
     "name": "Burte",
-    "phone": "",
-    "states": []
+    "phone": "562-670-7646",
+    "states": [
+      "NV",
+      "AZ",
+      "NM",
+      "CO",
+      "ID",
+      "WY",
+      "MT",
+      "ND",
+      "SD",
+      "NE",
+      "KS",
+      "OK",
+      "MO",
+      "IA",
+      "MN",
+      "AR",
+      "LA",
+      "TX",
+      "OR",
+      "WA"
+    ]
   }
 ]

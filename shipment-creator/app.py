@@ -12,6 +12,7 @@ Run:
 """
 from __future__ import annotations
 import asyncio
+import contextvars
 import glob
 import json
 import os
@@ -22,31 +23,69 @@ import threading
 import time
 from typing import Optional
 
+<<<<<<< Updated upstream
 from fastapi import Body, FastAPI, HTTPException
+=======
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
+>>>>>>> Stashed changes
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 import paths
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-ORDERS_DIR = os.path.join(paths.OUTPUT_DIR, "orders")
-# The spare workspace lives off the board in its own file: VINs the user set aside
-# to keep but not post. Each entry snapshots its route so it can still show where
-# it was headed and be returned to the board later.
-SPARES_PATH = os.path.join(paths.OUTPUT_DIR, "spares.json")
-# Consolidation: last VIN-search results, and the queue of VIN->existing-order merges
-# the user has staged (sent later by the not-yet-built "post all shipments" flow).
-SEARCH_PATH = os.path.join(paths.OUTPUT_DIR, "consolidation_search.json")
-CONSOL_PATH = os.path.join(paths.OUTPUT_DIR, "consolidations.json")
-# Which Excel the current board was built from (path + sheet). Stamped when a run
-# starts so the tally denominator reflects the sheet you actually ran, not the
-# config default; persisted so it survives a server restart / page refresh.
-ACTIVE_EXCEL_PATH = os.path.join(paths.OUTPUT_DIR, "active_excel.json")
 
-app = FastAPI(title="Shipment Creator")
+# The dispatcher THIS request is acting as, set per-request from the X-Profile header
+# (or ?profile= for the SSE) by the global dependency below. This is what lets two
+# browser windows, each on a different dispatcher, drive independent boards + runs.
+_req_profile: contextvars.ContextVar = contextvars.ContextVar("req_profile", default=None)
+
+
+# ---- per-dispatcher board location -------------------------------------------
+# Each dispatcher profile (Kelly, Burte, …) keeps its OWN board, so switching the
+# selected dispatcher shows a completely different set of shipments. Resolution order:
+# the pipeline subprocess is told its profile via SC_PROFILE; a web request carries it
+# in the X-Profile header (-> _req_profile); otherwise fall back to the globally-
+# selected dispatcher. Empty => the legacy shared OUTPUT_DIR (single board).
+def _pid() -> str:
+    import profiles
+    return ((os.getenv("SC_PROFILE") or "").strip()
+            or (_req_profile.get() or "").strip()
+            or (profiles.active_id() or ""))
+
+
+def _pdir() -> str:
+    d = paths.profile_output_dir(_pid())
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _orders_dir() -> str:
+    d = os.path.join(_pdir(), "orders")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+# The spare workspace, the consolidation search results + staged-merge queue, and the
+# active-Excel marker — all per dispatcher profile now.
+def _spares_path() -> str: return os.path.join(_pdir(), "spares.json")
+def _search_path() -> str: return os.path.join(_pdir(), "consolidation_search.json")
+def _consol_path() -> str: return os.path.join(_pdir(), "consolidations.json")
+def _active_excel_path() -> str: return os.path.join(_pdir(), "active_excel.json")
+
+
+async def _capture_profile(request: Request):
+    """Global dependency: stamp each request with the dispatcher it's acting as, from
+    the X-Profile header (every /api fetch sends it) or ?profile= (the SSE, which can't
+    set headers). Runs in the request context, so sync endpoints inherit it too."""
+    p = (request.headers.get("X-Profile") or request.query_params.get("profile") or "").strip()
+    _req_profile.set(p or None)
+
+
+app = FastAPI(title="Shipment Creator", dependencies=[Depends(_capture_profile)])
 
 
 def _staged_files() -> list[str]:
-    return sorted(glob.glob(os.path.join(ORDERS_DIR, "*.json")),
+    return sorted(glob.glob(os.path.join(_orders_dir(), "*.json")),
                   key=os.path.getmtime, reverse=True)
 
 
@@ -56,7 +95,7 @@ def _board_signature() -> tuple:
     writes new shipments, a scan writes matches, or an edit lands — so the SSE stream
     can tell the page to refresh itself. Including the basename catches a brand-new
     staged batch file (new timestamped name), not just a rewrite of the current one."""
-    paths = [SPARES_PATH, SEARCH_PATH, CONSOL_PATH]
+    paths = [_spares_path(), _search_path(), _consol_path()]
     staged = _staged_files()
     if staged:
         paths.append(staged[0])                 # the active (newest) staged batch
@@ -74,8 +113,15 @@ async def api_events():
     """Server-sent events: pings the page whenever the board's files change, so the
     UI live-updates without a manual Refresh (shipments appear as BOLs are pulled
     during a run; SD matches appear when the scan finishes; edits from another window
-    sync). One-way, polls file mtimes ~1s, and the browser auto-reconnects."""
+    sync). One-way, polls file mtimes ~1s, and the browser auto-reconnects.
+
+    The dispatcher is resolved HERE in the request context (from ?profile=) and re-
+    asserted inside the generator, so each window's stream watches ITS OWN board even
+    though the contextvar set by the dependency is gone by the time gen() is iterated."""
+    pid = _pid()
+
     async def gen():
+        _req_profile.set(pid or None)            # pin this stream to its dispatcher's board
         last = _board_signature()
         yield ": connected\n\n"                  # SSE comment line opens the stream
         beat = 0
@@ -106,7 +152,7 @@ def api_orders(file: Optional[str] = None):
     if not files:
         return {"file": None, "count": 0, "orders": [],
                 "message": "No staged orders yet. Run: main.py --create"}
-    path = os.path.join(ORDERS_DIR, file) if file else files[0]
+    path = os.path.join(_orders_dir(), file) if file else files[0]
     if not os.path.exists(path):
         raise HTTPException(404, "staged file not found")
     with open(path, encoding="utf-8") as fh:
@@ -138,9 +184,6 @@ def _annotate_dates(order: dict) -> dict:
 def api_batches():
     """List available staged batches (filenames), newest first."""
     return [os.path.basename(p) for p in _staged_files()]
-
-
-_run_lock = threading.Lock()
 
 
 def _build_cmd(o: dict) -> list[str]:
@@ -175,16 +218,55 @@ def _build_cmd(o: dict) -> list[str]:
 # pulled/total VINs, and any page can read it from /api/run/status.
 _TOTAL_RE = re.compile(r"(?:Fetching|Downloading) BOLs for (\d+)\s+(?:new\s+)?VIN")
 _PULLED_RE = re.compile(r"(\d+) new vehicle\(s\) so far")
-_run_log: list = []                                   # this run's console output (for the stream)
-_run_progress = {"running": False, "pulled": 0, "total": 0}
-_run_proc = None                                      # the live pipeline subprocess (for clean kill on Quit)
+
+# CONCURRENCY: each dispatcher gets its OWN run state (lock + log + progress + proc),
+# so Soyo, Kelly, Duka and Burte can each have a pull in flight at the same time
+# without colliding. Keyed by profile id. _runs_guard protects the dict itself while
+# a per-profile state record is being created.
+_runs: dict = {}
+_runs_guard = threading.Lock()
 
 
-def _terminate_run():
-    """Kill the in-progress pipeline subprocess and everything it spawned (its Chrome
-    included — taskkill /T walks the whole tree). No-op if nothing is running. Used by
-    the tray Quit so a mid-pull exit doesn't orphan a background process."""
-    proc = _run_proc
+def _run_state(pid: str) -> dict:
+    """The run-state record for one dispatcher (created on first use). 'lock' gates
+    that dispatcher's own runs (one pull per dispatcher at a time); different
+    dispatchers hold different locks, so their pulls run concurrently."""
+    pid = pid or ""
+    with _runs_guard:
+        st = _runs.get(pid)
+        if st is None:
+            st = {
+                "lock": threading.Lock(),
+                "log": [],
+                "proc": None,
+                "progress": {"running": False, "pulled": 0, "total": 0},
+            }
+            _runs[pid] = st
+        return st
+
+
+# The shared automation Chrome. All dispatchers attach to the SAME logged-in Chrome
+# over CDP (separate tabs), so we launch it at most once and DON'T let a finishing run
+# close it out from under the others. We own the process only if WE launched it.
+_chrome_proc = None
+_chrome_guard = threading.Lock()
+
+
+def _ensure_shared_chrome():
+    """Make sure the one shared automation Chrome is up before a run attaches to it.
+    Launches it at most once across all concurrent runs; a run that finds Chrome
+    already up (launched by us earlier, or by the user's login flow) leaves it be."""
+    global _chrome_proc
+    import chrome_cdp
+    with _chrome_guard:
+        proc = chrome_cdp.ensure_chrome()             # None if one was already running
+        if proc is not None and _chrome_proc is None:
+            _chrome_proc = proc                        # remember it so shutdown can kill it
+
+
+def _terminate_proc(proc):
+    """Kill one pipeline subprocess and everything it spawned (taskkill /T walks the
+    tree). No-op if it's None or already dead."""
     if proc is None:
         return
     try:
@@ -198,73 +280,122 @@ def _terminate_run():
         pass
 
 
+def _terminate_run(pid: str | None = None):
+    """Stop a dispatcher's in-progress pipeline (and its Chrome tabs). With no pid,
+    stops the run for the request's current dispatcher. The shared Chrome process
+    itself is left alone — other dispatchers may still be using it."""
+    st = _run_state(pid if pid is not None else _pid())
+    _terminate_proc(st.get("proc"))
+
+
+def _terminate_all_runs():
+    """Stop every dispatcher's in-flight pipeline. Used at shutdown so no pull is left
+    orphaned. Snapshot under the guard so we don't iterate a mutating dict."""
+    with _runs_guard:
+        states = list(_runs.values())
+    for st in states:
+        _terminate_proc(st.get("proc"))
+
+
+@app.on_event("shutdown")
+def _on_shutdown():
+    """When the server stops — Ctrl+C in web.bat, tray Quit, or any exit — kill every
+    in-flight pipeline subprocess AND the shared automation Chrome so nothing is left
+    orphaned."""
+    try:
+        _terminate_all_runs()
+    except Exception:                                 # noqa: BLE001
+        pass
+    try:
+        if _chrome_proc is not None:
+            import chrome_cdp
+            chrome_cdp._kill_tree(_chrome_proc)
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
 @app.post("/api/run")
 def api_run(opts: dict = Body(...)):
-    """Start the pipeline and stream its console output. The subprocess is owned by
-    a background thread (not this request), so it keeps running and reporting
-    progress even if the client disconnects/refreshes. Only one run at a time."""
-    import profiles
-    if not profiles.active_id():
+    """Start the pipeline for THIS request's dispatcher and stream its console output.
+    The subprocess is owned by a background thread (not this request), so it keeps
+    running and reporting progress even if the client disconnects/refreshes. One run
+    per dispatcher — but different dispatchers run concurrently (each on its own board,
+    sharing the one logged-in Chrome as separate tabs)."""
+    # Resolve the dispatcher ONCE, here in the request context, and pass it explicitly
+    # into the thread + generator. The contextvar is reset when the request returns, so
+    # the streaming generator can't rely on it — the captured `pid` is the source of truth.
+    pid = _pid()
+    if not pid:
         raise HTTPException(400, "Select a dispatcher profile before running an Excel.")
-    if not _run_lock.acquire(blocking=False):
-        raise HTTPException(409, "A run is already in progress.")
+    st = _run_state(pid)
+    if not st["lock"].acquire(blocking=False):
+        raise HTTPException(409, f"A run is already in progress for {pid}.")
     try:
         cmd = _build_cmd(opts)
     except (ValueError, TypeError) as e:
-        _run_lock.release()
+        st["lock"].release()
         raise HTTPException(400, str(e))
 
     # remember which sheet this board is being built from, so /api/tally counts
     # against the Excel you actually ran (not the config default).
     import config
-    _save_json(ACTIVE_EXCEL_PATH, {
+    _save_json(_active_excel_path(), {
         "path": (opts.get("excel") or "").strip() or config.DEFAULT_EXCEL,
         "sheet": (str(opts.get("sheet")).strip() or None) if opts.get("sheet") else None,
     })
 
-    _run_log.clear()
-    _run_progress.update(running=True, pulled=0, total=0)
+    log = st["log"]
+    progress = st["progress"]
+    log.clear()
+    progress.update(running=True, pulled=0, total=0)
+
+    # bring up the shared Chrome before the pull attaches to it (at most once across
+    # all concurrent dispatchers). Best-effort: if it fails, the pipeline will report it.
+    try:
+        _ensure_shared_chrome()
+    except Exception as e:                            # noqa: BLE001
+        log.append(f"[warn] could not pre-launch Chrome: {e}\n")
 
     # don't let the pipeline subprocess pop up its own console window (its output is
     # captured via the pipe anyway); harmless in dev, essential for the windowed build.
     _no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
 
     def _drain():
-        global _run_proc
         try:
-            _run_log.append(f"$ {' '.join(cmd)}\n\n")
+            log.append(f"$ {' '.join(cmd)}\n\n")
             proc = subprocess.Popen(
                 cmd, cwd=_HERE, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1, creationflags=_no_window,
+                env={**os.environ, "SC_PROFILE": pid},   # write to THIS dispatcher's board
             )
-            _run_proc = proc                          # expose for Quit-time termination
+            st["proc"] = proc                         # expose for Quit-time termination
             for line in proc.stdout:
-                _run_log.append(line)
+                log.append(line)
                 m = _TOTAL_RE.search(line)
                 if m:
-                    _run_progress["total"] = int(m.group(1))
+                    progress["total"] = int(m.group(1))
                 m = _PULLED_RE.search(line)
                 if m:
-                    _run_progress["pulled"] = int(m.group(1))
+                    progress["pulled"] = int(m.group(1))
             proc.wait()
-            _run_log.append(f"\n[finished — exit code {proc.returncode}]\n")
+            log.append(f"\n[finished — exit code {proc.returncode}]\n")
         finally:
-            _run_proc = None
-            _run_progress["running"] = False
-            _run_lock.release()
+            st["proc"] = None
+            progress["running"] = False
+            st["lock"].release()
 
     threading.Thread(target=_drain, daemon=True).start()
 
     def gen():
         idx = 0
         while True:
-            while idx < len(_run_log):
-                yield _run_log[idx]
+            while idx < len(log):
+                yield log[idx]
                 idx += 1
-            if not _run_progress["running"]:
-                while idx < len(_run_log):     # flush any final lines after it stopped
-                    yield _run_log[idx]
+            if not progress["running"]:
+                while idx < len(log):          # flush any final lines after it stopped
+                    yield log[idx]
                     idx += 1
                 break
             time.sleep(0.15)
@@ -274,9 +405,9 @@ def api_run(opts: dict = Body(...)):
 
 @app.get("/api/run/status")
 def api_run_status():
-    """Current run progress (server-owned), so a freshly-loaded page can show the
-    progress bar mid-run instead of losing it on refresh."""
-    return dict(_run_progress)
+    """Current run progress for THIS request's dispatcher (server-owned), so a freshly-
+    loaded page can show the progress bar mid-run instead of losing it on refresh."""
+    return dict(_run_state(_pid())["progress"])
 
 
 @app.get("/api/env")
@@ -301,7 +432,7 @@ def api_profile_set(body: dict = Body(...)):
         profiles.set_active((body or {}).get("id"))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())   # filter changed
+    _excel_cache_clear()                                # this dispatcher's filter changed
     return {"ok": True, "active": profiles.active_id()}
 
 
@@ -315,7 +446,7 @@ def api_profile_save(body: dict = Body(...)):
                                   phone=body.get("phone"), states=body.get("states"))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())   # state filter changed
+    _excel_cache_clear()                                # this dispatcher's state filter changed
     return {"ok": True, "profile": p}
 
 
@@ -354,7 +485,7 @@ def api_settings_set(body: dict = Body(...)):
     settings_store.save(body or {})
     settings_store.apply_to_env(force=True)            # override env with the new values
     importlib.reload(config)                           # re-read credentials, env, excel
-    _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())   # force recount
+    _excel_cache_clear(all_profiles=True)               # config reload affects every profile
     return {"ok": True, **settings_store.public_view(),
             "sd_env": config.SD_ENV, "default_excel": config.DEFAULT_EXCEL}
 
@@ -433,14 +564,16 @@ def api_pick_excel():
 
 @app.post("/api/run/terminate")
 def api_run_terminate():
-    """Stop the in-progress pipeline (and its Chrome). Waits briefly for the drain
-    thread to release the run lock so a follow-up /api/run won't 409."""
+    """Stop THIS dispatcher's in-progress pipeline (other dispatchers' runs keep going).
+    Waits briefly for the drain thread to release the run lock so a follow-up /api/run
+    won't 409."""
+    progress = _run_state(_pid())["progress"]
     _terminate_run()
     for _ in range(40):
-        if not _run_progress.get("running"):
+        if not progress.get("running"):
             break
         time.sleep(0.1)
-    return {"ok": True, "running": _run_progress.get("running", False)}
+    return {"ok": True, "running": progress.get("running", False)}
 
 
 @app.post("/api/reset")
@@ -450,24 +583,38 @@ def api_reset():
     can run a completely different sheet from scratch."""
     _terminate_run()
     removed = 0
-    for f in glob.glob(os.path.join(ORDERS_DIR, "*.json")):
+    for f in glob.glob(os.path.join(_orders_dir(), "*.json")):
         try:
             os.remove(f)
             removed += 1
         except OSError:
             pass
-    for p in (ACTIVE_EXCEL_PATH, SPARES_PATH, SEARCH_PATH, CONSOL_PATH):
+    for p in (_active_excel_path(), _spares_path(), _search_path(), _consol_path()):
         try:
             if os.path.exists(p):
                 os.remove(p)
         except OSError:
             pass
-    _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())
+    _excel_cache_clear()                                # this dispatcher's board was reset
     return {"ok": True, "removed_batches": removed}
 
 
 # ----------------------- tally + post (SuperDispatch) -----------------------
-_excel_cache = {"path": None, "sheet": None, "mtime": None, "vins": set()}
+# CONCURRENCY: the Excel VIN count is PER-DISPATCHER — each profile filters the sheet to
+# its own states, so Soyo's total differs from Kelly's even off the same file. The cache
+# is therefore keyed by profile id (not a single global, which made every window show the
+# first profile's count). Each entry: {"path","sheet","mtime","vins"}.
+_excel_cache: dict = {}
+
+
+def _excel_cache_clear(all_profiles: bool = False) -> None:
+    """Invalidate the Excel VIN cache. By default just this request's dispatcher (its
+    state filter or board changed); all_profiles=True wipes every entry (e.g. a settings
+    reload that can change how every sheet is read)."""
+    if all_profiles:
+        _excel_cache.clear()
+    else:
+        _excel_cache.pop(_pid() or "", None)
 
 
 def _active_excel() -> tuple[Optional[str], Optional[str]]:
@@ -475,15 +622,16 @@ def _active_excel() -> tuple[Optional[str], Optional[str]]:
     no run has been started yet. We do NOT fall back to a default sheet: an empty active
     Excel makes the GUI show the 'Excel +' picker instead of counting against (and
     resuming) some sheet the user never chose."""
-    saved = _load_json(ACTIVE_EXCEL_PATH, {})
+    saved = _load_json(_active_excel_path(), {})
     if not isinstance(saved, dict) or not saved.get("path"):
         return None, None
     return saved.get("path"), saved.get("sheet")
 
 
 def _excel_vins() -> set:
-    """The set of usable VINs in the active Excel (cached by path+sheet+mtime). Empty
-    when no Excel has been chosen/run yet."""
+    """The set of usable VINs in THIS dispatcher's active Excel — the sheet filtered to
+    the request profile's own states (cached per profile by path+sheet+mtime). Empty when
+    no Excel has been chosen/run yet."""
     path, sheet = _active_excel()
     if not path:
         return set()
@@ -491,18 +639,19 @@ def _excel_vins() -> set:
         mt = os.path.getmtime(path)
     except OSError:
         return set()
-    if (_excel_cache["path"] == path and _excel_cache["sheet"] == sheet
-            and _excel_cache["mtime"] == mt):
-        return _excel_cache["vins"]
+    import profiles
+    pid = _pid()                                        # whose total are we counting?
+    c = _excel_cache.get(pid or "")
+    if c and c["path"] == path and c["sheet"] == sheet and c["mtime"] == mt:
+        return c["vins"]
     try:
         import excel_ingest
-        import profiles
         rows, _ = excel_ingest.read_rows(path, sheet)
-        rows = profiles.filter_rows(rows, profiles.active_profile())   # dispatcher's states only
+        rows = profiles.filter_rows(rows, profiles.get_profile(pid))   # THIS dispatcher's states
         vins = {r.vin for r in rows if r.ok and r.vin}
     except Exception:                                   # noqa: BLE001
         vins = set()
-    _excel_cache.update(path=path, sheet=sheet, mtime=mt, vins=vins)
+    _excel_cache[pid or ""] = {"path": path, "sheet": sheet, "mtime": mt, "vins": vins}
     return vins
 
 
@@ -532,7 +681,7 @@ def api_tally():
     processed = len(excel & seen) if total else len(seen)
     path, _sheet = _active_excel()
     return {"processed": processed, "total": total,
-            "running": _run_progress["running"],
+            "running": _run_state(_pid())["progress"]["running"],
             "active_excel": path,
             "active_excel_name": os.path.basename(path) if path else "",
             "done": total > 0 and processed >= total}
@@ -563,7 +712,7 @@ def api_post(body: dict = Body(...)):
         payloads.append(sd_api.to_sd_order(o, total=total, dispatcher=dispatcher))
     # TODO (next): also read consolidations.json and PATCH staged VINs onto the
     # matched existing SD orders (build_vehicles_merge), then actually POST these.
-    consol = _load_json(CONSOL_PATH, [])
+    consol = _load_json(_consol_path(), [])
     return {"ok": True, "dry_run": True, "count": len(payloads),
             "consolidations": len(consol), "payloads": payloads}
 
@@ -626,7 +775,7 @@ def api_post_all(body: dict = Body(default=None)):
     # TWO things change: the vehicles list (existing kept with their guids, new VINs
     # appended — no per-VIN price) and the order total. Everything else is left intact.
     kept_consol = []
-    for entry in _load_json(CONSOL_PATH, []):
+    for entry in _load_json(_consol_path(), []):
         add = entry.get("add") or []
         try:
             existing = sd_api.get_order(entry.get("order_guid"))
@@ -653,32 +802,32 @@ def api_post_all(body: dict = Body(default=None)):
         if kept_orders:
             _save_json(path, kept_orders)
         else:
-            for fp in glob.glob(os.path.join(ORDERS_DIR, "*.json")):
+            for fp in glob.glob(os.path.join(_orders_dir(), "*.json")):
                 try:
                     os.remove(fp)
                 except OSError:
                     pass
     try:
-        if os.path.exists(SEARCH_PATH):
-            os.remove(SEARCH_PATH)                      # SD matches are informational
+        if os.path.exists(_search_path()):
+            os.remove(_search_path())                      # SD matches are informational
     except OSError:
         pass
     if kept_consol:
-        _save_json(CONSOL_PATH, kept_consol)
+        _save_json(_consol_path(), kept_consol)
     else:
         try:
-            if os.path.exists(CONSOL_PATH):
-                os.remove(CONSOL_PATH)
+            if os.path.exists(_consol_path()):
+                os.remove(_consol_path())
         except OSError:
             pass
     # Fully posted with nothing left -> reset to the blank "Excel +" state (spares stay).
     if not kept_orders and not kept_consol:
         try:
-            if os.path.exists(ACTIVE_EXCEL_PATH):
-                os.remove(ACTIVE_EXCEL_PATH)
+            if os.path.exists(_active_excel_path()):
+                os.remove(_active_excel_path())
         except OSError:
             pass
-        _excel_cache.update(path=None, sheet=None, mtime=None, vins=set())
+        _excel_cache_clear()                            # this dispatcher's board fully posted
 
     return {"ok": True, "posted_vins": posted_vins, "failed": failures}
 
@@ -712,9 +861,9 @@ _SPARE_EXTRA = ("pickup", "delivery", "transport_type", "inspection_type",
 
 
 def _load_spares() -> list:
-    if os.path.exists(SPARES_PATH):
+    if os.path.exists(_spares_path()):
         try:
-            with open(SPARES_PATH, encoding="utf-8") as f:
+            with open(_spares_path(), encoding="utf-8") as f:
                 return json.load(f)
         except (OSError, ValueError):
             return []
@@ -722,8 +871,8 @@ def _load_spares() -> list:
 
 
 def _save_spares(spares):
-    os.makedirs(os.path.dirname(SPARES_PATH), exist_ok=True)
-    with open(SPARES_PATH, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(_spares_path()), exist_ok=True)
+    with open(_spares_path(), "w", encoding="utf-8") as f:
         json.dump(spares, f, indent=2, default=str)
 
 
@@ -1072,15 +1221,15 @@ def api_consolidation_search(body: dict = Body(...)):
         "errors": res.errors,
         "auth_error": res.auth_error,
     }
-    _save_json(SEARCH_PATH, payload)
+    _save_json(_search_path(), payload)
     return payload
 
 
 @app.get("/api/consolidation/matches")
 def api_consolidation_matches():
     """Latest search results + the staged consolidation queue (for the route view)."""
-    return {"search": _load_json(SEARCH_PATH, {"orders": []}),
-            "staged": _load_json(CONSOL_PATH, [])}
+    return {"search": _load_json(_search_path(), {"orders": []}),
+            "staged": _load_json(_consol_path(), [])}
 
 
 @app.post("/api/consolidation/stage")
@@ -1092,7 +1241,7 @@ def api_consolidation_stage(body: dict = Body(...)):
     vins = set(body.get("vins") or [])
     if not guid or not vins:
         raise HTTPException(400, "order_guid and vins are required")
-    search = _load_json(SEARCH_PATH, {"orders": []})
+    search = _load_json(_search_path(), {"orders": []})
     order = next((o for o in search.get("orders", []) if o.get("guid") == guid), None)
     if not order:
         raise HTTPException(400, "that order isn't in the latest search — run a VIN search first")
@@ -1117,7 +1266,7 @@ def api_consolidation_stage(body: dict = Body(...)):
     batch[:] = [o for o in batch if o["vehicles"]]
     _save_batch(path, batch)
 
-    staged = _load_json(CONSOL_PATH, [])
+    staged = _load_json(_consol_path(), [])
     entry = next((s for s in staged if s.get("order_guid") == guid), None)
     if not entry:
         entry = {"order_guid": guid, "number": order.get("number"),
@@ -1129,7 +1278,7 @@ def api_consolidation_stage(body: dict = Body(...)):
         if m.get("vin") not in have:
             entry["add"].append(m)
             have.add(m.get("vin"))
-    _save_json(CONSOL_PATH, staged)
+    _save_json(_consol_path(), staged)
     return {"ok": True, "staged": len(moved), "into": order.get("number")}
 
 
@@ -1140,7 +1289,7 @@ def api_consolidation_unstage(body: dict = Body(...)):
     vins = set(body.get("vins") or [])
     if not vins:
         raise HTTPException(400, "select one or more staged VINs")
-    staged = _load_json(CONSOL_PATH, [])
+    staged = _load_json(_consol_path(), [])
     take = []
     for entry in staged:
         kept = []
@@ -1173,7 +1322,7 @@ def api_consolidation_unstage(body: dict = Body(...)):
             _recompute(new_order)
             batch.append(new_order)
     _save_batch(path, batch)
-    _save_json(CONSOL_PATH, staged)
+    _save_json(_consol_path(), staged)
     return {"ok": True, "restored": len(take)}
 
 
@@ -1230,7 +1379,7 @@ def api_consolidation_price(body: dict = Body(...)):
     guid = body.get("order_guid")
     if not guid:
         raise HTTPException(400, "order_guid is required")
-    staged = _load_json(CONSOL_PATH, [])
+    staged = _load_json(_consol_path(), [])
     entry = next((s for s in staged if s.get("order_guid") == guid), None)
     if not entry or not entry.get("add"):
         raise HTTPException(400, "price is locked — add an Excel VIN to this order first")
@@ -1239,7 +1388,7 @@ def api_consolidation_price(body: dict = Body(...)):
         entry.pop("price_override", None)
     else:
         entry["price_override"] = price
-    _save_json(CONSOL_PATH, staged)
+    _save_json(_consol_path(), staged)
     return {"ok": True, "price_override": entry.get("price_override")}
 
 
@@ -1306,12 +1455,13 @@ def _run_tray(url, server):
         webbrowser.open(url)
 
     def _quit(icon, item):
-        # if a pull is running, confirm — then stop it (and its Chrome) cleanly so it
-        # doesn't keep running orphaned after the app exits.
-        if _run_progress.get("running"):
+        # if ANY dispatcher's pull is running, confirm — then stop them all (and the
+        # shared Chrome) cleanly so nothing keeps running orphaned after the app exits.
+        any_running = any(st["progress"].get("running") for st in _runs.values())
+        if any_running:
             if not _confirm_quit_during_run():
                 return                                # user chose to keep it running
-            _terminate_run()
+            _terminate_all_runs()
         server.should_exit = True
         icon.stop()
 
@@ -1382,15 +1532,21 @@ def _serve():
 
     _write_instance_info(url, port)                     # so a 2nd launch opens this one
 
+    # Cap the graceful-shutdown wait: the page holds an open /api/events SSE stream,
+    # and uvicorn will otherwise wait forever for it to close on Ctrl+C — that's the
+    # "stall". 3s, then it force-closes connections and exits.
     if windowed:
         _redirect_output_to_logfile()
-        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info",
+                                timeout_graceful_shutdown=3)
         server = uvicorn.Server(config)
         threading.Thread(target=server.run, daemon=True).start()
         _run_tray(url, server)                          # blocks until Quit -> exit
     else:
         print(f"Shipment Creator GUI -> {url}  (Ctrl+C to stop)")
-        uvicorn.run(app, host="127.0.0.1", port=port)
+        config = uvicorn.Config(app, host="127.0.0.1", port=port,
+                                timeout_graceful_shutdown=3)
+        uvicorn.Server(config).run()
 
 
 if __name__ == "__main__":

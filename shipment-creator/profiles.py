@@ -133,10 +133,31 @@ def dispatcher_phone(profile: dict | None = None) -> str | None:
 
 
 # --------------------------- Excel state filtering ---------------------------
+# Washington DC ZIP prefixes: 200xx and 202xx–205xx are DC. 201xx is Virginia
+# (Dulles), so it is deliberately NOT included. DC origins are sometimes written as
+# "Washington" in the state column (which would read as WA), so we treat a DC ZIP as
+# authoritative — DC loads route by ZIP, not by the ambiguous state text.
+_DC_ZIP_PREFIXES = ("200", "202", "203", "204", "205")
+
+
+def _is_dc_zip(zip_code) -> bool:
+    z = str(zip_code or "").strip()
+    return len(z) >= 3 and z[:3] in _DC_ZIP_PREFIXES
+
+
 def _norm_state(s) -> str:
     """Normalize a state (full name or code) to its 2-letter code, uppercased."""
     import sd_api
     return sd_api._state(str(s or "").strip()).upper()
+
+
+def row_pickup_state(row) -> str:
+    """The row's effective PICKUP region for filtering. A DC ZIP wins over the state
+    column, so a DC load goes to whoever covers 'DC' (Kelly) even if its origin state
+    was typed as 'Washington'."""
+    if _is_dc_zip(row.get("pickup_zip")):
+        return "DC"
+    return _norm_state(row.get("pickup_state"))
 
 
 def allowed_states(profile: dict | None) -> set:
@@ -144,10 +165,11 @@ def allowed_states(profile: dict | None) -> set:
 
 
 def filter_rows(rows: list, profile: dict | None):
-    """Keep only the rows whose PICKUP state the profile covers. An empty `states`
+    """Keep only the rows whose PICKUP region the profile covers. An empty `states`
     list (not configured yet) means keep everything, so the app works until the
-    profiles are filled in."""
+    profiles are filled in. DC is matched by ZIP (see row_pickup_state), so a DC load
+    routes to the DC owner regardless of how its state column reads."""
     want = allowed_states(profile)
     if not want:
         return list(rows)
-    return [r for r in rows if _norm_state(r.get("pickup_state")) in want]
+    return [r for r in rows if row_pickup_state(r) in want]

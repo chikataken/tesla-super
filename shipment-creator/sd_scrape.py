@@ -166,14 +166,23 @@ def scan_loadboard(zip_pairs) -> list:
         return []
     out = []
     with auth.browser_context() as ctx:
-        page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        for status in SCAN_TABS:
+        # CONCURRENCY: another dispatcher may be mid-run in this same shared Chrome, so
+        # open our OWN tab instead of adopting ctx.pages[0] (which could be their tab),
+        # and close it when done.
+        page = ctx.new_page()
+        try:
+            for status in SCAN_TABS:
+                try:
+                    hits = _scan_tab(page, status, pairs)
+                    print(f"  [{status}] {len(hits)} card(s) match an Excel route zip-pair")
+                    out.extend(hits)
+                except Exception as e:               # noqa: BLE001 - isolate per tab
+                    print(f"  [{status}] scan error: {e}")
+        finally:
             try:
-                hits = _scan_tab(page, status, pairs)
-                print(f"  [{status}] {len(hits)} card(s) match an Excel route zip-pair")
-                out.extend(hits)
-            except Exception as e:                   # noqa: BLE001 - isolate per tab
-                print(f"  [{status}] scan error: {e}")
+                page.close()
+            except Exception:                        # noqa: BLE001
+                pass
     uniq, seen = [], set()
     for h in out:
         k = (h["vin"], h["loadboard_status"])

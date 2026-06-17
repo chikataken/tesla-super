@@ -252,15 +252,18 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
             print(f"{tag} {vin}: ERROR {type(exc).__name__}: {exc}")
 
 
-async def _park_offscreen(ctx) -> None:
+async def _park_offscreen(ctx, pages=None) -> None:
     """Force the automation window off-screen via CDP (ghost mode).
 
     The --window-position launch flag isn't enough on Windows: Chrome's startup
     WindowSizer drags an off-screen window back onto a connected display, and a
     persistent profile can restore the last visible bounds. Setting the bounds over
     CDP after startup is authoritative. windowState stays "normal" (NOT minimized) so
-    Chrome's occlusion logic doesn't freeze the background tabs the BOL pull drives."""
-    pages = list(ctx.pages) or [await ctx.new_page()]
+    Chrome's occlusion logic doesn't freeze the background tabs the BOL pull drives.
+
+    `pages` limits which tabs (windows) we touch — under concurrency we park only the
+    current run's own tabs, not another in-flight run's."""
+    pages = list(pages) if pages else (list(ctx.pages) or [await ctx.new_page()])
     moved: set = set()
     for page in pages:
         try:
@@ -304,15 +307,21 @@ async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
                 viewport={"width": 1480, "height": 900},
                 args=["--disable-blink-features=AutomationControlled"],
             )
+        own_pages: list = []                       # tabs THIS run created (so we can close them)
         try:
-            pages = list(ctx.pages)
-            while len(pages) < workers:
-                pages.append(await ctx.new_page())
+            # CONCURRENCY: up to four dispatchers share this one logged-in Chrome context
+            # at the same time. So each run must open and drive its OWN fresh tabs — never
+            # adopt ctx.pages, which would steal another in-flight run's tabs (the classic
+            # "only 4 tabs, one at a time" symptom). We create exactly `workers` new tabs
+            # and close them when this run ends.
+            pages = [await ctx.new_page() for _ in range(workers)]
+            own_pages.extend(pages)
 
             # Ghost mode: drag the window off-screen via CDP now (authoritative — the
             # --window-position launch flag is unreliable on Windows). No-op if headless.
+            # Park only THIS run's tabs so we don't disturb a concurrent run's windows.
             if config.AUTH_MODE == "cdp" and config.WINDOW_MODE == "ghost" and not config.HEADLESS:
-                await _park_offscreen(ctx)
+                await _park_offscreen(ctx, pages)
 
             tasks = [
                 _worker(i + 1, pages[i], chunks[i], seen, lock, results, on_bol, need_by)
@@ -372,7 +381,15 @@ async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
                 await asyncio.get_event_loop().run_in_executor(None, input)
             except (EOFError, RuntimeError):
                 pass
-            if browser is not None:                  # cdp mode
+            # Close only THIS run's own tabs, so a concurrent dispatcher's tabs in the
+            # shared Chrome keep running. Then detach (cdp) — which leaves Chrome up for
+            # the other runs — or close our private context (non-cdp).
+            if browser is not None:                  # cdp mode: shared Chrome
+                for pg in own_pages:
+                    try:
+                        await pg.close()
+                    except Exception:                # noqa: BLE001
+                        pass
                 await chrome_cdp.close_chrome_async(browser, proc)
             else:
                 await ctx.close()
