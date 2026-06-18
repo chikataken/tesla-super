@@ -219,29 +219,44 @@ async def _scan_tab_async(page, status: str, zip_pairs: set) -> list:
     base = TAB_URL.get(status)
     found, seen = [], set()
     for pageno in range(1, config.SD_SCAN_MAX_PAGES + 1):
-        if base:
-            await page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}")
-        elif pageno == 1:
-            await page.goto(LOADBOARD_URL)
+        # Load this page of the status tab and wait for order rows. CONCURRENCY: when a
+        # second dispatcher is running at the same time, both share this Chrome, so the
+        # loadboard can render noticeably slower. A single 10s wait would then time out and
+        # leave THIS dispatcher with ZERO SD hits (no posted/accepted route highlights) — the
+        # "second profile shows no matches" bug. So the FIRST page is retried with a growing
+        # timeout; transient slowness recovers instead of silently yielding nothing.
+        attempts = 3 if pageno == 1 else 1
+        rows_ready = False
+        for attempt in range(1, attempts + 1):
+            if base:
+                await page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}")
+            elif pageno == 1:
+                await page.goto(LOADBOARD_URL)
+                try:
+                    await page.get_by_role("tab", name=TAB_LABEL[status]).first.click()
+                except Exception:
+                    pass
+            else:
+                break                                # base-less tabs don't paginate past 1
+            await page.wait_for_load_state("domcontentloaded")
+            await _check_login_async(page)
             try:
-                await page.get_by_role("tab", name=TAB_LABEL[status]).first.click()
+                await page.locator(ORDER_LINK).first.wait_for(timeout=10000 + 5000 * (attempt - 1))
+                rows_ready = True
+                break
             except Exception:
-                pass
-        else:
-            break
-        await page.wait_for_load_state("domcontentloaded")
-        await _check_login_async(page)
-        try:
-            await page.locator(ORDER_LINK).first.wait_for(timeout=10000)
-        except Exception:
-            os.makedirs("./output", exist_ok=True)
-            shot = f"./output/sd_scan_{status}_p{pageno}.png"
-            try:
-                await page.screenshot(path=shot)
-            except Exception:
-                pass
-            print(f"  [{status}] page {pageno}: no order rows at {page.url} "
-                  f"(ORDER_LINK selector likely needs tuning) -> {shot}")
+                if attempt < attempts:
+                    await page.wait_for_timeout(1500)    # brief backoff, then re-load and retry
+        if not rows_ready:
+            if pageno == 1:                          # a genuinely empty later page is normal; page 1 isn't
+                os.makedirs("./output", exist_ok=True)
+                shot = f"./output/sd_scan_{status}_p{pageno}.png"
+                try:
+                    await page.screenshot(path=shot)
+                except Exception:
+                    pass
+                print(f"  [{status}] page {pageno}: no order rows at {page.url} after {attempts} tries "
+                      f"(slow load under load, or ORDER_LINK selector) -> {shot}")
             break
         cards = await page.evaluate(_CARDS_JS)
         ids = {c.get("href") for c in cards}

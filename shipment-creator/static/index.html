@@ -99,6 +99,9 @@
   .spare-ret{background:none;border:1px solid var(--line);color:var(--muted);border-radius:6px;
     cursor:pointer;font-size:13px;line-height:1;padding:3px 7px;flex:none}
   .spare-ret:hover{color:var(--text);border-color:var(--accent)}
+  /* No cap on how many VINs can be set aside: the list scrolls inside its own column so
+     even a long spare list stays fully reachable (the sticky column won't run off-screen). */
+  #spareList{max-height:calc(100vh - 140px);overflow-y:auto;padding-right:2px}
 
   /* due flag on the list row: red = overdue, yellow = due within 3 days */
   .duebang{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;
@@ -1331,23 +1334,54 @@ async function startRun(excelPath){
   }catch(e){ toast('Could not start the run'); return; }
   syncRunBar();                                          // begin polling -> green animated
 }
-// blue Excel+ / the small "+" : pick a file and run it FRESH. Loading a new sheet
-// replaces the current board, so confirm first when one already exists.
+// blue Excel+ / the small "+" : pick a file ON THE CLIENT and run it FRESH. The file
+// picker is the BROWSER's own <input type=file> (so it works over the web — the old
+// host-side native dialog only made sense when the browser was on the server machine).
+// The chosen file is uploaded to the server, which saves it and returns the path the run
+// uses. Loading a new sheet replaces the current board, so we confirm once a file is
+// actually chosen.
+let _excelInput = null;
+function _ensureExcelInput(){
+  if(_excelInput) return _excelInput;
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.xlsx,.xlsm';
+  inp.style.display = 'none';
+  inp.addEventListener('change', onExcelChosen);
+  document.body.appendChild(inp);
+  _excelInput = inp;
+  return inp;
+}
 async function pickAndRun(){
   if(!ACTIVE_PROFILE){
     toast('Select a dispatcher profile first (top-left).');
     const sel=$('#profileSel'); if(sel){ sel.classList.add('unset'); sel.focus(); }
     return;
   }
-  let t; try{ t=await fetch('/api/tally').then(r=>r.json()); }catch(e){ t={}; }
-  if(t && t.total && !confirm('Load a different Excel? This clears the current board.')) return;
-  let r; try{ r=await fetch('/api/pick-excel',{method:'POST'}).then(x=>x.json()); }
-  catch(e){ toast('File picker unavailable'); return; }
-  if(!r || !r.path) return;                              // cancelled
-  try{ await fetch('/api/reset',{method:'POST'}); }catch(e){}   // start clean
-  _runStarted=0; _lastProcessed=-1;
-  toast('Running '+(r.name||'Excel')+'…');
-  await startRun(r.path);
+  const inp = _ensureExcelInput();
+  inp.value = '';                                       // allow re-picking the same file
+  inp.click();                                          // opens the CLIENT's file dialog
+}
+async function onExcelChosen(ev){
+  const f = ev.target.files && ev.target.files[0];
+  if(!f){ return; }
+  try{
+    let t; try{ t=await fetch('/api/tally').then(r=>r.json()); }catch(e){ t={}; }
+    if(t && t.total && !confirm('Load a different Excel? This clears the current board.')) return;
+    toast('Uploading '+f.name+'…');
+    let saved;
+    try{
+      const r = await fetch('/api/upload?name='+encodeURIComponent(f.name), {method:'POST', body:f});
+      if(!r.ok){ toast((await r.json().catch(()=>({}))).detail || 'Upload failed'); return; }
+      saved = await r.json();
+    }catch(e){ toast('Upload failed'); return; }
+    try{ await fetch('/api/reset',{method:'POST'}); }catch(e){}   // start clean
+    _runStarted=0; _lastProcessed=-1;
+    toast('Running '+(saved.name||'Excel')+'…');
+    await startRun(saved.path);
+  } finally {
+    ev.target.value = '';                               // reset so the same file re-fires change
+  }
 }
 // amber state click : stop any stuck run, then re-read the active Excel from the start
 async function resumeRun(){

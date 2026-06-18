@@ -23,11 +23,7 @@ import threading
 import time
 from typing import Optional
 
-<<<<<<< Updated upstream
-from fastapi import Body, FastAPI, HTTPException
-=======
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
->>>>>>> Stashed changes
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 import paths
@@ -509,57 +505,23 @@ def api_login(body: dict = Body(default=None)):
     return {"ok": True, "opened": opened}
 
 
-def _pick_excel_native() -> Optional[str]:
-    """Open the native Windows 'Open file' dialog filtered to spreadsheets and return
-    the chosen absolute path, or None if cancelled. This IS the user's machine, so a
-    server-side dialog gives us the real filesystem path a browser <input> can't."""
-    if os.name != "nt":
-        return None
-    import ctypes
-    from ctypes import wintypes
-
-    class OPENFILENAMEW(ctypes.Structure):
-        _fields_ = [
-            ("lStructSize", wintypes.DWORD), ("hwndOwner", wintypes.HWND),
-            ("hInstance", wintypes.HINSTANCE), ("lpstrFilter", wintypes.LPCWSTR),
-            ("lpstrCustomFilter", wintypes.LPWSTR), ("nMaxCustFilter", wintypes.DWORD),
-            ("nFilterIndex", wintypes.DWORD), ("lpstrFile", wintypes.LPWSTR),
-            ("nMaxFile", wintypes.DWORD), ("lpstrFileTitle", wintypes.LPWSTR),
-            ("nMaxFileTitle", wintypes.DWORD), ("lpstrInitialDir", wintypes.LPCWSTR),
-            ("lpstrTitle", wintypes.LPCWSTR), ("Flags", wintypes.DWORD),
-            ("nFileOffset", wintypes.WORD), ("nFileExtension", wintypes.WORD),
-            ("lpstrDefExt", wintypes.LPCWSTR), ("lCustData", wintypes.LPARAM),
-            ("lpfnHook", wintypes.LPVOID), ("lpTemplateName", wintypes.LPCWSTR),
-            ("pvReserved", wintypes.LPVOID), ("dwReserved", wintypes.DWORD),
-            ("FlagsEx", wintypes.DWORD),
-        ]
-
-    buf = ctypes.create_unicode_buffer(2048)
-    flt = ctypes.create_unicode_buffer("Excel files\0*.xlsx;*.xlsm\0All files\0*.*\0\0")
-    ofn = OPENFILENAMEW()
-    ofn.lStructSize = ctypes.sizeof(OPENFILENAMEW)
-    ofn.lpstrFile = ctypes.cast(buf, wintypes.LPWSTR)
-    ofn.nMaxFile = 2048
-    ofn.lpstrFilter = ctypes.cast(flt, wintypes.LPCWSTR)
-    ofn.lpstrTitle = "Select the Excel sheet to run"
-    ofn.Flags = 0x1000 | 0x800 | 0x80000              # FILEMUSTEXIST | PATHMUSTEXIST | EXPLORER
-    ctypes.windll.ole32.CoInitialize(None)
-    try:
-        ok = ctypes.windll.comdlg32.GetOpenFileNameW(ctypes.byref(ofn))
-    finally:
-        ctypes.windll.ole32.CoUninitialize()
-    return buf.value or None if ok else None
-
-
-@app.post("/api/pick-excel")
-def api_pick_excel():
-    """Pop the native file dialog so the user can choose the Excel to run. Returns the
-    absolute path (or path=null if they cancelled)."""
-    try:
-        path = _pick_excel_native()
-    except Exception as e:                             # noqa: BLE001
-        raise HTTPException(500, f"Couldn't open the file picker: {e}")
-    return {"path": path, "name": os.path.basename(path) if path else ""}
+@app.post("/api/upload")
+async def api_upload(request: Request, name: str = "upload.xlsx"):
+    """Receive an Excel chosen in the CLIENT's browser (raw file bytes in the POST body)
+    and save it server-side, returning the path the run will use. This replaces the old
+    native host-side 'Open file' dialog, which only worked when the browser ran on the
+    same machine as the server — useless over the web (Cloudflare tunnel). The filename is
+    reduced to a safe basename and forced to a spreadsheet extension."""
+    safe = os.path.basename((name or "upload.xlsx").strip()) or "upload.xlsx"
+    if not safe.lower().endswith((".xlsx", ".xlsm")):
+        safe += ".xlsx"
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "Empty upload — the file didn't come through.")
+    dest = paths.data_path("uploads", safe)            # DATA_DIR/uploads/<name> (dir auto-created)
+    with open(dest, "wb") as f:
+        f.write(data)
+    return {"path": dest, "name": safe}
 
 
 @app.post("/api/run/terminate")
@@ -703,7 +665,7 @@ def api_post(body: dict = Body(...)):
                 board = json.load(f)
         except (OSError, ValueError):
             board = []
-    dispatcher = profiles.dispatcher_phone()
+    dispatcher = profiles.dispatcher_phone(profiles.get_profile(_pid()))  # phone of the POSTING profile
     payloads = []
     for o in board:
         total, _per = _effective_prices(o)             # override total, else sum of rates
@@ -732,7 +694,8 @@ def api_post_live(body: dict = Body(...)):
     if not o:
         raise HTTPException(404, "that shipment isn't on the board")
     total, _per = _effective_prices(o)
-    payload = sd_api.to_sd_order(o, total=total, dispatcher=profiles.dispatcher_phone())
+    payload = sd_api.to_sd_order(o, total=total,
+                                 dispatcher=profiles.dispatcher_phone(profiles.get_profile(_pid())))
     try:
         res = sd_api.create_order(payload, dry_run=False)
     except sd_api.SDError as e:
@@ -749,7 +712,7 @@ def api_post_all(body: dict = Body(default=None)):
     import sd_api
     import profiles
     import config
-    dispatcher = profiles.dispatcher_phone()
+    dispatcher = profiles.dispatcher_phone(profiles.get_profile(_pid()))  # phone of the POSTING profile
 
     path = _staged_files()[0] if _staged_files() else None
     board = []
@@ -1073,24 +1036,31 @@ def api_spare(body: dict = Body(...)):
     spares = _load_spares()
     have = {s.get("vin") for s in spares}
     moved = []
+    removed = 0
     for o in batch:
         keep = []
         for v in o["vehicles"]:
             vin = v.get("vin")
-            if vin in vins and vin not in have:
-                entry = dict(v)
-                entry["pickup"] = o.get("pickup")
-                entry["delivery"] = o.get("delivery")
-                entry["transport_type"] = o.get("transport_type")
-                entry["inspection_type"] = o.get("inspection_type")
-                entry["instructions"] = o.get("instructions")
-                entry["from_number"] = o.get("number")
-                moved.append(entry)
-                have.add(vin)
+            if vin in vins:
+                # A selected VIN is ALWAYS pulled off the board — every occurrence, even a
+                # duplicate VIN that sits on two shipments, so the shipment actually
+                # disappears. We only add ONE spare entry per VIN (the `have` guard), so a
+                # VIN that's already spared just drops from the board without a dup entry.
+                removed += 1
+                if vin not in have:
+                    entry = dict(v)
+                    entry["pickup"] = o.get("pickup")
+                    entry["delivery"] = o.get("delivery")
+                    entry["transport_type"] = o.get("transport_type")
+                    entry["inspection_type"] = o.get("inspection_type")
+                    entry["instructions"] = o.get("instructions")
+                    entry["from_number"] = o.get("number")
+                    moved.append(entry)
+                    have.add(vin)
             else:
                 keep.append(v)
         o["vehicles"] = keep
-    if not moved:
+    if not removed:
         raise HTTPException(400, "those VINs aren't on the board")
     for o in batch:
         _recompute(o)
