@@ -37,3 +37,4 @@ build/
 .auth/
 **/.auth/
 .claude/launch.json
+**/.claude/launch.json
