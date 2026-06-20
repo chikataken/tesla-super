@@ -252,31 +252,95 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
             print(f"{tag} {vin}: ERROR {type(exc).__name__}: {exc}")
 
 
-async def _park_offscreen(ctx, pages=None) -> None:
-    """Force the automation window off-screen via CDP (ghost mode).
+# --------------------------------------------------------------------------
+# Shared-Chrome window management (mirrors tesla-reconcile/auth.py)
+# --------------------------------------------------------------------------
+# Chrome's blank launch tab is ALWAYS at one of these; a tool's working tabs are
+# navigated away and a fresh tab is "about:blank" — so adopting one as our first tab
+# can never steal another tool's tab.
+_LAUNCH_URLS = {"chrome://new-tab-page/", "chrome://newtab/", "chrome://new-tab-page/#"}
 
-    The --window-position launch flag isn't enough on Windows: Chrome's startup
-    WindowSizer drags an off-screen window back onto a connected display, and a
-    persistent profile can restore the last visible bounds. Setting the bounds over
-    CDP after startup is authoritative. windowState stays "normal" (NOT minimized) so
-    Chrome's occlusion logic doesn't freeze the background tabs the BOL pull drives.
 
-    `pages` limits which tabs (windows) we touch — under concurrency we park only the
-    current run's own tabs, not another in-flight run's."""
-    pages = list(pages) if pages else (list(ctx.pages) or [await ctx.new_page()])
-    moved: set = set()
-    for page in pages:
+async def _adopt_launch_tab(ctx):
+    """Return an UNCLAIMED blank launch tab to reuse as our window's first tab, or
+    None — so the run that opens first reuses Chrome's launch window (no extra window,
+    no leftover blank) and a later run opens its own new window instead."""
+    for pg in list(ctx.pages):
         try:
-            sess = await ctx.new_cdp_session(page)
-            wid = (await sess.send("Browser.getWindowForTarget"))["windowId"]
-            if wid in moved:
-                continue
-            await sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": {
-                "left": -32000, "top": -32000, "width": 1560, "height": 920,
-                "windowState": "normal"}})
-            moved.add(wid)
-        except Exception:                               # noqa: BLE001 - best-effort hide
+            if pg.url in _LAUNCH_URLS:
+                return pg
+        except Exception:                               # noqa: BLE001
             pass
+    return None
+
+
+async def _await_launch_tab(ctx):
+    """Just after launch the blank tab may not be in ctx.pages yet; poll briefly."""
+    for _ in range(40):                                 # up to ~2s
+        if list(ctx.pages):
+            return
+        await asyncio.sleep(0.05)
+
+
+async def _open_new_window(browser, ctx):
+    """Open a page in a brand-new Chrome WINDOW and return it, so this run's tabs are
+    separate from another tool's window. Race-free via a unique url marker; the created
+    target is closed on failure so a window never leaks."""
+    import uuid
+    tid = None
+    try:
+        sess = await browser.new_browser_cdp_session()
+        marker = "tfi-" + uuid.uuid4().hex
+        res = await sess.send("Target.createTarget", {"url": "about:blank#" + marker, "newWindow": True})
+        tid = res.get("targetId")
+        for _ in range(100):                            # ~5s for the page to register
+            for pg in ctx.pages:
+                if marker in pg.url:
+                    return pg
+            await asyncio.sleep(0.05)
+    except Exception:                                   # noqa: BLE001 - fall back to a tab
+        pass
+    if tid is not None:
+        try:
+            s2 = await browser.new_browser_cdp_session()
+            await s2.send("Target.closeTarget", {"targetId": tid})
+        except Exception:                               # noqa: BLE001
+            pass
+    return None
+
+
+async def _place_window(ctx, page):
+    """Park OUR window off-screen (ghost) or on-screen (visible), scoped to just this
+    page's window so a concurrent tool's window is never moved. No-op under headless."""
+    if config.HEADLESS:
+        return
+    if config.WINDOW_MODE == "ghost":
+        bounds = {"left": -32000, "top": -32000, "width": 1480, "height": 900, "windowState": "normal"}
+    else:
+        return                                          # visible: leave Chrome's placement
+    try:
+        sess = await ctx.new_cdp_session(page)
+        wid = (await sess.send("Browser.getWindowForTarget"))["windowId"]
+        await sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": bounds})
+    except Exception:                                   # noqa: BLE001 - best-effort
+        pass
+
+
+async def _open_run_window(browser, ctx, workers, launched):
+    """Open this run's `workers` tabs in ONE dedicated window and return them. First
+    tab reuses an unclaimed blank launch tab or opens a new window; the rest follow
+    into it. Then the window is placed (ghost/visible)."""
+    if launched:
+        await _await_launch_tab(ctx)
+    first = None
+    if config.AUTH_MODE == "cdp" and browser is not None:
+        first = await _adopt_launch_tab(ctx) or await _open_new_window(browser, ctx)
+    if first is None:
+        pages = [await ctx.new_page() for _ in range(workers)]
+    else:
+        pages = [first] + [await ctx.new_page() for _ in range(workers - 1)]
+    await _place_window(ctx, pages[0])
+    return pages
 
 
 async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
@@ -309,19 +373,13 @@ async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
             )
         own_pages: list = []                       # tabs THIS run created (so we can close them)
         try:
-            # CONCURRENCY: up to four dispatchers share this one logged-in Chrome context
-            # at the same time. So each run must open and drive its OWN fresh tabs — never
-            # adopt ctx.pages, which would steal another in-flight run's tabs (the classic
-            # "only 4 tabs, one at a time" symptom). We create exactly `workers` new tabs
-            # and close them when this run ends.
-            pages = [await ctx.new_page() for _ in range(workers)]
+            # SHARED CHROME: this run opens its `workers` tabs in its OWN window (so it's
+            # separate from tesla-reconcile's / another dispatcher's window), drives only
+            # those tabs, and closes just them on exit. Never adopt ctx.pages wholesale —
+            # that would steal another in-flight run's tabs. Window is placed off-screen
+            # in ghost mode inside _open_run_window.
+            pages = await _open_run_window(browser, ctx, workers, proc is not None)
             own_pages.extend(pages)
-
-            # Ghost mode: drag the window off-screen via CDP now (authoritative — the
-            # --window-position launch flag is unreliable on Windows). No-op if headless.
-            # Park only THIS run's tabs so we don't disturb a concurrent run's windows.
-            if config.AUTH_MODE == "cdp" and config.WINDOW_MODE == "ghost" and not config.HEADLESS:
-                await _park_offscreen(ctx, pages)
 
             tasks = [
                 _worker(i + 1, pages[i], chunks[i], seen, lock, results, on_bol, need_by)

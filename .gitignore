@@ -38,3 +38,6 @@ build/
 **/.auth/
 .claude/launch.json
 **/.claude/launch.json
+
+# stray Chrome profile from a misconfigured CDP_PROFILE_DIR (literal Windows path on Linux)
+shipment-creator/C:\tesla-profile/

@@ -295,17 +295,12 @@ def _terminate_all_runs():
 
 @app.on_event("shutdown")
 def _on_shutdown():
-    """When the server stops — Ctrl+C in web.bat, tray Quit, or any exit — kill every
-    in-flight pipeline subprocess AND the shared automation Chrome so nothing is left
-    orphaned."""
+    """When the server stops — Ctrl+C, tray Quit, or any exit — stop every in-flight
+    pipeline subprocess. The shared automation Chrome is DETACHED and may be shared with
+    tesla-reconcile, so we do NOT kill it here: each run already closes its own window
+    when it ends, and Chrome quits on its own once its last window closes."""
     try:
         _terminate_all_runs()
-    except Exception:                                 # noqa: BLE001
-        pass
-    try:
-        if _chrome_proc is not None:
-            import chrome_cdp
-            chrome_cdp._kill_tree(_chrome_proc)
     except Exception:                                 # noqa: BLE001
         pass
 

@@ -98,7 +98,12 @@ def ensure_chrome():
         args.append(f"--window-position={b['left']},{b['top']}")
     if config.HEADLESS:
         args.append("--headless=new")
-    proc = subprocess.Popen(args)
+    # Launch DETACHED in its own session so the shared Chrome outlives whichever tool
+    # started it: otherwise it sits in the tool's process group and a Ctrl+C in that
+    # terminal would kill Chrome (and every other tool's tabs). DEVNULL keeps Chrome's
+    # own log spam out of the tool's console.
+    proc = subprocess.Popen(args, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + 30
     while time.time() < deadline:
         if _cdp_alive(config.CDP_URL):
@@ -108,40 +113,102 @@ def ensure_chrome():
     raise RuntimeError(f"Chrome did not open the CDP endpoint {config.CDP_URL} within 30s")
 
 
-def close_chrome(browser, proc) -> None:
-    """Shut the automation Chrome down when the run ends — ALWAYS.
+# --------------------------------------------------------------------------
+# Shared-Chrome window management
+# --------------------------------------------------------------------------
+# One detached Chrome serves both tools (they share the logged-in profile, which only
+# one Chrome process can open). A run opens its tabs in its OWN window and, on exit,
+# closes ONLY those tabs — leaving the browser and any other tool's window running.
+def _safe_close(page) -> None:
+    try:
+        page.close(run_before_unload=False)              # no beforeunload dialog -> can't hang
+    except Exception:                                    # noqa: BLE001 - already gone
+        pass
 
-    CDP_PROFILE_DIR is a dedicated automation profile, so any Chrome serving the
-    endpoint is ours — including one left over from a previous run that crashed
-    before cleanup (we attach to it with proc=None, and merely detaching used to
-    leave its window and tabs up forever). So: ask the browser to close, VERIFY
-    the endpoint actually went dark, and only if it didn't, kill the process
-    tree (Windows needs taskkill /T — proc.kill() hits just the parent)."""
-    try:
-        browser.new_browser_cdp_session().send("Browser.close")
-    except Exception:
-        pass
-    try:
-        browser.close()              # drop our CDP connection either way
-    except Exception:
-        pass
-    deadline = time.time() + 8
-    while time.time() < deadline and _cdp_alive(config.CDP_URL):
-        time.sleep(0.25)
-    if _cdp_alive(config.CDP_URL):
-        if proc is not None:
-            if os.name == "nt":
-                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                               capture_output=True)
-            else:
-                proc.kill()
-        else:
-            print("WARN: automation Chrome did not close — close the window manually.")
-    if proc is not None:
+
+def _await_startup_tabs(ctx) -> list:
+    """The blank launch tab(s) Chrome opens. Just after launch they may not have
+    registered in ctx.pages yet, so poll briefly."""
+    for _ in range(40):                                  # up to ~2s
+        pages = list(ctx.pages)
+        if pages:
+            return pages
+        time.sleep(0.05)
+    return []
+
+
+# Chrome's blank launch tab is ALWAYS at one of these URLs; a tool's working tabs are
+# navigated away immediately and a freshly opened tab is "about:blank" (not new-tab-
+# page). So adopting one of these as our first tab can never steal another tool's tab.
+_LAUNCH_URLS = {"chrome://new-tab-page/", "chrome://newtab/", "chrome://new-tab-page/#"}
+
+
+def _adopt_launch_tab(ctx):
+    """Return an UNCLAIMED blank launch tab to reuse as our window's first tab, or
+    None. Lets the run that opens first reuse Chrome's launch window (no extra window,
+    no leftover blank); a later run finds none and opens its own new window instead."""
+    for pg in list(ctx.pages):
         try:
-            proc.wait(timeout=5)
-        except Exception:
+            if pg.url in _LAUNCH_URLS:
+                return pg
+        except Exception:                                # noqa: BLE001 - page vanished
             pass
+    return None
+
+
+def _open_new_window(browser, ctx):
+    """Open a page in a brand-new Chrome WINDOW (not a tab of an existing one) and
+    return it, so an attaching run's tabs are separate from the other tool's window.
+
+    Uses ctx.expect_page() with a unique-marker predicate. This is CRITICAL in sync
+    Playwright: a busy `time.sleep()` poll of ctx.pages does NOT advance Playwright's
+    event loop, so the new page never registers, the poll times out, and we'd silently
+    fall back to a plain tab in whatever window is focused (the OTHER tool's). The
+    predicate keeps it race-free; on failure the created target is closed so no window
+    leaks."""
+    import uuid
+    marker = "tfi-" + uuid.uuid4().hex
+    sess = browser.new_browser_cdp_session()
+    tid = None
+    try:
+        with ctx.expect_page(predicate=lambda pg: marker in pg.url, timeout=10000) as info:
+            res = sess.send("Target.createTarget", {"url": "about:blank#" + marker, "newWindow": True})
+            tid = res.get("targetId")
+        return info.value
+    except Exception:                                    # noqa: BLE001 - fall back to a tab
+        if tid is not None:
+            try:
+                browser.new_browser_cdp_session().send("Target.closeTarget", {"targetId": tid})
+            except Exception:                            # noqa: BLE001
+                pass
+        return None
+
+
+def _place_window(ctx, page) -> None:
+    """Park OUR window off-screen (ghost) or force it on-screen (visible), scoped to
+    just this page's window so a concurrent tool's window is never moved. No-op under
+    true --headless (no window)."""
+    if config.HEADLESS:
+        return
+    bounds = _OFFSCREEN if config.WINDOW_MODE == "ghost" else _onscreen_bounds()
+    try:
+        sess = ctx.new_cdp_session(page)
+        wid = sess.send("Browser.getWindowForTarget")["windowId"]
+        sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": bounds})
+    except Exception:                                    # noqa: BLE001 - best-effort placement
+        pass
+
+
+def _close_own_and_detach(browser, own_pages) -> None:
+    """Close ONLY this run's tabs (which closes its window), then drop the CDP
+    connection — leaving the shared Chrome and any other tool's window running.
+    browser.close() on a connect_over_cdp browser disconnects WITHOUT quitting it."""
+    for pg in own_pages:
+        _safe_close(pg)
+    try:
+        browser.close()
+    except Exception:                                    # noqa: BLE001
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -172,55 +239,6 @@ def _onscreen_bounds() -> dict:
             "width": 1560, "height": 920, "windowState": "normal"}
 
 
-def _show_onscreen(ctx) -> None:
-    """Force the automation window ON-SCREEN via CDP (visible / --headed mode).
-
-    Mirror of _park_offscreen: the --window-position launch flag can be ignored when a
-    persistent profile restores an off-screen placement (left by a prior ghost run),
-    and it can't help at all when we attach to an already-running Chrome. Setting the
-    bounds over CDP after startup is authoritative, so the window is actually visible."""
-    bounds = _onscreen_bounds()
-    pages = list(ctx.pages) or [ctx.new_page()]
-    moved: set = set()
-    for page in pages:
-        try:
-            sess = ctx.new_cdp_session(page)
-            wid = sess.send("Browser.getWindowForTarget")["windowId"]
-            if wid in moved:
-                continue
-            sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": bounds})
-            moved.add(wid)
-        except Exception:                                # noqa: BLE001 - best-effort show
-            pass
-
-
-def _park_offscreen(ctx) -> None:
-    """Move the automation window off-screen via CDP.
-
-    The --window-position launch flag is NOT enough on Windows: Chrome's startup
-    WindowSizer drags any off-screen window back onto a connected display (so on a
-    two-monitor setup a sliver stays visible), and a persistent profile can restore
-    the last *visible* bounds and ignore the flag entirely. Setting the bounds over
-    CDP after startup bypasses the sizer and is authoritative. windowState stays
-    "normal" (NOT minimized) so Chrome's occlusion logic doesn't freeze the
-    background tabs mid-run — the whole reason we hide rather than minimize."""
-    # Need at least one page target to resolve a window id. An auto-launched
-    # Chrome has its initial tab here; if not, anchor one so the window exists and
-    # is parked before the caller opens its tabs (which reuse this same window).
-    pages = list(ctx.pages) or [ctx.new_page()]
-    moved: set = set()
-    for page in pages:
-        try:
-            sess = ctx.new_cdp_session(page)
-            wid = sess.send("Browser.getWindowForTarget")["windowId"]
-            if wid in moved:
-                continue
-            sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": _OFFSCREEN})
-            moved.add(wid)
-        except Exception:                                # noqa: BLE001 - best-effort hide
-            pass
-
-
 # --------------------------------------------------------------------------
 # The context manager every script uses
 # --------------------------------------------------------------------------
@@ -229,20 +247,44 @@ def browser_context():
     with sync_playwright() as p:
         if config.AUTH_MODE == "cdp":
             proc = ensure_chrome()
+            launched = proc is not None
             browser = p.chromium.connect_over_cdp(config.CDP_URL)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
-            # Place the window: ghost -> off-screen (hidden); visible/--headed ->
-            # on-screen (override any restored off-screen bounds). No-op under
-            # true --headless (no window).
-            if not config.HEADLESS:
-                if config.WINDOW_MODE == "ghost":
-                    _park_offscreen(ctx)
+
+            # SHARED CHROME. This run opens ONLY its own tabs, in its OWN window, and
+            # on exit closes just those (its window) — the browser and any other tool's
+            # window keep running. Two cases for the first tab:
+            #   * launched (we started Chrome): adopt Chrome's single blank launch tab
+            #     as our first tab — no extra window, no leftover blank tab.
+            #   * attached (Chrome already up, the other tool is using it): open our
+            #     first tab in a NEW window so we don't share the other tool's window.
+            # Scripts just call ctx.new_page() as before; we wrap it to do the above.
+            own_pages: list = []
+            if launched:
+                _await_startup_tabs(ctx)                  # let Chrome's launch tab register
+            _orig_new_page = ctx.new_page
+
+            def _new_page(*a, **k):
+                first = not own_pages
+                if first:
+                    # First tab -> our OWN window. Reuse an UNCLAIMED blank launch tab
+                    # (Chrome's, or one a pre-launch left) so there's no extra window /
+                    # no leftover blank; else open a NEW window; else a plain tab.
+                    pg = (_adopt_launch_tab(ctx)
+                          or _open_new_window(browser, ctx)
+                          or _orig_new_page(*a, **k))
                 else:
-                    _show_onscreen(ctx)
+                    pg = _orig_new_page(*a, **k)          # later tabs follow our window
+                own_pages.append(pg)
+                if first:
+                    _place_window(ctx, pg)                # ghost/visible — OUR window only
+                return pg
+            ctx.new_page = _new_page
+
             try:
                 yield ctx
             finally:
-                close_chrome(browser, proc)
+                _close_own_and_detach(browser, own_pages)
             return
 
         # --- "launch" mode (the original Mac path) ---

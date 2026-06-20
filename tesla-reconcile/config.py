@@ -14,6 +14,45 @@ load_dotenv(_SECRETS_ENV)   # shared, authoritative source
 load_dotenv()               # app-local .env fallback (legacy)
 
 
+def _install_sigint_handler() -> None:
+    """Make Ctrl+C a clean exit for every reconcile script.
+
+    1st Ctrl+C: print a one-line notice and raise KeyboardInterrupt so the normal
+    `finally` cleanup runs (browser_context closes THIS run's tabs / window). A paired
+    sys.excepthook then swallows the KeyboardInterrupt so the console shows the notice,
+    not a traceback. 2nd Ctrl+C: force-quit (os._exit) — an escape hatch so a wedged
+    close can never trap you. We never ignore SIGINT during cleanup."""
+    import signal
+    import sys
+    state = {"n": 0}
+
+    def _handler(signum, frame):
+        state["n"] += 1
+        if state["n"] == 1:
+            sys.stderr.write("\n^C — closing this run's window and exiting "
+                             "(Ctrl+C again to force-quit)...\n")
+            sys.stderr.flush()
+            raise KeyboardInterrupt
+        os._exit(130)
+
+    try:
+        signal.signal(signal.SIGINT, _handler)
+    except (ValueError, OSError):           # not the main thread (e.g. under pytest)
+        return
+
+    _orig_hook = sys.excepthook
+
+    def _hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            return                          # notice already printed; skip the traceback
+        _orig_hook(exc_type, exc, tb)
+
+    sys.excepthook = _hook
+
+
+_install_sigint_handler()
+
+
 def _bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "y"}
 

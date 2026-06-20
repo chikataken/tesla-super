@@ -109,7 +109,11 @@ def ensure_chrome():
         args.append(f"--window-position={x},{y}")
     if config.HEADLESS:
         args.append("--headless=new")
-    proc = subprocess.Popen(args)
+    # Launch DETACHED in its own session so the shared Chrome outlives whichever tool
+    # started it (a Ctrl+C in that tool's terminal would otherwise kill Chrome and
+    # every other tool's tabs). DEVNULL keeps Chrome's log spam off the console.
+    proc = subprocess.Popen(args, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.time() + 30
     while time.time() < deadline:
         if _cdp_alive(config.CDP_URL):
