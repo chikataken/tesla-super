@@ -84,23 +84,25 @@ def ensure_chrome():
         f"--window-size={_WIN_W},{_WIN_H}",
         "--no-first-run",
         "--no-default-browser-check",
+        # The BOL step drives 4 tabs in one window at once; only one is ever the
+        # foreground tab, so the rest are "background"/occluded. Chrome throttles
+        # and de-prioritizes them — tabs get discarded mid-run ("Target page,
+        # context or browser has been closed") and clicks on genuinely-on-screen
+        # elements fail with "element is outside of the viewport" (stale layout).
+        # These flags keep EVERY tab fully live regardless of which is in front,
+        # so they apply in all modes (CalculateNativeWinOcclusion is a Windows-
+        # only no-op elsewhere).
+        "--disable-features=CalculateNativeWinOcclusion",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
     ]
     if config.WINDOW_MODE == "ghost":
         # Real headed Chrome, just parked OFF-SCREEN where you can't see it —
-        # fingerprint stays normal (true headless gets detected).
-        # NOT minimized: on Windows, Chrome's native occlusion detection treats
-        # a minimized/hidden window as occluded and FREEZES or discards its tabs.
-        # That's fatal for the BOL step, which drives 4 background tabs at once —
-        # they get discarded mid-run and Playwright sees "Target page, context or
-        # browser has been closed". CalculateNativeWinOcclusion=off plus the
-        # backgrounding flags keep every tab live while the window stays hidden.
-        args += [
-            "--window-position=-32000,-32000",
-            "--disable-features=CalculateNativeWinOcclusion",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-background-timer-throttling",
-        ]
+        # fingerprint stays normal (true headless gets detected). NOT minimized:
+        # a minimized/hidden window reads as occluded; the backgrounding flags
+        # above keep its tabs live while it stays hidden off-screen.
+        args += ["--window-position=-32000,-32000"]
     elif not config.HEADLESS:
         # Visible window: force it on-screen and centered. The persistent profile may
         # have a saved OFF-SCREEN placement left by a previous ghost run, which Chrome

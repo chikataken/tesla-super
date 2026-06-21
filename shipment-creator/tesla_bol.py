@@ -282,6 +282,16 @@ async def _await_launch_tab(ctx):
         await asyncio.sleep(0.05)
 
 
+async def _focus(page):
+    """Bring `page`'s window to the front so the NEXT ctx.new_page() opens in it (over
+    CDP a new tab lands in the last-focused window, which may be another tool's).
+    Best-effort; never raises."""
+    try:
+        await page.bring_to_front()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 async def _open_new_window(browser, ctx):
     """Open a page in a brand-new Chrome WINDOW and return it, so this run's tabs are
     separate from another tool's window. Race-free via a unique url marker; the created
@@ -334,11 +344,24 @@ async def _open_run_window(browser, ctx, workers, launched):
         await _await_launch_tab(ctx)
     first = None
     if config.AUTH_MODE == "cdp" and browser is not None:
-        first = await _adopt_launch_tab(ctx) or await _open_new_window(browser, ctx)
+        # Adopt Chrome's blank launch tab ONLY when WE launched Chrome (our own fresh,
+        # uncontested window). When ATTACHING to a Chrome another tool already started,
+        # NEVER adopt — a stray blank tab belongs to the OTHER tool's window and adopting
+        # it pulls all our tabs into their window (the overlap bug). Open our OWN window.
+        if launched:
+            first = await _adopt_launch_tab(ctx)
+        if first is None:
+            first = await _open_new_window(browser, ctx)
     if first is None:
         pages = [await ctx.new_page() for _ in range(workers)]
     else:
-        pages = [first] + [await ctx.new_page() for _ in range(workers - 1)]
+        # Later tabs: ctx.new_page() opens in whatever window currently has focus —
+        # possibly the OTHER tool's. Focus OUR window before each one so every tab lands
+        # in our dedicated window.
+        pages = [first]
+        for _ in range(workers - 1):
+            await _focus(first)
+            pages.append(await ctx.new_page())
     await _place_window(ctx, pages[0])
     return pages
 
@@ -392,6 +415,7 @@ async def _run(vins: list[str], workers: int, on_bol=None, need_by=None,
             sd_page = None
             if sd_scan_pairs and sd_hits is not None:
                 import sd_scrape
+                await _focus(pages[0])             # open the SD tab in OUR window, not another tool's
                 sd_page = await ctx.new_page()
 
                 async def _sd_scan(p):

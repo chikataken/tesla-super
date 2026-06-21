@@ -74,22 +74,25 @@ def ensure_chrome():
         "--window-size=1560,920",
         "--no-first-run",
         "--no-default-browser-check",
+        # This tool drives FOUR tabs in one window at once; only one is ever the
+        # foreground tab, so the other three are "background"/occluded. Chrome
+        # then throttles and de-prioritizes them — their layout/compositor goes
+        # stale, so Playwright reads a collapsed viewport and every click on a
+        # genuinely-on-screen element fails with "element is outside of the
+        # viewport" until it times out. These flags keep EVERY tab fully live
+        # regardless of which window/tab is in front, so they apply in all modes
+        # (CalculateNativeWinOcclusion is a Windows-only no-op elsewhere).
+        "--disable-features=CalculateNativeWinOcclusion",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
     ]
     if config.WINDOW_MODE == "ghost":
         # Real headed Chrome, just parked OFF-SCREEN where you can't see it —
-        # fingerprint stays normal (true headless gets detected).
-        # NOT minimized: on Windows, Chrome's native occlusion detection treats
-        # a minimized/hidden window as occluded and FREEZES or discards its tabs
-        # (fatal when multiple tabs run at once). CalculateNativeWinOcclusion=off
-        # plus the backgrounding flags keep every tab live while the window stays
-        # hidden off-screen.
-        args += [
-            "--window-position=-32000,-32000",
-            "--disable-features=CalculateNativeWinOcclusion",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding",
-            "--disable-background-timer-throttling",
-        ]
+        # fingerprint stays normal (true headless gets detected). NOT minimized:
+        # a minimized/hidden window reads as occluded; the backgrounding flags
+        # above keep its tabs live while it stays hidden off-screen.
+        args += ["--window-position=-32000,-32000"]
     elif not config.HEADLESS:
         # Visible (--headed): force an ON-SCREEN position. The persistent profile may
         # have a saved OFF-SCREEN placement from a previous ghost run, which Chrome
@@ -267,14 +270,25 @@ def browser_context():
             def _new_page(*a, **k):
                 first = not own_pages
                 if first:
-                    # First tab -> our OWN window. Reuse an UNCLAIMED blank launch tab
-                    # (Chrome's, or one a pre-launch left) so there's no extra window /
-                    # no leftover blank; else open a NEW window; else a plain tab.
-                    pg = (_adopt_launch_tab(ctx)
+                    # First tab -> our OWN window. Adopt Chrome's blank launch tab ONLY
+                    # when WE launched Chrome: then it's our own fresh, uncontested
+                    # window. When ATTACHING to a Chrome the other tool already started,
+                    # NEVER adopt — a stray blank tab belongs to the OTHER tool's window,
+                    # and adopting it pulls all our tabs into their window (the overlap
+                    # bug). Open our own NEW window instead; plain tab only as a last
+                    # resort.
+                    pg = ((launched and _adopt_launch_tab(ctx))
                           or _open_new_window(browser, ctx)
                           or _orig_new_page(*a, **k))
                 else:
-                    pg = _orig_new_page(*a, **k)          # later tabs follow our window
+                    # Later tabs: ctx.new_page() opens in whatever window currently has
+                    # focus — which may be the OTHER tool's. Focus OUR window first so
+                    # the new tab is created in it, never in a concurrent tool's window.
+                    try:
+                        own_pages[0].bring_to_front()
+                    except Exception:
+                        pass
+                    pg = _orig_new_page(*a, **k)
                 own_pages.append(pg)
                 if first:
                     _place_window(ctx, pg)                # ghost/visible — OUR window only
