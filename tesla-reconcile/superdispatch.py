@@ -6,7 +6,7 @@ params), which is much more robust than clicking the filter UI.
 """
 from __future__ import annotations
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
@@ -132,6 +132,38 @@ _SCHEDULED_DELIVERY_ZIP_JS = r"""
 """
 
 
+# Per-VIN DELIVERY DATE from the order's vehicle grid. The grid columns are
+# "Pickup Date" then "Delivery Date", rendered immediately before each row's VIN,
+# so in the page text the two date tokens preceding a VIN are [pickup, delivery] and
+# the delivery date is the LAST one before that VIN. (The grid is divs, not a <table>,
+# so we parse the rendered text rather than rely on a column selector.)
+_DATE_TOKEN = re.compile(r"[A-Z][a-z]{2}\s+\d{1,2},\s*\d{4}")     # "Jun 4, 2026"
+
+
+def _delivery_dates_by_vin(page: Page) -> dict[str, date]:
+    try:
+        txt = page.locator("body").inner_text()
+    except Exception:
+        return {}
+    toks = [t.strip() for t in re.split(r"[\t\n]", txt) if t.strip()]
+    out: dict[str, date] = {}
+    for i, tk in enumerate(toks):
+        m = VIN_RE.search(tk)
+        if not m:
+            continue
+        vin = m.group(0).upper()
+        if vin in out:
+            continue
+        # dates in the few tokens right before the VIN: [pickup, delivery, (model)]
+        dates = [d for t in toks[max(0, i - 5):i] for d in _DATE_TOKEN.findall(t)]
+        if dates:
+            try:
+                out[vin] = datetime.strptime(dates[-1], "%b %d, %Y").date()
+            except ValueError:
+                pass
+    return out
+
+
 def open_order_detail(page: Page, row: OrderRow) -> OrderDetail:
     """Open an order and extract its VIN(s) + delivery zip."""
     page.goto(row.detail_url)
@@ -152,7 +184,11 @@ def open_order_detail(page: Page, row: OrderRow) -> OrderDetail:
     # "8401 Westpark Dr McLean, VA 22102"). Falls back to the old last-zip heuristic.
     delivery_zip = (page.evaluate(_SCHEDULED_DELIVERY_ZIP_JS)
                     or _delivery_zip_from_text(page.locator("body").inner_text()))
-    vehicles = [Vehicle(vin=v, delivery_zip=delivery_zip) for v in vins]
+    # Per-VIN actual delivery date (used by the claims date rule). Missing for a VIN
+    # -> left None, and the claims check treats that VIN as indeterminate (manual review).
+    dmap = _delivery_dates_by_vin(page)
+    vehicles = [Vehicle(vin=v, delivery_zip=delivery_zip,
+                        delivery_date=dmap.get(v.upper())) for v in vins]
     uuid = row.detail_url.rstrip("/").split("/")[-1]
     return OrderDetail(
         order_id=row.order_id,

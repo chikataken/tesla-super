@@ -48,9 +48,13 @@ class PaymentResult:
 
 @dataclass
 class ClaimResult:
-    has_claim: bool
-    record_count: int = 0
-    indeterminate: bool = False       # couldn't read the portal — don't decide on it
+    has_claim: bool                   # a CHARGEABLE destination claim (reported/filed
+                                      # on or after delivery) -> drives the "Damage claim" tag
+    record_count: int = 0             # number of DESTINATION claim records for the VIN
+    indeterminate: bool = False       # couldn't read the portal / no delivery date — don't decide
+    pre_existing: bool = False        # destination claim(s) found, but all dated BEFORE
+                                      # delivery -> pre-existing damage, NOT chargeable
+    note: str = ""                    # human-readable detail for the log (claim #, dates)
 
 
 @dataclass

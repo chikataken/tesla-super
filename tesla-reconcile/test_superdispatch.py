@@ -251,16 +251,24 @@ def process(ctx_pages, row, dry_run, skip_vision, photos_only=False):
     blank_payment = False
     has_claim = False
     indeterminate = False
-    for vin in vins:
+    for veh in detail.vehicles:
+        vin = veh.vin
         pay = tesla.payment_check(tesla_page, vin)
-        claim = tesla.claims_check(claims_page, vin)
+        # Destination claims only count as a "Damage claim" if reported/filed ON OR
+        # AFTER delivery; earlier-dated ones are pre-existing (logged, not flagged).
+        claim = tesla.claims_check(claims_page, vin, veh.delivery_date)
         print(f"  {vin}  payment={pay.ok}/{pay.status!r}  "
-              f"claim={claim.has_claim}({claim.record_count})")
+              f"claim={claim.has_claim}({claim.record_count})  "
+              f"delivered={veh.delivery_date}")
+        if claim.note:
+            print(f"    claim: {claim.note}")
+        if claim.pre_existing:
+            print(f"    -> PRE-EXISTING damage (not flagged): {vin}")
         if pay.indeterminate or claim.indeterminate:
             # Portal wouldn't load this VIN even after retries — don't guess.
             indeterminate = True
             print(f"    !! Tesla read failed for {vin} "
-                  f"(payment={pay.note or 'ok'}; claim={'err' if claim.indeterminate else 'ok'})")
+                  f"(payment={pay.note or 'ok'}; claim={claim.note or 'err' if claim.indeterminate else 'ok'})")
             continue
         if not pay.ok:
             blank_payment = True

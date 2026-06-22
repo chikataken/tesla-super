@@ -13,12 +13,34 @@ Two pure-DOM checks (no model needed):
   * claims_check   -> any Destination claim filed for the VIN?
 """
 from __future__ import annotations
+import datetime as dt
 import re
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 import config
 from models import PaymentResult, ClaimResult
+
+
+# Whether the one-time claims filters (all statuses + Origin/Destination=Destination)
+# actually got applied this session. If setup fails, the Filed search runs UNFILTERED
+# and counts ORIGIN claims too — which would falsely tag origin-only VINs as "Damage
+# claim" (the most consequential tag). So claims_check refuses to run until this is
+# True, returning indeterminate -> the order goes to manual review, never a false flag.
+_FILTERS_READY = False
+
+
+def _claim_date(s):
+    """Parse a Tesla claim timestamp ('2026-06-04T08:05:46') to a date, or None."""
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s).date()
+    except Exception:
+        try:
+            return dt.datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except Exception:
+            return None
 
 
 def _to_front(page: Page) -> None:
@@ -173,24 +195,47 @@ def payment_check(page: Page, vin: str, attempts: int = 3) -> PaymentResult:
 
 # ----------------------- claims (Claims > Filed) -----------------------
 def setup_claims_filters(page: Page) -> None:
-    """One-time per session: open Filed, check ALL Claim Status boxes,
-    set Origin/Destination Damage = Destination. Best-effort (non-fatal)."""
+    """One-time per session: open Filed and check ALL Claim Status boxes so the
+    search returns every status. Origin-vs-Destination is NO LONGER set in the UI —
+    claims_check reads damageReportedAt straight from the API body, so we don't depend
+    on that flaky dropdown. Best-effort, but if it fails claims_check refuses to run."""
+    global _FILTERS_READY
+    _FILTERS_READY = False
     page.set_default_timeout(12000)
     _open_filed_form(page)
     _to_front(page)                       # un-collapse the viewport before the dropdown clicks
     try:
         _check_all_claim_statuses(page)
-        _set_destination(page)
-        print("claims filters set (all statuses + Destination)")
+        _FILTERS_READY = True
+        print("claims filters set (all statuses; destination decided from API body)")
     except Exception as exc:
-        print(f"WARN: claim filter setup skipped: {exc}")
+        # Leave _FILTERS_READY False so claims_check refuses to run rather than
+        # search with a partial status filter and miss/misread claims.
+        print(f"WARN: claim filter setup FAILED -> claims checks will be SKIPPED "
+              f"(orders go to manual review, nothing tagged): {exc}")
 
 
-def claims_check(page: Page, vin: str, attempts: int = 3) -> ClaimResult:
-    """Search Filed claims by VIN; 0 records => no damage claim. Retries
-    transient failures; returns indeterminate=True if it can never read so the
-    caller skips the order rather than guessing.
-    Assumes setup_claims_filters() already ran this session."""
+def claims_check(page: Page, vin: str, delivery_date=None,
+                 attempts: int = 3) -> ClaimResult:
+    """Decide DESTINATION damage claims for a VIN from the getdashboard API BODY.
+
+    A claim is a chargeable "Damage claim" only if it is a DESTINATION claim whose
+    damageReportedDate OR filedDate is on/after the shipment's delivery date. A
+    destination claim dated entirely before delivery is PRE-EXISTING damage: NOT
+    flagged, only logged (pre_existing=True). Reading the response body (origin/
+    destination + dates) makes the verdict correct regardless of any UI filter.
+
+    Returns indeterminate (-> caller skips for manual review, never tags) when the
+    portal can't be read or the VIN's delivery date is unknown. Retries transient
+    failures. Assumes setup_claims_filters() ran this session."""
+    target = vin.strip().upper()
+    if not _FILTERS_READY:
+        return ClaimResult(has_claim=False, indeterminate=True, record_count=-1,
+                           note="claim status filter not set this session")
+    if delivery_date is None:
+        # Can't apply the date rule without a delivery date -> don't guess.
+        return ClaimResult(has_claim=False, indeterminate=True, record_count=-1,
+                           note="no delivery date for VIN -> manual review")
     last_err = ""
     for attempt in range(1, attempts + 1):
         try:
@@ -201,24 +246,69 @@ def claims_check(page: Page, vin: str, attempts: int = 3) -> ClaimResult:
             box.click()
             box.fill("")
             box.press_sequentially(vin, delay=20)
-            got = _click_and_wait_response(
+            resp = _click_and_wait_response(
                 page,
                 lambda: page.get_by_role(
                     "button", name=re.compile(r"^\s*search\s*$", re.I)).first.click(),
                 "Claims/dashboard/getdashboard",
             )
-            page.wait_for_timeout(500)        # let the records count update
-            if not got and not _records_label_present(page):
-                # Never saw the response and no count text rendered -> retry.
-                last_err = "claims dashboard did not respond"
+            # Guard: confirm the search actually ran for OUR VIN (keystrokes landed).
+            try:
+                typed = (box.input_value() or "").strip().upper()
+            except Exception:
+                typed = ""
+            if typed != target:
+                last_err = f"VIN field held {typed!r} after search"
                 _recover(page, attempt, claims=True)
                 continue
-            count = _read_total_records(page)
-            return ClaimResult(has_claim=count > 0, record_count=count)
+            if resp is None:
+                last_err = "getdashboard response never arrived"
+                _recover(page, attempt, claims=True)
+                continue
+            try:
+                payload = resp.json()
+            except Exception:
+                payload = None
+            if not isinstance(payload, dict) or "data" not in payload:
+                last_err = "unreadable getdashboard response"
+                _recover(page, attempt, claims=True)
+                continue
+            records = payload.get("data") or []
+            # Mixed/unfiltered response that doesn't include our VIN -> retry.
+            if records and not any((r.get("vin") or "").strip().upper() == target
+                                   for r in records):
+                last_err = "response had records but none for this VIN"
+                _recover(page, attempt, claims=True)
+                continue
+            dest = [r for r in records
+                    if (r.get("vin") or "").strip().upper() == target
+                    and (r.get("damageReportedAt") or "").strip().lower() == "destination"]
+            if not dest:
+                return ClaimResult(has_claim=False, record_count=0,
+                                   note="no destination claim")
+            chargeable, preexist = [], []
+            for r in dest:
+                dr = _claim_date(r.get("damageReportedDate"))
+                fd = _claim_date(r.get("filedDate"))
+                cn = r.get("claimNumber") or "?"
+                tag = f"{cn} reported={dr} filed={fd}"
+                if (dr and dr >= delivery_date) or (fd and fd >= delivery_date):
+                    chargeable.append(tag)
+                else:
+                    preexist.append(tag)
+            if chargeable:
+                return ClaimResult(has_claim=True, record_count=len(dest),
+                                   note=f"chargeable vs delivery {delivery_date}: "
+                                        + "; ".join(chargeable))
+            return ClaimResult(
+                has_claim=False, record_count=len(dest), pre_existing=True,
+                note=f"PRE-EXISTING damage (all before delivery {delivery_date}): "
+                     + "; ".join(preexist))
         except Exception as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             _recover(page, attempt, claims=True)
-    return ClaimResult(has_claim=False, indeterminate=True, record_count=-1)
+    return ClaimResult(has_claim=False, indeterminate=True, record_count=-1,
+                       note=f"could not read claims after {attempts} tries: {last_err}")
 
 
 # ----------------------- helpers -----------------------
