@@ -21,6 +21,23 @@ import config
 from models import PaymentResult, ClaimResult
 
 
+def _to_front(page: Page) -> None:
+    """Bring this tab to the foreground so Chrome lays it out at full window size.
+
+    The run drives several tabs in one window; the inactive (background) ones can
+    report a COLLAPSED layout viewport over CDP. Playwright then judges genuinely
+    on-screen elements "outside of the viewport" and every click retries until it
+    times out (the claim-status dropdown / Approved tab failures). Fronting the tab
+    forces a full-size layout and a correct viewport. Works even when Chrome was
+    launched without the anti-throttle flags (e.g. a leftover shared instance), so
+    it's the robust fix. Best-effort; never raises."""
+    try:
+        page.bring_to_front()
+        page.wait_for_timeout(150)        # let layout settle after the relayout
+    except Exception:
+        pass
+
+
 def _click_and_wait_response(page: Page, click, url_substr: str,
                              timeout: int = 15000):
     """Click `click` and wait for a response whose URL contains url_substr.
@@ -47,6 +64,7 @@ def ensure_approved(page: Page) -> None:
     """Make sure the Fleet > Approved tab is active. No-op if it already is, so
     repeated payment checks reuse the same tab and settings — only the VIN
     changes between VINs."""
+    _to_front(page)                       # un-collapse the viewport on this background tab
     active = page.locator("div[role=tab].tsl-tab-label-active").filter(has_text="Approved")
     try:
         if active.count() and active.first.is_visible():
@@ -159,6 +177,7 @@ def setup_claims_filters(page: Page) -> None:
     set Origin/Destination Damage = Destination. Best-effort (non-fatal)."""
     page.set_default_timeout(12000)
     _open_filed_form(page)
+    _to_front(page)                       # un-collapse the viewport before the dropdown clicks
     try:
         _check_all_claim_statuses(page)
         _set_destination(page)
@@ -176,6 +195,7 @@ def claims_check(page: Page, vin: str, attempts: int = 3) -> ClaimResult:
     for attempt in range(1, attempts + 1):
         try:
             keep_session_alive(page)      # clear idle popup OR KMSI prompt first
+            _to_front(page)               # un-collapse the viewport on this background tab
             box = page.get_by_placeholder("Enter VIN").first
             box.wait_for(timeout=8000)
             box.click()
