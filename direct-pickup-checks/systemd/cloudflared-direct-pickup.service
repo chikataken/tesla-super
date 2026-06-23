@@ -1,0 +1,34 @@
+[Unit]
+# Cloudflare Tunnel: the only thing exposing this box to the internet. It gives a
+# public HTTPS hostname and forwards requests to the loopback listener, so there's
+# no port-forwarding and the server stays behind its residential NAT.
+#
+# PREFERRED: install the official cloudflared package, which ships its own
+# `cloudflared.service` you manage with:
+#     sudo cloudflared service install <TUNNEL_TOKEN>
+#     sudo systemctl enable --now cloudflared
+# In that case you do NOT need this file — use the packaged unit.
+#
+# This unit runs the NAMED tunnel (test.wastake.com -> 127.0.0.1:8077) for the
+# server. `./run.sh tunnel` already provisions it once (login/create/route/config);
+# this unit just RUNS that same tunnel on boot. Point --config at the config.yml
+# run.sh generated (e.g. /opt/direct-pickup-checks/.cloudflared/config.yml), or copy
+# it to /etc/cloudflared/config.yml.
+Description=cloudflared tunnel (test.wastake.com) for direct-pickup-checks
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- EDIT: same user that ran `./run.sh tunnel` (its ~/.cloudflared holds the creds) ---
+User=andrew
+Group=andrew
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel \
+    --config /opt/direct-pickup-checks/.cloudflared/config.yml run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

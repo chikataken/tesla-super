@@ -1,0 +1,32 @@
+[Unit]
+# Webhook listener (FastAPI/uvicorn, loopback only). The Cloudflare Tunnel
+# forwards inbound POSTs to it. See README "systemd" for install steps.
+Description=direct-pickup-checks webhook listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- EDIT THESE for your server ---
+User=andrew
+Group=andrew
+WorkingDirectory=/opt/direct-pickup-checks
+# Use the project venv's interpreters.
+ExecStart=/opt/direct-pickup-checks/.venv/bin/uvicorn listener:app \
+    --host 127.0.0.1 --port 8077 --workers 1
+# Config comes from ../secrets/.env + this folder's .env (loaded by config.py).
+# You can also point at an explicit env file:
+# EnvironmentFile=/opt/direct-pickup-checks/.env
+
+Restart=on-failure
+RestartSec=3
+# Structured logs go to stdout -> journald: journalctl -u direct-pickup-listener -f
+StandardOutput=journal
+StandardError=journal
+
+# Light hardening (optional; relax if it interferes).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

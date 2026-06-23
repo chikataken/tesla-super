@@ -1,0 +1,29 @@
+# ── secrets / local config (NEVER commit) ──
+.env
+*.env
+
+# ── runtime state: SQLite DB + downloaded inspection photos (PII) ──
+data/
+*.db
+*.db-wal
+*.db-shm
+photos/
+*.jpg
+*.jpeg
+*.png
+*.pdf
+
+# ── browser profile (logged-in session) ──
+.auth/
+
+# ── generated cloudflare tunnel config (references local credentials) ──
+.cloudflared/
+
+# ── python ──
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ── logs ──
+*.log

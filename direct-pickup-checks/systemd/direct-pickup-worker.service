@@ -1,0 +1,36 @@
+[Unit]
+# Worker: pulls from the SQLite queue and does the slow work (enrichment, photo
+# download, tagging). Independent of the listener.
+Description=direct-pickup-checks worker
+After=network-online.target direct-pickup-listener.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# --- EDIT THESE for your server ---
+User=andrew
+Group=andrew
+WorkingDirectory=/opt/direct-pickup-checks
+# The worker drives a real browser (Playwright) for the photo + tag steps.
+# On a HEADLESS server, either run Playwright headless (AUTH_MODE=launch,
+# HEADLESS=true in .env) with the plain ExecStart below, OR give it a virtual
+# display with xvfb (apt install xvfb) using the xvfb-run line instead.
+ExecStart=/opt/direct-pickup-checks/.venv/bin/python worker.py
+# ExecStart=/usr/bin/xvfb-run -a /opt/direct-pickup-checks/.venv/bin/python worker.py
+# EnvironmentFile=/opt/direct-pickup-checks/.env
+# One-time: `python run_login.py` once as this User to save the SD session.
+
+Restart=always
+RestartSec=3
+# SIGTERM lets the worker finish the in-flight item before exiting (see worker.py).
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+StandardOutput=journal
+StandardError=journal
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

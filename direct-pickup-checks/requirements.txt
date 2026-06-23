@@ -1,0 +1,22 @@
+# direct-pickup-checks — its OWN venv / deps (no Playwright/torch/OCR bloat).
+fastapi>=0.110           # the webhook listener app
+uvicorn[standard]>=0.27  # ASGI server the listener runs under (systemd)
+requests>=2.31           # SuperDispatch API calls (worker + subscribe.py)
+python-dotenv>=1.0       # load secrets/.env + app-local .env
+
+# --- Playwright web automation (open order, download pickup photos, edit tags) ---
+playwright>=1.44         # drives the SD web app; run `playwright install chromium`
+
+# --- OCR (read VINs off the pickup photos) ---
+# Copied from tesla-reconcile/ocr.py. easyocr is the default engine and pulls in
+# torch (~1GB download). pytesseract is the lighter fallback (OCR_ENGINE=tesseract,
+# needs the system `tesseract` binary).
+easyocr>=1.7
+pillow>=10.0
+pytesseract>=0.3.10
+
+pytest>=8.0              # unit tests (HTTP + browser + OCR layers mocked; no live calls)
+httpx>=0.27             # FastAPI TestClient transport (pulled by starlette tests)
+
+# NOTE: the queue + dedup + state store is stdlib `sqlite3` (no Redis/RQ), matching
+# the sibling projects, which use no external services. Nothing to install for it.
