@@ -93,6 +93,13 @@ TESLA_FLEET_URL = f"{TESLA_BASE}/logistics/invoicing/regular-fleet"
 TESLA_CLAIMS_LANDING = f"{TESLA_BASE}/logistics/claims"          # has the Filed card
 TESLA_CLAIMS_URL = f"{TESLA_BASE}/logistics/claims/dashboard"    # the Filed filter form
 
+# Tesla SSO credentials for automated re-login when the session expires (see
+# auth.is_login_page). Live ONLY in the shared, gitignored secrets/.env — never
+# committed. Left blank, auto-login is disabled and a run just notifies/waits for
+# a human. Password is NOT .strip()'d (could end in a meaningful space).
+TESLA_EMAIL = os.getenv("TESLA_EMAIL", "").strip()
+TESLA_PASSWORD = os.getenv("TESLA_PASSWORD", "")
+
 # --- Model / vision ---
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 VISION_MODEL = os.getenv("VISION_MODEL", "claude-sonnet-4-6")

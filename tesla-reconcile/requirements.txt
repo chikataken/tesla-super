@@ -7,3 +7,6 @@ easyocr>=1.7            # DEFAULT OCR engine — deep-learning scene-text reader
                         # photographed VIN stickers / windshield strips far better than
                         # Tesseract. Pulls in torch (large download, ~1GB).
 pgeocode>=0.4          # offline US ZIP -> lat/long for the delivery-ZIP distance check
+cryptography
+pyotp
+argon2-cffi
