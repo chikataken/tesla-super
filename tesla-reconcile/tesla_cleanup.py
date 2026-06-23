@@ -44,7 +44,7 @@ import re
 
 from playwright.sync_api import Page
 
-from auth import browser_context
+from auth import browser_context, require_logged_in
 
 DASHBOARD_URL = "https://suppliers.teslamotors.com/logistics/dispatchdashboard2"
 # The board's search is slow to return rows; wait up to this long for shipment cards
@@ -327,6 +327,8 @@ def _wait_for_full_page(page: Page, timeout_ms: int = 120000) -> int:
 
 def load_dashboard(page: Page):
     page.goto(DASHBOARD_URL)
+    page.wait_for_load_state("domcontentloaded")
+    require_logged_in(page, "dispatch dashboard")   # fail fast vs a 30s networkidle hang
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(3500)
     # Set the filters every load (a fresh page may reset them): Alerts = all except

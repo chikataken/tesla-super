@@ -17,11 +17,27 @@ import base64
 import os
 import re
 from datetime import datetime
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 import chrome_cdp
 import config
+
+
+async def _on_tesla_login(page) -> bool:
+    """True when the page is on Tesla's SSO sign-in screen — i.e. the session expired
+    or was killed mid-run (e.g. Akamai bot-detection logging us out). Either signal is
+    enough: the auth.tesla.com host, or the sign-in email box."""
+    try:
+        if urlparse(page.url).hostname == "auth.tesla.com":
+            return True
+    except Exception:
+        pass
+    try:
+        return await page.locator("input#identity").count() > 0
+    except Exception:
+        return False
 
 # A date with an OPTIONAL time — 'Jun 15, 2026 04:00 PM' or just 'Jun 09, 2026'.
 _DATE_RE = re.compile(r"[A-Z][a-z]{2} \d{1,2}, \d{4}(?: \d{1,2}:\d{2}\s*[AP]M)?")
@@ -204,6 +220,8 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
     try:
         await page.goto(config.TESLA_DASHBOARD_URL)
         await page.wait_for_load_state("domcontentloaded")
+        if await _on_tesla_login(page):
+            raise RuntimeError("Tesla session is logged out (auth.tesla.com sign-in) — re-login then retry")
         await page.locator("button.search-btn").first.wait_for(timeout=20000)
         await _configure_filters(page)
         print(f"{tag} ready — {len(vins)} VIN(s)")
@@ -214,6 +232,17 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
         return
 
     for vin in vins:
+        # Mid-run logout (e.g. Akamai bot-detection killing the session) lands us on the
+        # Tesla login page. Detect it and stop cleanly — otherwise every remaining VIN
+        # would be silently mis-reported as "no shipment found".
+        if await _on_tesla_login(page):
+            unprocessed = [v for v in vins if v not in results]
+            print(f"{tag} Tesla session logged out mid-run — stopping; "
+                  f"{len(unprocessed)} VIN(s) unprocessed (re-login needed)")
+            for v in unprocessed:
+                results[v] = {"shp": None, "path": None, "need_by": None,
+                              "status": "tesla session logged out"}
+            return
         try:
             card = await _search_vin(page, vin)
             if card is None:

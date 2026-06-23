@@ -19,6 +19,7 @@ import re
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 import config
+from auth import require_logged_in
 from models import PaymentResult, ClaimResult
 
 
@@ -95,6 +96,7 @@ def ensure_approved(page: Page) -> None:
         pass
     page.goto(config.TESLA_FLEET_URL)
     page.wait_for_load_state("domcontentloaded")
+    require_logged_in(page, "fleet invoicing")
     # The tabs are <div role="tab">; click the real tab and WAIT for it to become
     # active (class tsl-tab-label-active) before the Approved form is mounted.
     page.get_by_role("tab", name="Approved", exact=True).click()
@@ -455,6 +457,7 @@ def _records_label_present(page: Page) -> bool:
 def _open_filed_form(page: Page) -> None:
     page.goto(config.TESLA_CLAIMS_LANDING)
     page.wait_for_load_state("domcontentloaded")
+    require_logged_in(page, "claims")
     try:
         page.get_by_text("Filed", exact=True).first.click(timeout=8000)
         page.wait_for_load_state("domcontentloaded")

@@ -63,6 +63,18 @@ def is_login_page(page) -> bool:
         return False
 
 
+def require_logged_in(page, where: str = "") -> None:
+    """Raise immediately if `page` is on the Tesla SSO login screen — i.e. the session
+    expired or was killed mid-run (e.g. Akamai bot-detection). Call right after a
+    goto() so a run fails fast with a clear message instead of hanging on a load wait
+    or scraping an empty board."""
+    if is_login_page(page):
+        loc = f" at {where}" if where else ""
+        raise RuntimeError(
+            f"Tesla session is logged out{loc} (redirected to the auth.tesla.com "
+            "sign-in page). Re-login (run the login flow), then retry.")
+
+
 # --------------------------------------------------------------------------
 # CDP helpers
 # --------------------------------------------------------------------------
