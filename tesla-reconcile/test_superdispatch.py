@@ -33,11 +33,11 @@ from auth import browser_context
 
 # Delivered-On window. START = the first day of the PREVIOUS month, computed at
 # run time so it rolls forward automatically (June -> May 1; July -> June 1; …),
-# rather than a fixed date. END = today minus 7 days (the lag that lets Tesla post
+# rather than a fixed date. END = today minus 14 days (the lag that lets Tesla post
 # payment before we check a recent delivery).
 _TODAY = dt.date.today()
 WINDOW_START = (_TODAY.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
-WINDOW_END = _TODAY - dt.timedelta(days=7)
+WINDOW_END = _TODAY - dt.timedelta(days=14)
 
 # --troubleshoot: print Claude's short reasoning whenever a VIN doesn't cleanly
 # pass (not found / mismatch / confidence below this). Set in __main__.
