@@ -11,7 +11,7 @@ Sequence the worker uses:
     find_order_by_id(page, number) -> open the order in the web UI
     get_pickup_photos(page, detail_url) -> [{vin, urls}] from the Pickup Inspection
     fetch_images(page, urls) -> photo bytes (downloaded via the browser context)
-    add_tags(page, edit_url_for(detail_url), ["VIN"/"NO VIN", "CLAUDE"])
+    add_tags(page, edit_url_for(detail_url), ["VIN" or "NO VIN"])
 """
 from __future__ import annotations
 import re
@@ -160,11 +160,19 @@ def get_pickup_photos(page: Page, detail_url: str) -> list[dict]:
 
     NOTE: the workflow says trigger this only once photos exist (the
     order.picked_up_bol webhook). If a section has no images yet, its urls list is
-    empty and the worker treats that VIN as 'no VIN photo'."""
+    empty and the worker treats that VIN as 'no VIN photo'.
+
+    If the order-actions menu has NO "View Online BOL" item, there's no online BOL,
+    which means there are no pickup photos -> return [] (the caller tags NO VIN).
+    We use a short timeout so a missing item doesn't hang on the default 30s wait."""
     page.goto(detail_url)
     page.wait_for_load_state("domcontentloaded")
     page.get_by_role("button", name="order actions").click()
-    bol_href = page.get_by_role("menuitem", name="View Online BOL").get_attribute("href")
+    try:
+        bol_href = page.get_by_role("menuitem", name="View Online BOL").get_attribute(
+            "href", timeout=4000)
+    except Exception:                       # no "View Online BOL" item -> no photos
+        bol_href = None
     page.keyboard.press("Escape")
     if not bol_href:
         return []

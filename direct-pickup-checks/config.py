@@ -39,6 +39,14 @@ SD_CLIENT_SECRET = (os.getenv("SUPERDISPATCH_CLIENT_SECRET") or "").strip()
 # --- Webhook verification ---------------------------------------------------
 # Compared (constant-time) against the `verification_token` in each payload.
 SD_WEBHOOK_VERIFICATION_TOKEN = (os.getenv("SD_WEBHOOK_VERIFICATION_TOKEN") or "").strip()
+# Super Dispatch issues a SEPARATE verification_token per action/subscription, so the
+# listener must accept ANY of them. SD_WEBHOOK_VERIFICATION_TOKENS is a comma-separated
+# set (written by subscribe.py); the legacy single token is folded in for compatibility.
+SD_WEBHOOK_VERIFICATION_TOKENS = {
+    t.strip() for t in (os.getenv("SD_WEBHOOK_VERIFICATION_TOKENS") or "").split(",") if t.strip()
+}
+if SD_WEBHOOK_VERIFICATION_TOKEN:
+    SD_WEBHOOK_VERIFICATION_TOKENS.add(SD_WEBHOOK_VERIFICATION_TOKEN)
 
 # --- Listener ---------------------------------------------------------------
 LISTENER_HOST = os.getenv("LISTENER_HOST", "127.0.0.1").strip()
@@ -89,6 +97,14 @@ TAG_VIN = os.getenv("TAG_VIN", "VIN").strip()
 TAG_NO_VIN = os.getenv("TAG_NO_VIN", "NO VIN").strip()
 TAG_BOT = os.getenv("TAG_BOT", "CLAUDE").strip()
 
+# Only orders whose number/name contains one of these markers (case-insensitive) are
+# eligible for tagging — e.g. "A346511-direct" qualifies, "A443251" does not. Others
+# are recorded but skipped for tagging. Blank -> no filter (tag everything).
+TAG_NAME_MARKERS = tuple(
+    m.strip().lower() for m in os.getenv("TAG_NAME_MARKERS", "trade,direct").split(",")
+    if m.strip()
+)
+
 
 def callback_url() -> str:
     """The public callback URL registered with Super Dispatch (tunnel + path)."""
@@ -122,9 +138,10 @@ LOG_FORMAT = os.getenv("LOG_FORMAT", "json").strip().lower()
 # ⚠️ VERIFY against the live "get list of all webhook actions" endpoint before
 # production — the authoritative set is not assumed static. subscribe.py can print
 # the current list (`python subscribe.py actions`).
+PICKUP_MANUAL_ACTION = "order.manually_marked_as_picked_up"  # marked on the Shipper side
 PICKUP_STATUS_ACTIONS = (
     "order.picked_up",                      # carrier/driver marked it picked up
-    "order.manually_marked_as_picked_up",   # marked picked up on the Shipper side
+    PICKUP_MANUAL_ACTION,                   # marked picked up on the Shipper side
 )
 PICKUP_BOL_ACTION = "order.picked_up_bol"   # pickup BOL/photo URLs now available
 # Optional: sent when a carrier later picks up an order already manually marked.

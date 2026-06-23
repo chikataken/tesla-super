@@ -3,8 +3,9 @@ The photo check / tagging decision.
 
 Workflow (per shipment / order):
   * Read the VIN(s) off the PICKUP inspection photos with easyOCR.
-  * If EVERY VIN in the shipment is found in the photos  -> tags = [VIN, CLAUDE]
-  * If any VIN is missing / unreadable / not matched     -> tags = [NO VIN, CLAUDE]
+  * If EVERY VIN in the shipment is found in the photos  -> tags = [VIN]
+  * If any VIN is missing / unreadable / not matched     -> tags = [NO VIN]
+  (A bot-marker tag is appended only if config.TAG_BOT is set; it's blank here.)
 
 The actual OCR + VIN matching is reused from ocr.py (copied from
 tesla-reconcile/ocr.py — easyOCR scene-text reader with the smart rotation
@@ -62,7 +63,9 @@ def decide_order_tags(groups: list[dict], expected_vins: list[str]) -> dict:
     # No VINs known, or any VIN not found -> NO VIN. All found -> VIN.
     all_found = bool(expected) and all(per_vin.values())
     vin_result = config.TAG_VIN if all_found else config.TAG_NO_VIN
-    tags = [vin_result, config.TAG_BOT]
+    # Only the VIN/NO VIN tag is applied. The bot marker tag is added only when
+    # config.TAG_BOT is set; blank -> omitted, so no "CLAUDE" tag on the order.
+    tags = [vin_result] + ([config.TAG_BOT] if config.TAG_BOT else [])
 
     result = {
         "vin_result": vin_result,

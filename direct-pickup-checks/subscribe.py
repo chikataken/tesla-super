@@ -50,30 +50,59 @@ def cmd_list() -> None:
         print(f"  {s}")
 
 
+def _write_env_tokens(tokens: set[str]) -> bool:
+    """Persist SD's per-action verification tokens into this folder's .env as
+    SD_WEBHOOK_VERIFICATION_TOKENS (comma-separated) so the listener accepts any of
+    them. Also blanks the legacy single token. Returns True if .env was updated."""
+    import pathlib, re
+    env = pathlib.Path(__file__).with_name(".env")
+    if not env.exists():
+        return False
+    text = env.read_text()
+    joined = ",".join(sorted(tokens))
+    def upsert(t, key, val):
+        line = f"{key}={val}"
+        if re.search(rf"(?m)^{key}=", t):
+            return re.sub(rf"(?m)^{key}=.*$", line, t)
+        return t + ("\n" if not t.endswith("\n") else "") + line + "\n"
+    text = upsert(text, "SD_WEBHOOK_VERIFICATION_TOKENS", joined)
+    text = upsert(text, "SD_WEBHOOK_VERIFICATION_TOKEN", "")   # legacy single -> cleared
+    env.write_text(text)
+    return True
+
+
 def cmd_subscribe() -> None:
     url = config.callback_url()
     actions = list(config.SUBSCRIBE_ACTIONS)
     print(f"Registering callback {url}")
     print(f"  for actions: {', '.join(actions)}")
-    result = sd_client.subscribe(
-        url, actions, verification_token=config.SD_WEBHOOK_VERIFICATION_TOKEN or None)
-    print(f"OK: {result}")
+    results = sd_client.subscribe(url, actions)
+    for r in results:
+        print(f"  OK {r.get('action')}: guid={r.get('guid')} active={r.get('is_active')}")
+    # SD issues one verification_token PER action — capture them all for the listener.
+    tokens = {r.get("verification_token") for r in results
+              if isinstance(r, dict) and r.get("verification_token")}
+    if tokens:
+        wrote = _write_env_tokens(tokens)
+        print(f"\nverification tokens from Super Dispatch ({len(tokens)}): {sorted(tokens)}")
+        print(".env updated (SD_WEBHOOK_VERIFICATION_TOKENS)." if wrote
+              else "Set SD_WEBHOOK_VERIFICATION_TOKENS in .env (comma-separated) to the values above.")
+        print("RESTART the listener so it validates against these (./run.sh or systemctl restart direct-pickup-listener).")
     print("\nReminder: webhooks are forward-only — past pickups are not replayed.")
 
 
-def cmd_unsubscribe(guid: str) -> None:
-    sd_client.unsubscribe(guid)
-    print(f"Removed subscription {guid}")
+def cmd_unsubscribe(action: str) -> None:
+    sd_client.unsubscribe(action)
+    print(f"Unsubscribed {action}")
 
 
 def cmd_unsubscribe_all() -> None:
-    subs = sd_client.list_subscriptions()
-    for s in subs:
-        guid = s.get("guid") or s.get("id") if isinstance(s, dict) else None
-        if guid:
-            sd_client.unsubscribe(guid)
-            print(f"Removed {guid}")
-    print(f"Removed {len(subs)} subscription(s).")
+    for action in config.SUBSCRIBE_ACTIONS:
+        try:
+            sd_client.unsubscribe(action)
+            print(f"Unsubscribed {action}")
+        except Exception as e:                       # noqa: BLE001
+            print(f"  ({action}: {e})")
 
 
 def main(argv: list[str]) -> int:
@@ -86,7 +115,7 @@ def main(argv: list[str]) -> int:
         cmd_subscribe()
     elif cmd == "unsubscribe":
         if len(argv) < 2:
-            print("usage: python subscribe.py unsubscribe <subscription_guid>")
+            print("usage: python subscribe.py unsubscribe <action>  (e.g. order.picked_up)")
             return 2
         cmd_unsubscribe(argv[1])
     elif cmd == "unsubscribe-all":

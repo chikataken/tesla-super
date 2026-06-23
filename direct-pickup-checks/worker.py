@@ -107,6 +107,17 @@ def handle_bol_event(order_guid: str) -> None:
     expected_vins = _vins(order)
     if not number:
         raise RuntimeError(f"no order number for {order_guid} — can't locate it in the web UI")
+
+    # Only tag orders whose number/name carries a required marker (e.g. "-direct" /
+    # "trade"). Others are left untagged (no browser work). Blank markers -> tag all.
+    markers = config.TAG_NAME_MARKERS
+    if markers and not any(m in number.lower() for m in markers):
+        log.info("order name lacks required marker — not tagging",
+                 extra={"order_guid": order_guid, "number": number, "markers": list(markers)})
+        db.push_ui_event(order_guid=order_guid, kind="tag_skipped",
+                         payload={"number": number, "reason": "name_marker", "markers": list(markers)})
+        return
+
     log.info("BOL event: locating order in web UI", extra={"order_guid": order_guid,
                                                            "number": number,
                                                            "vins": len(expected_vins)})
@@ -165,6 +176,11 @@ def process(item) -> None:
 
     if action in config.PICKUP_STATUS_ACTIONS:
         handle_status_event(order_guid, action)
+        # Manually-marked pickups won't get a later BOL/photo event, so check photos
+        # and tag NOW (no photos -> NO VIN). Driver-app pickups still tag on their
+        # own order.picked_up_bol event when the photos finish uploading.
+        if action == config.PICKUP_MANUAL_ACTION:
+            handle_bol_event(order_guid)
     elif action == config.PICKUP_BOL_ACTION:
         handle_bol_event(order_guid)
     elif action == config.PICKUP_IGNORED_ACTION:

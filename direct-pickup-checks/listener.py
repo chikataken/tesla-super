@@ -59,27 +59,39 @@ def _first(d: dict, *keys: str) -> Optional[str]:
     return None
 
 
-def extract_fields(payload: dict) -> dict:
-    """Pull (token, guid, action, order_guid, occurred_at) from a webhook payload.
+# Super Dispatch sends the verification token as an HTTP HEADER (not in the body).
+VERIFICATION_TOKEN_HEADER = "x-super-dispatch-verification-token"
 
-    VERIFY field names. Known from the brief: `verification_token`, event `guid`,
-    `occurred_at`, target object `order_guid`. The action-name field is not stated;
-    we try the common spellings."""
-    return {
-        "token": _first(payload, "verification_token"),
-        "guid": _first(payload, "guid", "event_guid", "id"),
-        "action": _first(payload, "action", "event", "event_type", "type"),
-        "order_guid": _first(payload, "order_guid", "object_guid", "target_guid"),
-        "occurred_at": _first(payload, "occurred_at", "created_at", "timestamp"),
-    }
+
+def extract_fields(payload: dict) -> dict:
+    """Pull (guid, action, order_guid, occurred_at) from a webhook payload.
+
+    SD's real payload is just {action, action_date, order_guid} with NO event guid
+    (the token is a header, handled separately). So we synthesize a stable dedup id
+    from action + order_guid + action_date — identical across SD's retries of one
+    event, distinct across different events."""
+    action = _first(payload, "action", "event", "event_type", "type")
+    order_guid = _first(payload, "order_guid", "object_guid", "target_guid")
+    occurred_at = _first(payload, "action_date", "occurred_at", "created_at", "timestamp")
+    guid = _first(payload, "guid", "event_guid", "id")
+    if not guid and action and order_guid:
+        guid = f"{action}:{order_guid}:{occurred_at or ''}"
+    return {"guid": guid, "action": action, "order_guid": order_guid,
+            "occurred_at": occurred_at}
 
 
 def _token_ok(token: Optional[str]) -> bool:
-    expected = config.SD_WEBHOOK_VERIFICATION_TOKEN
-    if not expected:
-        log.error("SD_WEBHOOK_VERIFICATION_TOKEN not set — rejecting all webhooks")
+    # Build the valid set at CALL time from both config sources (so tests that patch
+    # the single token, and prod that sets the multi-token set, both work).
+    valid = set(config.SD_WEBHOOK_VERIFICATION_TOKENS)
+    if config.SD_WEBHOOK_VERIFICATION_TOKEN:
+        valid.add(config.SD_WEBHOOK_VERIFICATION_TOKEN)
+    if not valid:
+        log.error("no verification tokens configured — rejecting all webhooks")
         return False
-    return bool(token) and hmac.compare_digest(token, expected)
+    # Super Dispatch sends a per-action token; accept if it matches any of ours.
+    # compare_digest against each keeps the check constant-time per candidate.
+    return bool(token) and any(hmac.compare_digest(token, v) for v in valid)
 
 
 @app.post(config.WEBHOOK_PATH)
@@ -96,9 +108,14 @@ async def webhook(request: Request) -> Response:
 
     f = extract_fields(payload)
 
-    # (1) authenticate
-    if not _token_ok(f["token"]):
-        log.warning("verification_token mismatch", extra={"action": f["action"]})
+    # (1) authenticate — Super Dispatch sends the token as an HTTP header.
+    token = request.headers.get(VERIFICATION_TOKEN_HEADER)
+    if not _token_ok(token):
+        log.warning("verification_token mismatch", extra={
+            "action": f["action"],
+            "header_present": VERIFICATION_TOKEN_HEADER in request.headers,
+            "valid_tokens_loaded": len(config.SD_WEBHOOK_VERIFICATION_TOKENS),
+        })
         return Response(status_code=401, content="bad verification token")
 
     # An event with no guid can't be deduped safely — reject so SD retries rather

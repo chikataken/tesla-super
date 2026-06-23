@@ -43,13 +43,12 @@ ORDER = {
 }
 
 
-# --- status events (API only; must NOT open a browser) --------------------
-@pytest.mark.parametrize("action", ["order.picked_up", "order.manually_marked_as_picked_up"])
-def test_status_event_records_shipment_and_ui(action, monkeypatch):
+# --- order.picked_up status event (API only; must NOT open a browser) ------
+def test_status_event_records_shipment_and_ui(monkeypatch):
     monkeypatch.setattr(sd_client, "get_order", lambda guid: ORDER)
     monkeypatch.setattr(browser, "browser_context",
                         lambda *a, **k: pytest.fail("status event opened a browser"))
-    _enqueue(action)
+    _enqueue("order.picked_up")
     assert worker.run_once() is True
     with db.connect() as conn:
         ship = conn.execute("SELECT * FROM shipments WHERE order_guid='ord-1'").fetchone()
@@ -58,6 +57,22 @@ def test_status_event_records_shipment_and_ui(action, monkeypatch):
     assert ship["number"] == "SHP-9001"
     assert set(vins) == {"VIN0000000000001", "VIN0000000000002"}
     assert ui["kind"] == "picked_up"
+
+
+# --- manual mark: records AND tags immediately (no photos -> NO VIN) --------
+def test_manual_mark_records_and_tags_immediately(monkeypatch):
+    decision = {"vin_result": "NO VIN", "tags": ["NO VIN"], "all_found": False,
+                "per_vin": {}, "photos_seen": 0,
+                "expected": ["VIN0000000000001", "VIN0000000000002"]}
+    captured = _wire_bol(monkeypatch, decision=decision, sections=[])   # no photos
+    _enqueue("order.manually_marked_as_picked_up")
+    assert worker.run_once() is True
+    with db.connect() as conn:
+        ship = conn.execute("SELECT * FROM shipments WHERE order_guid='ord-1'").fetchone()
+        tag = conn.execute("SELECT * FROM tags WHERE order_guid='ord-1'").fetchone()
+    assert ship["number"] == "SHP-9001"          # recorded by the status handler
+    assert captured["tags"] == ["NO VIN"]        # tagged by the bol handler, no photos
+    assert tag["vin_result"] == "NO VIN"
 
 
 # --- BOL event (Playwright path) ------------------------------------------
@@ -81,21 +96,21 @@ def _wire_bol(monkeypatch, *, decision, sections=None):
 
 
 def test_bol_event_all_vins_found_tags_VIN(monkeypatch):
-    decision = {"vin_result": "VIN", "tags": ["VIN", "CLAUDE"], "all_found": True,
+    decision = {"vin_result": "VIN", "tags": ["VIN"], "all_found": True,
                 "per_vin": {"VIN0000000000001": True, "VIN0000000000002": True},
                 "photos_seen": 2, "expected": ["VIN0000000000001", "VIN0000000000002"]}
     captured = _wire_bol(monkeypatch, decision=decision)
     _enqueue("order.picked_up_bol")
     assert worker.run_once() is True
 
-    assert captured["tags"] == ["VIN", "CLAUDE"]
+    assert captured["tags"] == ["VIN"]
     assert captured["edit_url"].endswith("/orders/edit/uuid-123")
     with db.connect() as conn:
         tag = conn.execute("SELECT * FROM tags WHERE order_guid='ord-1'").fetchone()
         photos = conn.execute("SELECT * FROM photos WHERE order_guid='ord-1'").fetchall()
         ui = conn.execute("SELECT * FROM ui_events ORDER BY id DESC LIMIT 1").fetchone()
     assert tag["vin_result"] == "VIN"
-    assert json.loads(tag["applied_tags"]) == ["VIN", "CLAUDE"]
+    assert json.loads(tag["applied_tags"]) == ["VIN"]
     assert len(photos) == 2                          # bytes persisted to disk + recorded
     for p in photos:
         with open(p["local_path"], "rb") as fh:
@@ -103,21 +118,48 @@ def test_bol_event_all_vins_found_tags_VIN(monkeypatch):
     assert ui["kind"] == "photos_tagged"
 
 
+def test_name_marker_filter_skips_unqualified(monkeypatch):
+    # Order number has no "trade"/"direct" marker -> not tagged, no browser opened.
+    monkeypatch.setattr(config, "TAG_NAME_MARKERS", ("trade", "direct"))
+    monkeypatch.setattr(sd_client, "get_order", lambda guid: {**ORDER, "number": "A443251"})
+    monkeypatch.setattr(browser, "browser_context",
+                        lambda *a, **k: pytest.fail("opened browser for unqualified order"))
+    _enqueue("order.picked_up_bol")
+    assert worker.run_once() is True
+    with db.connect() as conn:
+        tag = conn.execute("SELECT * FROM tags WHERE order_guid='ord-1'").fetchone()
+        ui = conn.execute("SELECT * FROM ui_events ORDER BY id DESC LIMIT 1").fetchone()
+    assert tag is None                               # not tagged
+    assert ui["kind"] == "tag_skipped"
+
+
+def test_name_marker_filter_allows_qualified(monkeypatch):
+    # "A346511-direct" carries a marker -> tagged normally.
+    monkeypatch.setattr(config, "TAG_NAME_MARKERS", ("trade", "direct"))
+    decision = {"vin_result": "NO VIN", "tags": ["NO VIN"], "all_found": False,
+                "per_vin": {}, "photos_seen": 0, "expected": []}
+    captured = _wire_bol(monkeypatch, decision=decision, sections=[])
+    monkeypatch.setattr(sd_client, "get_order", lambda guid: {**ORDER, "number": "A346511-direct"})
+    _enqueue("order.picked_up_bol")
+    assert worker.run_once() is True
+    assert captured["tags"] == ["NO VIN"]            # passed the filter, tagged
+
+
 def test_bol_event_missing_vin_tags_NO_VIN(monkeypatch):
-    decision = {"vin_result": "NO VIN", "tags": ["NO VIN", "CLAUDE"], "all_found": False,
+    decision = {"vin_result": "NO VIN", "tags": ["NO VIN"], "all_found": False,
                 "per_vin": {"VIN0000000000001": True, "VIN0000000000002": False},
                 "photos_seen": 2, "expected": ["VIN0000000000001", "VIN0000000000002"]}
     captured = _wire_bol(monkeypatch, decision=decision)
     _enqueue("order.picked_up_bol")
     worker.run_once()
-    assert captured["tags"] == ["NO VIN", "CLAUDE"]
+    assert captured["tags"] == ["NO VIN"]
     with db.connect() as conn:
         assert conn.execute("SELECT vin_result FROM tags WHERE order_guid='ord-1'"
                             ).fetchone()["vin_result"] == "NO VIN"
 
 
 def test_bol_event_idempotent_skips_retag(monkeypatch):
-    decision = {"vin_result": "VIN", "tags": ["VIN", "CLAUDE"], "all_found": True,
+    decision = {"vin_result": "VIN", "tags": ["VIN"], "all_found": True,
                 "per_vin": {}, "photos_seen": 0, "expected": []}
     calls = {"n": 0}
     _wire_bol(monkeypatch, decision=decision)

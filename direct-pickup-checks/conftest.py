@@ -26,6 +26,7 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "PHOTO_DIR", str(data_dir / "photos"))
     monkeypatch.setattr(config, "SD_WEBHOOK_VERIFICATION_TOKEN", "test-token-123")
     monkeypatch.setattr(config, "WORKER_MAX_ATTEMPTS", 3)
+    monkeypatch.setattr(config, "TAG_NAME_MARKERS", ())   # no name filter unless a test sets it
     os.makedirs(data_dir, exist_ok=True)
     db.init_db()
     yield

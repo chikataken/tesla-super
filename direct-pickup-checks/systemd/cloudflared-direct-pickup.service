@@ -20,11 +20,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# --- EDIT: same user that ran `./run.sh tunnel` (its ~/.cloudflared holds the creds) ---
-User=andrew
-Group=andrew
-ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel \
-    --config /opt/direct-pickup-checks/.cloudflared/config.yml run
+# Runs as mbdtf — its ~/.cloudflared holds the tunnel credentials.
+User=mbdtf
+Group=mbdtf
+ExecStart=/home/mbdtf/.local/bin/cloudflared --no-autoupdate tunnel \
+    --config /home/mbdtf/projects/tesla-super/direct-pickup-checks/.cloudflared/config.yml run
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

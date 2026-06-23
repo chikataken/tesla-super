@@ -8,15 +8,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 # --- EDIT THESE for your server ---
-User=andrew
-Group=andrew
-WorkingDirectory=/opt/direct-pickup-checks
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/direct-pickup-checks
 # Use the project venv's interpreters.
-ExecStart=/opt/direct-pickup-checks/.venv/bin/uvicorn listener:app \
+ExecStart=/home/mbdtf/projects/tesla-super/direct-pickup-checks/.venv/bin/uvicorn listener:app \
     --host 127.0.0.1 --port 8077 --workers 1
 # Config comes from ../secrets/.env + this folder's .env (loaded by config.py).
 # You can also point at an explicit env file:
-# EnvironmentFile=/opt/direct-pickup-checks/.env
+# EnvironmentFile=/home/mbdtf/projects/tesla-super/direct-pickup-checks/.env
 
 Restart=on-failure
 RestartSec=3

@@ -42,9 +42,14 @@ PATH_ORDER = "/v1/public/orders/{guid}"                       # get-order detail
 #   /v1/public/orders/{guid}/vehicles/photos
 PATH_ORDER_PHOTOS = "/v1/public/orders/{guid}/inspection_photos"
 # VERIFY: webhook management endpoints + payload shape.
-PATH_WEBHOOK_ACTIONS = "/v1/public/webhooks/actions"          # "list of all webhook actions"
-PATH_WEBHOOK_SUBSCRIPTIONS = "/v1/public/webhooks/subscriptions"
-PATH_WEBHOOK_SUBSCRIPTION = "/v1/public/webhooks/subscriptions/{guid}"
+# Authoritative shapes from the Shipper webhooks docs
+# (developer.superdispatch.com/shipper/docs/webhooks/): per-action subscribe/unsubscribe
+# under /v1/public/webhooks/{action}/(un)subscribe; request body is ONLY {callback_url}
+# — Super Dispatch GENERATES the verification_token and returns it in the response.
+PATH_WEBHOOK_ACTIONS = "/v1/public/webhooks/actions"                     # GET: list available actions
+PATH_WEBHOOK_SUBSCRIPTIONS = "/v1/public/webhooks"                       # GET: list subscriptions
+PATH_WEBHOOK_SUBSCRIBE = "/v1/public/webhooks/{action}/subscribe"        # POST {callback_url}
+PATH_WEBHOOK_UNSUBSCRIBE = "/v1/public/webhooks/{action}/unsubscribe"    # POST
 
 
 class SDError(RuntimeError):
@@ -208,19 +213,22 @@ def list_subscriptions() -> list[dict]:
 
 
 def subscribe(callback_url: str, actions: list[str],
-              verification_token: Optional[str] = None) -> dict:
-    """Register a callback URL for the given actions. VERIFY the request body shape:
-    some SD tenants take one subscription per action, others a single subscription
-    with an `actions` array. This sends the array form; adjust if the reference
-    differs."""
-    body = {"url": callback_url, "actions": list(actions)}
-    if verification_token:
-        body["verification_token"] = verification_token
-    return _object(_request("POST", PATH_WEBHOOK_SUBSCRIPTIONS, json=body))
+              verification_token: Optional[str] = None) -> list[dict]:
+    """Register the callback for each action: POST /v1/public/webhooks/{action}/subscribe
+    with body {callback_url}. Super Dispatch generates the verification_token and returns
+    it in each response object. `verification_token` arg is ignored (kept for call-site
+    compatibility). Returns one response object per action."""
+    results = []
+    for action in actions:
+        results.append(_object(_request(
+            "POST", PATH_WEBHOOK_SUBSCRIBE.format(action=action),
+            json={"callback_url": callback_url})))
+    return results
 
 
-def unsubscribe(subscription_guid: str) -> None:
-    _request("DELETE", PATH_WEBHOOK_SUBSCRIPTION.format(guid=subscription_guid))
+def unsubscribe(action: str) -> None:
+    """POST /v1/public/webhooks/{action}/unsubscribe."""
+    _request("POST", PATH_WEBHOOK_UNSUBSCRIBE.format(action=action))
 
 
 # --- self-test -------------------------------------------------------------

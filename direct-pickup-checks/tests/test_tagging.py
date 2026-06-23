@@ -24,7 +24,7 @@ def test_all_vins_found_tags_VIN(monkeypatch):
     result = tagging.decide_order_tags(_groups(), ["VIN0000000000001", "VIN0000000000002"])
     assert result["all_found"] is True
     assert result["vin_result"] == "VIN"
-    assert result["tags"] == ["VIN", "CLAUDE"]
+    assert result["tags"] == ["VIN"]
     assert result["per_vin"] == {"VIN0000000000001": True, "VIN0000000000002": True}
     assert result["photos_seen"] == 3
 
@@ -36,7 +36,7 @@ def test_one_vin_missing_tags_NO_VIN(monkeypatch):
     result = tagging.decide_order_tags(_groups(), ["VIN0000000000001", "VIN0000000000002"])
     assert result["all_found"] is False
     assert result["vin_result"] == "NO VIN"
-    assert result["tags"] == ["NO VIN", "CLAUDE"]
+    assert result["tags"] == ["NO VIN"]
 
 
 def test_no_expected_vins_tags_NO_VIN(monkeypatch):
