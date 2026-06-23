@@ -1,0 +1,15 @@
+[Unit]
+# Weekly retention cleanup: prune old photos + bookkeeping rows, then VACUUM.
+# Safe to run while the listener/worker are up (WAL; VACUUM is best-effort).
+Description=direct-pickup-checks retention cleanup
+
+[Service]
+Type=oneshot
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/direct-pickup-checks
+ExecStart=/home/mbdtf/projects/tesla-super/direct-pickup-checks/.venv/bin/python cleanup.py
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true

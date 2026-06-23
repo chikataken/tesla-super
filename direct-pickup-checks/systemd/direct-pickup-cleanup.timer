@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly direct-pickup-checks retention cleanup
+
+[Timer]
+# Sundays at 04:00 local. Persistent=true runs a missed cleanup after downtime.
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

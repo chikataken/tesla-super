@@ -22,6 +22,11 @@ ExecStart=/home/mbdtf/projects/tesla-super/direct-pickup-checks/run_worker.sh
 
 Restart=always
 RestartSec=3
+# Recycle the long-lived worker process weekly to release torch/easyOCR + any creep
+# (it attaches to the persistent shared Chrome, so this doesn't restart Chrome). On
+# expiry systemd sends SIGTERM (worker finishes its in-flight item) and Restart=always
+# brings it back; the durable SQLite queue means nothing is lost.
+RuntimeMaxSec=1week
 # SIGTERM lets the worker finish the in-flight item before exiting (see worker.py).
 KillSignal=SIGTERM
 TimeoutStopSec=60

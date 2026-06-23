@@ -118,6 +118,8 @@ def callback_url() -> str:
 DATA_DIR = (os.getenv("DPC_DATA_DIR") or os.path.join(_HERE, "data")).rstrip("/")
 DB_PATH = os.path.join(DATA_DIR, "direct_pickup.db")
 PHOTO_DIR = os.path.join(DATA_DIR, "photos")
+# cleanup.py prunes photos + bookkeeping rows older than this (keeps shipments/vins/tags).
+DPC_RETENTION_DAYS = int(os.getenv("DPC_RETENTION_DAYS", "30"))
 
 # --- Worker -----------------------------------------------------------------
 WORKER_POLL_SECONDS = float(os.getenv("WORKER_POLL_SECONDS", "2.0"))
