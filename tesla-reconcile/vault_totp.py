@@ -142,27 +142,34 @@ def _user_key(master_key: bytes, protected_key: str) -> tuple[bytes, bytes]:
     raise VaultError(f"unexpected user key length {len(raw)}")
 
 
-def _find_totp(server: str, token: str, enc_key: bytes, mac_key, want: str) -> str:
+def _find_login(server: str, token: str, enc_key: bytes, mac_key, want: str) -> dict:
+    """Return the decrypted {name, username, password, totp} for the vault item whose
+    id equals, or whose name contains, `want`."""
     r = requests.get(f"{server}/api/sync?excludeDomains=true",
                      headers={"Authorization": f"Bearer {token}", **_device_headers()},
                      timeout=30)
     r.raise_for_status()
     ciphers = _ci(r.json(), "ciphers") or []
     want_l = want.strip().lower()
+
+    def dec(s):
+        try:
+            return _decrypt_encstring(s, enc_key, mac_key).decode("utf-8", "replace") if s else None
+        except Exception:
+            return None
+
     for c in ciphers:
         login = _ci(c, "login")
-        totp = _ci(login, "totp") if login else None
-        if not totp:
+        if not login:
             continue
         cid = (_ci(c, "id") or "").lower()
-        name_enc = _ci(c, "name")
-        try:
-            name = _decrypt_encstring(name_enc, enc_key, mac_key).decode("utf-8", "replace") if name_enc else ""
-        except Exception:
-            name = ""
+        name = dec(_ci(c, "name")) or ""
         if want_l == cid or (want_l in name.lower()):
-            return _decrypt_encstring(totp, enc_key, mac_key).decode("utf-8", "replace")
-    raise VaultError(f"no vault item with a TOTP matching {want!r}")
+            return {"name": name,
+                    "username": dec(_ci(login, "username")),
+                    "password": dec(_ci(login, "password")),
+                    "totp": dec(_ci(login, "totp"))}
+    raise VaultError(f"no vault login item matching {want!r}")
 
 
 def _totp_now(secret: str) -> tuple[str, int]:
@@ -176,8 +183,8 @@ def _totp_now(secret: str) -> tuple[str, int]:
     return otp.now(), remaining
 
 
-def get_tesla_totp() -> tuple[str, int]:
-    """Return (current 6-digit code, seconds remaining in its window)."""
+def _vault_session():
+    """Authenticate to Vaultwarden and return (server, token, enc_key, mac_key)."""
     server = (os.getenv("BW_SERVER", "")).strip().rstrip("/")
     # Tolerate a missing/typo'd scheme (e.g. "https//host" or bare "host").
     if server and not server.startswith(("http://", "https://")):
@@ -186,7 +193,6 @@ def get_tesla_totp() -> tuple[str, int]:
     password = os.getenv("BW_PASSWORD", "")
     cid = os.getenv("BW_CLIENT_ID", "").strip()
     csecret = os.getenv("BW_CLIENT_SECRET", "").strip()
-    item = os.getenv("BW_TESLA_ITEM", "Tesla").strip()
     missing = [k for k, v in {"BW_SERVER": server, "BW_EMAIL": email,
                "BW_PASSWORD": password, "BW_CLIENT_ID": cid,
                "BW_CLIENT_SECRET": csecret}.items() if not v]
@@ -197,14 +203,35 @@ def get_tesla_totp() -> tuple[str, int]:
     if not protected:
         raise VaultError("token response had no protected Key")
     enc_key, mac_key = _user_key(mk, protected)
-    secret = _find_totp(server, token, enc_key, mac_key, item)
-    return _totp_now(secret)
+    return server, token, enc_key, mac_key
+
+
+def get_login(item_name: str) -> dict:
+    """Return {name, username, password, totp} for a vault item (matched by id or name)."""
+    server, token, enc_key, mac_key = _vault_session()
+    return _find_login(server, token, enc_key, mac_key, item_name)
+
+
+def get_tesla_totp() -> tuple[str, int]:
+    """Return (current 6-digit code, seconds remaining in its window)."""
+    item = os.getenv("BW_TESLA_ITEM", "Tesla").strip()
+    login = get_login(item)
+    if not login.get("totp"):
+        raise VaultError(f"vault item {item!r} has no TOTP")
+    return _totp_now(login["totp"])
 
 
 if __name__ == "__main__":
+    import sys
     try:
-        code, secs = get_tesla_totp()
-        print(f"OK: code {code[0]}****{code[-1]} ({len(code)} digits), {secs}s left in window")
+        if len(sys.argv) > 1 and sys.argv[1] == "login":      # python vault_totp.py login <item>
+            item = sys.argv[2] if len(sys.argv) > 2 else os.getenv("BW_SD_ITEM", "SuperDispatch")
+            c = get_login(item)
+            print(f"OK: item {c['name']!r}  user={c['username']!r}  "
+                  f"password={'set' if c['password'] else 'MISSING'}  totp={'yes' if c['totp'] else 'no'}")
+        else:
+            code, secs = get_tesla_totp()
+            print(f"OK: code {code[0]}****{code[-1]} ({len(code)} digits), {secs}s left in window")
     except Exception as e:
         print("FAILED:", type(e).__name__, e)
         raise SystemExit(1)

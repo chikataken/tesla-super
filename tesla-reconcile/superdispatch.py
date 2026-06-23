@@ -78,11 +78,21 @@ def scrape_order_rows(page: Page) -> list[OrderRow]:
     """Read order id, detail link and tag chips for every card on the page."""
     page.wait_for_load_state("domcontentloaded")
     if "login" in page.url.lower() or page.locator("input[type=password]").count():
-        raise RuntimeError(
-            "Not logged into SuperDispatch in the Playwright profile. Run "
-            "`python run_login.py`, log into shipper.superdispatch.com in that "
-            "window, press Enter, then retry."
-        )
+        # Logged out: try an automatic re-login from Vaultwarden (careful, captcha-
+        # aware). If it works, return to where we were headed and carry on.
+        import sd_login
+        intended = page.url
+        if sd_login.ensure_logged_in(page):
+            target = (intended if "login" not in intended.lower()
+                      else config.SD_BASE.rstrip("/") + "/orders")
+            page.goto(target)
+            page.wait_for_load_state("domcontentloaded")
+        if "login" in page.url.lower() or page.locator("input[type=password]").count():
+            raise RuntimeError(
+                "Not logged into SuperDispatch and auto-login did not complete (missing "
+                "Vaultwarden creds, a captcha, or a 2FA code). Run `python run_login.py`, "
+                "log into shipper.superdispatch.com, press Enter, then retry."
+            )
     try:
         page.locator(S.SD_ORDER_LINK).first.wait_for(timeout=10000)
     except Exception:
