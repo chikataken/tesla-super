@@ -24,9 +24,43 @@ import subprocess
 import time
 import urllib.request
 
+from urllib.parse import urlparse
+
 from playwright.sync_api import sync_playwright
 
 import config
+
+
+# --------------------------------------------------------------------------
+# Login-page detection
+# --------------------------------------------------------------------------
+# When the Tesla SSO session expires, every suppliers.teslamotors.com page
+# silently 302-redirects to auth.tesla.com's OAuth2 sign-in screen. Without an
+# explicit check a run just blows its `wait_for_load_state("networkidle")`
+# timeout (~30s) and crashes with an opaque TimeoutError. Detect it instead so a
+# caller can fail fast, notify, or trigger re-login.
+TESLA_AUTH_HOST = "auth.tesla.com"          # OAuth2 redirect target when logged out
+TESLA_EMAIL_BOX = "input#identity"          # the Sign-In email field (name/id="identity")
+
+
+def is_login_page(page) -> bool:
+    """True when `page` is sitting on Tesla's SSO sign-in screen, not the app.
+
+    Two independent signals, EITHER of which is sufficient (so it works even if
+    the OAuth redirect is still mid-flight or the host scheme shifts):
+      * the page URL is on auth.tesla.com (the OAuth2 redirect target), or
+      * the sign-in email box (input#identity) is present in the DOM.
+    Cheap and DOM-light — safe to call right after a goto(), before any
+    networkidle wait."""
+    try:
+        if urlparse(page.url).hostname == TESLA_AUTH_HOST:
+            return True
+    except Exception:                        # noqa: BLE001 - page may be navigating
+        pass
+    try:
+        return page.locator(TESLA_EMAIL_BOX).count() > 0
+    except Exception:                        # noqa: BLE001 - frame detached mid-nav
+        return False
 
 
 # --------------------------------------------------------------------------
