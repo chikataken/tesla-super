@@ -1,0 +1,11 @@
+[Unit]
+Description=direct-pickup-checks health check (emails on DOWN / RECOVERED)
+
+[Service]
+Type=oneshot
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/direct-pickup-checks
+ExecStart=/home/mbdtf/projects/tesla-super/direct-pickup-checks/.venv/bin/python monitor.py health
+StandardOutput=journal
+StandardError=journal

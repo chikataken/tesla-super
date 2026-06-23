@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily direct-pickup-checks digest email
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

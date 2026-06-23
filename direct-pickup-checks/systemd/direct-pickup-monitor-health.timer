@@ -1,0 +1,9 @@
+[Unit]
+Description=direct-pickup-checks health check every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+
+[Install]
+WantedBy=timers.target

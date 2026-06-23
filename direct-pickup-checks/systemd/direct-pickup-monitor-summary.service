@@ -1,0 +1,11 @@
+[Unit]
+Description=direct-pickup-checks daily email digest
+
+[Service]
+Type=oneshot
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/direct-pickup-checks
+ExecStart=/home/mbdtf/projects/tesla-super/direct-pickup-checks/.venv/bin/python monitor.py summary
+StandardOutput=journal
+StandardError=journal
