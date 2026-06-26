@@ -66,8 +66,13 @@ AUTH_MODE = os.getenv("AUTH_MODE", "cdp" if os.name == "nt" else "launch").strip
 # the connection is refused.
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222").strip().rstrip("/")
 # Persistent profile the auto-launched Chrome runs on. Log in once (run_login.py
-# or by hand); the profile keeps you logged in — and trusted — between runs.
-CDP_PROFILE_DIR = os.getenv("CDP_PROFILE_DIR", r"C:\tesla-profile")
+# or by hand); the profile keeps you logged in — and trusted — between runs. Default
+# is an ABSOLUTE path (…/tesla-super/tesla-reconcile/.auth) so every sibling tool
+# resolves the SAME profile regardless of its working dir — a CWD-relative literal
+# like "C:\tesla-profile" splits into a separate per-tool profile and breaks sharing.
+_SHARED_PROFILE_DEFAULT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tesla-reconcile", ".auth")
+CDP_PROFILE_DIR = os.getenv("CDP_PROFILE_DIR", _SHARED_PROFILE_DEFAULT)
 # Full path to chrome.exe; leave empty to auto-detect the standard locations.
 CHROME_PATH = os.getenv("CHROME_PATH", "").strip()
 # Window visibility for the auto-launched Chrome (cdp mode only):

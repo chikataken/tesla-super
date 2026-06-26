@@ -102,6 +102,20 @@ CREATE TABLE IF NOT EXISTS ui_events (
     payload      TEXT,
     created_at   REAL
 );
+
+-- Single-row circuit breaker for the SD WEB session. When the worker can't get
+-- logged in (a captcha/2FA a human must clear, or a transient vault error) it trips
+-- this gate: web/BOL items stay queued (parked, attempts NOT burned) and the worker
+-- stops hammering login until the session is restored. API-only events keep flowing.
+CREATE TABLE IF NOT EXISTS auth_state (
+    id           INTEGER PRIMARY KEY CHECK (id = 1),
+    blocked      INTEGER NOT NULL DEFAULT 0,
+    reason       TEXT,                      -- captcha | 2fa | no_creds | vault_error | unknown
+    detail       TEXT,
+    blocked_at   REAL,                      -- when it FIRST tripped (kept across re-trips)
+    updated_at   REAL
+);
+INSERT OR IGNORE INTO auth_state (id, blocked, updated_at) VALUES (1, 0, 0);
 """
 
 
@@ -157,19 +171,31 @@ def accept_event(*, guid: str, action: str, order_guid: Optional[str],
 # --------------------------------------------------------------------------
 # Worker path: claim -> done/fail.
 # --------------------------------------------------------------------------
-def claim_next() -> Optional[sqlite3.Row]:
+def claim_next(exclude_actions: tuple[str, ...] = ()) -> Optional[sqlite3.Row]:
     """Atomically claim the oldest pending item (by occurred_at, then id) and mark
     it 'processing'. Returns the claimed row, or None if the queue is empty.
+
+    `exclude_actions` skips those actions when claiming — the worker passes the
+    web/BOL actions while the auth gate is tripped, so those items stay parked
+    (pending) while API-only status events keep being processed.
 
     The UPDATE...WHERE status='pending' guard makes the claim safe even if more than
     one worker runs."""
     now = time.time()
     with connect() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT * FROM queue WHERE status='pending' "
-            "ORDER BY occurred_at IS NULL, occurred_at, id LIMIT 1"
-        ).fetchone()
+        if exclude_actions:
+            ph = ",".join("?" * len(exclude_actions))
+            row = conn.execute(
+                f"SELECT * FROM queue WHERE status='pending' AND action NOT IN ({ph}) "
+                "ORDER BY occurred_at IS NULL, occurred_at, id LIMIT 1",
+                tuple(exclude_actions),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM queue WHERE status='pending' "
+                "ORDER BY occurred_at IS NULL, occurred_at, id LIMIT 1"
+            ).fetchone()
         if row is None:
             conn.execute("COMMIT")
             return None
@@ -200,6 +226,59 @@ def mark_failed(item_id: int, error: str, *, max_attempts: int) -> str:
         conn.execute("UPDATE queue SET status=?, last_error=?, updated_at=? WHERE id=?",
                      (status, error[:1000], now, item_id))
         return status
+
+
+def requeue(item_id: int, *, note: Optional[str] = None) -> None:
+    """Return a claimed item to 'pending' WITHOUT counting the claim as an attempt
+    (undoes claim_next's increment). Used when the auth gate trips: the item is
+    parked, not failed, so it drains untouched once the session is restored."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE queue SET status='pending', attempts=MAX(attempts-1, 0), "
+            "last_error=?, updated_at=? WHERE id=?",
+            (note, time.time(), item_id))
+
+
+# --------------------------------------------------------------------------
+# Auth gate (circuit breaker): single row, shared by the worker across polls.
+# --------------------------------------------------------------------------
+def set_auth_block(reason: str, detail: str = "") -> None:
+    """Trip the gate. Keeps the original blocked_at across repeated trips."""
+    now = time.time()
+    with connect() as conn:
+        conn.execute(
+            "UPDATE auth_state SET blocked=1, reason=?, detail=?, "
+            "blocked_at=COALESCE(NULLIF(blocked_at, 0), ?), updated_at=? WHERE id=1",
+            (reason, (detail or "")[:500], now, now))
+
+
+def clear_auth_block() -> None:
+    with connect() as conn:
+        conn.execute("UPDATE auth_state SET blocked=0, reason=NULL, detail=NULL, "
+                     "blocked_at=NULL, updated_at=? WHERE id=1", (time.time(),))
+
+
+def auth_blocked() -> bool:
+    with connect() as conn:
+        r = conn.execute("SELECT blocked FROM auth_state WHERE id=1").fetchone()
+        return bool(r and r["blocked"])
+
+
+def auth_block_info() -> Optional[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute("SELECT * FROM auth_state WHERE id=1").fetchone()
+
+
+def parked_web_guids(actions: tuple[str, ...]) -> list[str]:
+    """order_guids of pending web items currently parked behind the gate (for logging)."""
+    if not actions:
+        return []
+    ph = ",".join("?" * len(actions))
+    with connect() as conn:
+        rows = conn.execute(
+            f"SELECT order_guid FROM queue WHERE status='pending' AND action IN ({ph})",
+            tuple(actions)).fetchall()
+    return [r["order_guid"] for r in rows if r["order_guid"]]
 
 
 # --------------------------------------------------------------------------

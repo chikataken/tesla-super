@@ -120,7 +120,8 @@ def _scan_tab(page, status: str, zip_pairs: set) -> list:
     found, seen = [], set()
     for pageno in range(1, config.SD_SCAN_MAX_PAGES + 1):
         if base:
-            page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}")
+            page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}"
+                      f"&size={config.SD_SCAN_PAGE_SIZE}")    # 100 rows/page -> fewer page turns
         elif pageno == 1:
             page.goto(LOADBOARD_URL)
             try:
@@ -171,6 +172,14 @@ def scan_loadboard(zip_pairs) -> list:
         # and close it when done.
         page = ctx.new_page()
         try:
+            # If SD logged us out, carefully auto-log-in from Vaultwarden before scanning —
+            # otherwise every tab would just hit the login wall and yield zero hits.
+            import sd_login
+            st = sd_login.ensure_session(page)
+            if st != sd_login.LOGIN_OK:
+                print(f"  SuperDispatch session unavailable (auto-login: {st}) — "
+                      f"loadboard scan skipped (no posted/accepted route highlights this run).")
+                return []
             for status in SCAN_TABS:
                 try:
                     hits = _scan_tab(page, status, pairs)
@@ -229,7 +238,8 @@ async def _scan_tab_async(page, status: str, zip_pairs: set) -> list:
         rows_ready = False
         for attempt in range(1, attempts + 1):
             if base:
-                await page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}")
+                await page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}"
+                                f"&size={config.SD_SCAN_PAGE_SIZE}")   # 100 rows/page
             elif pageno == 1:
                 await page.goto(LOADBOARD_URL)
                 try:

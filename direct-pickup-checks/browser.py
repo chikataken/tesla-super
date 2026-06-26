@@ -20,6 +20,7 @@ No passwords are ever stored or typed by the script.
 """
 from contextlib import contextmanager
 import os
+import re
 import subprocess
 import time
 import urllib.request
@@ -32,6 +33,39 @@ import config
 # --------------------------------------------------------------------------
 # CDP helpers
 # --------------------------------------------------------------------------
+def _profile_on_cdp_port(port: str) -> str | None:
+    """The --user-data-dir of the Chrome currently serving CDP on `port`, read from the
+    OS process table. Lets us catch the ATTACH TRAP: attaching to an already-running
+    Chrome uses ITS profile and ignores our CDP_PROFILE_DIR, so if some other Chrome is
+    on the port with a different (e.g. never-logged-in) profile we'd silently drive a
+    blank session. Returns None if it can't be determined (then we just attach as before)."""
+    try:
+        out = subprocess.run(["pgrep", "-af", f"remote-debugging-port={port}"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:                                    # noqa: BLE001 - pgrep missing/non-Linux
+        return None
+    for line in out.splitlines():
+        m = re.search(r"--user-data-dir=(\S+)", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _assert_attached_profile_matches() -> None:
+    """Before attaching to a live Chrome, make sure it's running OUR configured profile.
+    On a mismatch, fail loudly with the fix instead of silently using a logged-out
+    session — the exact failure that made the worker 'pull from a blank session'."""
+    port = config.CDP_URL.rsplit(":", 1)[-1].strip("/")
+    running = _profile_on_cdp_port(port)
+    if running and os.path.abspath(running) != os.path.abspath(config.CDP_PROFILE_DIR):
+        raise RuntimeError(
+            f"A Chrome is already serving CDP on port {port} using profile {running!r}, "
+            f"NOT the configured {config.CDP_PROFILE_DIR!r}. Attaching would drive that "
+            f"other (likely not-logged-in) session. Stop it first — "
+            f"`pkill -f 'remote-debugging-port={port}'` — so the correct profile "
+            f"launches, or point CDP_PROFILE_DIR at the running profile.")
+
+
 def _cdp_alive(endpoint: str) -> bool:
     try:
         with urllib.request.urlopen(endpoint + "/json/version", timeout=1):
@@ -65,6 +99,7 @@ def ensure_chrome():
     done), or None if one was already running (we leave that one alone).
     """
     if _cdp_alive(config.CDP_URL):
+        _assert_attached_profile_matches()           # never silently drive a foreign profile
         return None
     port = config.CDP_URL.rsplit(":", 1)[-1].strip("/")
     args = [

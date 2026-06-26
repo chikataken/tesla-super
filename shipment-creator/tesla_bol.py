@@ -253,8 +253,8 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
             txt = await card.inner_text()
             shp = _shp_from_text(txt)
             nb = _need_by(txt, vin)                   # 'Need By' from this VIN's row
-            if need_by is not None:
-                need_by[vin] = nb
+            if need_by is not None and nb:            # dashboard wins, but don't clobber a
+                need_by[vin] = nb                     # pre-seeded Excel value with a blank
             print(f"{tag} {vin}: need by {nb or '— (not found)'}")
             async with lock:
                 dup = shp in seen

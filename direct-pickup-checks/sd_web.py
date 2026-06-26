@@ -68,10 +68,19 @@ def find_order_detail_url(page: Page, order_number: str) -> str | None:
     are found."""
     page.goto(f"{config.SD_WEB_BASE}/orders")
     page.wait_for_load_state("domcontentloaded")
-    if "login" in page.url.lower() or page.locator("input[type=password]").count():
-        raise RuntimeError(
-            "Not logged into Super Dispatch in the Playwright profile. Run "
-            "`python run_login.py`, log in, then retry.")
+    import sd_login
+    if sd_login.is_login_page(page):
+        # Logged out — try a careful, captcha-aware auto re-login from Vaultwarden
+        # (human-paced typing; bails on a visible captcha or a 2FA code rather than
+        # risk flagging the account). If it can't complete, login_or_block raises
+        # AuthBlocked: the worker trips its gate, parks this order, and stops looping
+        # until you log back in (run `python run_login.py`).
+        sd_login.login_or_block(page)
+        page.goto(f"{config.SD_WEB_BASE}/orders")
+        page.wait_for_load_state("domcontentloaded")
+        if sd_login.is_login_page(page):
+            raise sd_login.AuthBlocked(
+                "unknown", "still on the SD login page after a reported-OK auto-login")
     box = page.locator("input[type=search]").first
     box.wait_for(state="visible", timeout=15000)
     box.click()
@@ -231,8 +240,9 @@ def _wait_form_loaded(page: Page) -> None:
 
 
 def add_tags(page: Page, edit_url: str, tags: list[str]) -> None:
-    """Open the edit page, REMOVE all existing tags, add the given tags, Save.
-    SuperDispatch caps a shipment at 3 tags, so this is clear-then-set."""
+    """Open the edit page, ADD the given tags on top of any existing ones, Save.
+    Pre-existing tags are preserved; tags already present are skipped.
+    SuperDispatch caps a shipment at 3 tags, so adds past that cap may no-op."""
     page.goto(edit_url)
     page.wait_for_load_state("domcontentloaded")
     _wait_form_loaded(page)
@@ -241,18 +251,15 @@ def add_tags(page: Page, edit_url: str, tags: list[str]) -> None:
     ).first
     tags_root.wait_for(timeout=10000)
 
-    remove_btns = tags_root.locator(".SD-Tag-root button")
-    for _ in range(8):
-        if remove_btns.count() == 0:
-            break
-        try:
-            remove_btns.first.click()
-        except Exception:
-            break
-        page.wait_for_timeout(200)
+    existing = {
+        (t or "").strip()
+        for t in tags_root.locator(".SD-Tag-root").all_inner_texts()
+    }
 
     box = tags_root.locator("input").first
     for tag in tags:
+        if tag in existing:
+            continue
         box.click()
         box.fill(tag)
         page.get_by_role("option", name=tag, exact=True).first.click()

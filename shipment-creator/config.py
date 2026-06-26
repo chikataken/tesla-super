@@ -50,6 +50,9 @@ SD_CLIENT_SECRET = (os.getenv("SUPERDISPATCH_CLIENT_SECRET") or _sd("CLIENT_SECR
 SD_WEB_BASE = os.getenv("SD_WEB_BASE", "https://shipper.superdispatch.com").rstrip("/")
 SD_SCAN = os.getenv("SD_SCAN", "true").strip().lower() in {"1", "true", "yes"}
 SD_SCAN_MAX_PAGES = int(os.getenv("SD_SCAN_MAX_PAGES", "30"))   # safety cap per tab
+# Rows per page when scanning the Posted/Accepted order tabs. The UI's "Page size:"
+# dropdown maxes at 100; ?size=100 in the URL applies it, so we page far less often.
+SD_SCAN_PAGE_SIZE = int(os.getenv("SD_SCAN_PAGE_SIZE", "100"))
 SD_SCAN_THROTTLE_S = float(os.getenv("SD_SCAN_THROTTLE_S", "0.4"))
 
 # --- Tesla ---
@@ -66,9 +69,14 @@ AUTH_MODE = os.getenv("AUTH_MODE", "cdp" if os.name == "nt" else "launch").strip
 # Must be 127.0.0.1, NOT localhost — on Windows localhost resolves to IPv6 and
 # the connection is refused.
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222").strip().rstrip("/")
-# Persistent profile the auto-launched Chrome runs on; shared with
-# tesla-reconcile so one manual login covers both tools.
-CDP_PROFILE_DIR = os.getenv("CDP_PROFILE_DIR", r"C:\tesla-profile")
+# Persistent profile the auto-launched Chrome runs on; shared with tesla-reconcile so
+# one manual login covers both tools. Default is an ABSOLUTE path (…/tesla-super/
+# tesla-reconcile/.auth) computed from this file's location so every tool resolves the
+# SAME profile regardless of working dir — a CWD-relative literal like "C:\tesla-profile"
+# splits into a separate per-tool profile and breaks the shared login.
+_SHARED_PROFILE_DEFAULT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tesla-reconcile", ".auth")
+CDP_PROFILE_DIR = os.getenv("CDP_PROFILE_DIR", _SHARED_PROFILE_DEFAULT)
 # Full path to chrome.exe; leave empty to auto-detect the standard locations.
 CHROME_PATH = os.getenv("CHROME_PATH", "").strip()
 # Window visibility for the auto-launched Chrome (cdp mode only):
@@ -212,7 +220,16 @@ COLUMN_SYNONYMS = {
     # Carrier cost comes from the "rate" column ONLY — never TotalCost.
     "price":            ["rate", "carrier rate", "carrier price"],
     "notes":            ["notes", "instructions", "comments", "remarks", "note"],
+    # 'Need By' date — used for transit windows. From the dashboard for downloaded BOLs;
+    # from this Excel column for cache-resolved shipments that skip the Tesla portal.
+    "need_by":          ["need by date", "need by", "needby", "nbd"],
 }
+
+# Headers that must NEVER map to a canonical field, even by fuzzy match. The Tesla export's
+# 'DriverContact' fuzzily resembles 'delivery contact' but is the DRIVER's number, not the
+# delivery VENUE's contact — so a non-ALL Excel-fallback stop must NOT take it. Listed in
+# normalized form (lowercase, single-spaced).
+IGNORE_HEADERS = ["driver contact", "driver name"]
 
 # Fields a row MUST have to be usable.
 # For the current step (VIN -> Tesla BOL) the VIN is all we need; pickup/delivery

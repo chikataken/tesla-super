@@ -77,8 +77,15 @@ SD_WEB_BASE = os.getenv("SD_WEB_BASE", "https://shipper.superdispatch.com").rstr
 # detection); "launch" = Playwright's own persistent context (default elsewhere).
 AUTH_MODE = os.getenv("AUTH_MODE", "cdp" if os.name == "nt" else "launch").strip().lower()
 CDP_URL = os.getenv("CDP_URL", "http://127.0.0.1:9222").strip().rstrip("/")
-# Shared with the sibling tools so ONE manual login covers all three.
-CDP_PROFILE_DIR = os.getenv("CDP_PROFILE_DIR", r"C:\tesla-profile")
+# Shared with the sibling tools so ONE manual login covers all three. The default is
+# an ABSOLUTE path computed from this file's location (…/tesla-super/tesla-reconcile/
+# .auth). It must NOT be a CWD-relative literal like "C:\tesla-profile": on Linux that
+# backslash path is relative, so it resolved to a DIFFERENT directory under each tool's
+# working dir (…/direct-pickup-checks/C:\tesla-profile vs …/tesla-reconcile/…) — which
+# silently split the login into separate profiles (the worker drove a blank session).
+_SHARED_PROFILE_DEFAULT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tesla-reconcile", ".auth")
+CDP_PROFILE_DIR = os.getenv("CDP_PROFILE_DIR", _SHARED_PROFILE_DEFAULT)
 CHROME_PATH = os.getenv("CHROME_PATH", "").strip()
 # "visible" or "ghost" (real headed Chrome parked off-screen — not detected like true
 # headless). On a headless Linux SERVER you typically want AUTH_MODE=launch + HEADLESS
@@ -148,6 +155,18 @@ PICKUP_STATUS_ACTIONS = (
 PICKUP_BOL_ACTION = "order.picked_up_bol"   # pickup BOL/photo URLs now available
 # Optional: sent when a carrier later picks up an order already manually marked.
 PICKUP_IGNORED_ACTION = "order.picked_up.ignored"
+
+# Actions that need the Super Dispatch WEB session (Playwright). When the auth gate
+# trips (a login/captcha a human must clear), the worker PAUSES these and leaves the
+# items queued; API-only status events (order.picked_up) keep flowing. Manual pickups
+# also drive the browser (handle_bol_event), so they count as web work too.
+WEB_ACTIONS = frozenset({PICKUP_BOL_ACTION, PICKUP_MANUAL_ACTION})
+
+# --- Auth gate / circuit breaker --------------------------------------------
+# While the gate is tripped (logged out + a human-needed captcha/2FA, or a transient
+# vault error), the worker re-probes at most this often: it checks whether you've
+# logged back in (or, for a transient error, retries auto-login) before resuming.
+AUTH_PROBE_SECONDS = float(os.getenv("AUTH_PROBE_SECONDS", "180"))
 
 # The full set subscribe.py registers.
 SUBSCRIBE_ACTIONS = (*PICKUP_STATUS_ACTIONS, PICKUP_BOL_ACTION)

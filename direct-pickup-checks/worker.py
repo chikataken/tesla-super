@@ -34,6 +34,7 @@ import browser
 import config
 import db
 import sd_client
+import sd_login
 import sd_web
 import tagging
 from logging_setup import setup, get_logger
@@ -42,6 +43,7 @@ setup("worker")
 log = get_logger(__name__)
 
 _stop = False
+_last_auth_probe = 0.0          # monotonic time of the last gate recovery probe
 
 
 def _handle_signal(signum, _frame):
@@ -190,15 +192,76 @@ def process(item) -> None:
         log.warning("unhandled action", extra={"action": action, "order_guid": order_guid})
 
 
+def _trip_auth_gate(item, exc: "sd_login.AuthBlocked") -> None:
+    """A web flow couldn't log in. Park the order (no attempt burned) and stop web
+    work until the session is restored — instead of looping and hammering login."""
+    global _last_auth_probe
+    db.set_auth_block(exc.reason, str(exc))
+    db.requeue(item["id"], note=f"auth_blocked:{exc.reason}")
+    _last_auth_probe = time.monotonic()            # give it a full interval before probing
+    parked = db.parked_web_guids(tuple(config.WEB_ACTIONS))
+    db.push_ui_event(order_guid=item["order_guid"], kind="auth_blocked",
+                     payload={"reason": exc.reason, "action": item["action"],
+                              "parked": len(parked)})
+    log.warning("auth gate tripped — web work paused, order parked until you log back in "
+                "(run `python run_login.py`)",
+                extra={"reason": exc.reason, "order_guid": item["order_guid"],
+                       "parked_web_items": len(parked)})
+
+
+def _maybe_recover_auth() -> bool:
+    """While the gate is tripped, re-check at most every AUTH_PROBE_SECONDS whether the
+    session is back. For a human-needed reason (captcha/2FA/no creds) we only LOOK for
+    a manual login — we don't auto-login (no fighting the captcha or the human). For a
+    transient reason (vault error) we safely retry auto-login. Clears the gate on
+    success. Returns True if it just recovered."""
+    global _last_auth_probe
+    if time.monotonic() - _last_auth_probe < config.AUTH_PROBE_SECONDS:
+        return False
+    _last_auth_probe = time.monotonic()
+    info = db.auth_block_info()
+    reason = info["reason"] if info else None
+    try:
+        with browser.browser_context() as ctx:
+            page = ctx.new_page()
+            page.goto(config.SD_WEB_BASE + "/orders", wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+            if reason in sd_login.HUMAN_NEEDED:
+                ok = not sd_login.is_login_page(page)   # only a human login clears it
+            else:
+                ok = sd_login.ensure_logged_in(page) == sd_login.LOGIN_OK
+    except Exception:                              # noqa: BLE001 — never die on a probe
+        log.exception("auth recovery probe failed")
+        return False
+    if ok:
+        db.clear_auth_block()
+        db.push_ui_event(order_guid=None, kind="auth_restored", payload={})
+        log.info("auth restored — resuming web work")
+        return True
+    log.info("auth still blocked", extra={"reason": reason})
+    return False
+
+
 def run_once() -> bool:
-    """Claim and process one item. Returns True if it did work, False if idle."""
-    item = db.claim_next()
+    """Claim and process one item. Returns True if it did work, False if idle.
+
+    While the auth gate is tripped, web/BOL items are left parked (excluded from the
+    claim) and the worker only processes API-only status events; it probes for a
+    restored session on an interval."""
+    blocked = db.auth_blocked()
+    if blocked:
+        _maybe_recover_auth()
+        blocked = db.auth_blocked()
+    exclude = tuple(config.WEB_ACTIONS) if blocked else ()
+    item = db.claim_next(exclude_actions=exclude)
     if item is None:
         return False
     try:
         process(item)
         db.mark_done(item["id"])
         log.info("done", extra={"id": item["id"], "action": item["action"]})
+    except sd_login.AuthBlocked as exc:
+        _trip_auth_gate(item, exc)
     except Exception as exc:                       # noqa: BLE001 — keep the worker alive
         status = db.mark_failed(item["id"], repr(exc), max_attempts=config.WORKER_MAX_ATTEMPTS)
         log.exception("item failed", extra={"id": item["id"], "action": item["action"],

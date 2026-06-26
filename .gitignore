@@ -39,5 +39,7 @@ build/
 .claude/launch.json
 **/.claude/launch.json
 
-# stray Chrome profile from a misconfigured CDP_PROFILE_DIR (literal Windows path on Linux)
-shipment-creator/C:\tesla-profile/
+# stray Chrome profile from a misconfigured CDP_PROFILE_DIR (literal Windows path on
+# Linux). The dir name has a real backslash, which gitignore treats as an escape —
+# so it must be doubled (\\) to match literally.
+**/C:\\tesla-profile/

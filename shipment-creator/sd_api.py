@@ -17,15 +17,20 @@ from datetime import datetime
 import requests
 
 import config
+import terminals_lookup
 
 
 def _parse_needby(s: str | None) -> datetime | None:
-    """'Jun 06, 2026 8:05PM' (timed) or 'Jun 09, 2026' (date-only) -> datetime;
-    None if blank/unparseable."""
+    """'Jun 06, 2026 8:05PM' (timed) or 'Jun 09, 2026' (date-only) — the dashboard
+    formats — OR '2026-06-21 15:45:52' / '2026-06-21' (the ISO form a date cell in the
+    Excel NeedByDate column becomes) -> datetime; None if blank/unparseable."""
     if not s:
         return None
     s = " ".join(str(s).split())
-    for fmt in ("%b %d, %Y %I:%M%p", "%b %d, %Y %I:%M %p", "%b %d, %Y"):
+    for fmt in ("%b %d, %Y %I:%M%p", "%b %d, %Y %I:%M %p", "%b %d, %Y",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                # US M/d/Y forms — how Excel/Sheets render dates when copy-pasted
+                "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%m/%d/%Y", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -159,6 +164,31 @@ def _venue_bol(v: dict) -> dict:
     }
 
 
+def _venue_notes_for_stop(bol_venue: dict, bol_notes: str) -> tuple[dict, str, str]:
+    """Prefer the saved SuperDispatch TERMINAL over the Tesla BOL for a stop, joined on
+    an EXACT terminal-name match. On a clean match, post the terminal's venue (address/
+    contact/phone) — and its carrier note when it has one. On no/ambiguous match, keep
+    100% of the BOL data and record the unmatched name (see terminals_lookup) so the
+    cache gaps are visible. Never raises — a cache problem just falls back to the BOL.
+    Returns (venue, notes, source) where source is surfaced in the UI so the operator can
+    see where each stop's data came from: 'db' = original scraped terminal, 'linked' = a
+    BOL name aliased (by exact address) to an original, 'added' = a terminal learned from a
+    past BOL with no original twin, 'bol' = no match (this run's Tesla BOL)."""
+    venue = _venue_bol(bol_venue)
+    try:
+        hit = terminals_lookup.resolve_or_record(bol_venue.get("location", ""))
+    except Exception:
+        hit = None
+    if not hit:
+        # No DB terminal. The fallback data is either this run's Tesla BOL ('bol') or, for
+        # non-ALL dispatchers who never touch Tesla, the Excel row itself ('excel').
+        return venue, bol_notes, (bol_venue.get("src_hint") or "bol")
+    # term_source is already the badge token ('db' | 'linked' | 'added').
+    source = hit.get("term_source") or "db"
+    # Use the terminal's note when present; don't blank a real BOL note with an empty one.
+    return dict(hit["venue"]), (hit.get("carrier_notes") or bol_notes), source
+
+
 def group_bol_records(records: list[dict]) -> list[tuple[str, list[dict]]]:
     """Group BOL records into SD orders by (shipment, delivery destination).
     Returns [(order_number, [records])]; number is the shipment id, suffixed by
@@ -257,11 +287,7 @@ def order_payload_from_route(number: str, chunk: list, transport_type: str = "OP
         "need_by": soonest[1] if soonest else None,     # soonest across the order's VINs
         "need_by_ts": soonest[0].timestamp() if soonest else None,
         "instructions": "",
-        "pickup": {"date_type": "estimated", "venue": _venue_bol(head["pickup"])},
-        "delivery": {"date_type": "estimated", "venue": _venue_bol(head["delivery"])},
-        # carrier notes per stop, split out of the BOL's Shipment Comments
-        "pickup_notes": head.get("pickup_notes", ""),
-        "delivery_notes": head.get("delivery_notes", ""),
+        **_pickup_delivery(head),
         "vehicles": vehicles,
     }
 
@@ -297,11 +323,25 @@ def order_payload_from_bol(number: str, records: list[dict],
         "inspection_type": "standard",
         "price": round(total, 2) if have_cost else None,
         "instructions": "",
-        "pickup": {"date_type": "estimated", "venue": _venue_bol(head["pickup"])},
-        "delivery": {"date_type": "estimated", "venue": _venue_bol(head["delivery"])},
-        "pickup_notes": head.get("pickup_notes", ""),
-        "delivery_notes": head.get("delivery_notes", ""),
+        **_pickup_delivery(head),
         "vehicles": vehicles,
+    }
+
+
+def _pickup_delivery(head: dict) -> dict:
+    """The pickup/delivery stop blocks + per-stop carrier notes for an order, with the
+    SD-terminal overlay applied to each stop (exact-name match -> terminal, else BOL)."""
+    p_venue, p_notes, p_src = _venue_notes_for_stop(head["pickup"], head.get("pickup_notes", ""))
+    d_venue, d_notes, d_src = _venue_notes_for_stop(head["delivery"], head.get("delivery_notes", ""))
+    return {
+        # `source` ('terminal' | 'bol') rides on the stop so the UI can show where the
+        # venue came from; the SD post-body rebuilds stops from date_type+venue only, so
+        # this extra key never reaches SuperDispatch.
+        "pickup": {"date_type": "estimated", "venue": p_venue, "source": p_src},
+        "delivery": {"date_type": "estimated", "venue": d_venue, "source": d_src},
+        # carrier notes per stop, split out of the BOL's Shipment Comments
+        "pickup_notes": p_notes,
+        "delivery_notes": d_notes,
     }
 
 

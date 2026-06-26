@@ -49,6 +49,13 @@ def _pid() -> str:
             or (profiles.active_id() or ""))
 
 
+def _is_all_profile() -> bool:
+    """The ALL profile is a developer tool for feeding the terminal cache only: no
+    NeedByDate requirement on upload, and posting to SuperDispatch is disabled."""
+    import profiles
+    return _pid() == profiles.ALL_PROFILE_ID
+
+
 def _pdir() -> str:
     d = paths.profile_output_dir(_pid())
     os.makedirs(d, exist_ok=True)
@@ -67,6 +74,7 @@ def _spares_path() -> str: return os.path.join(_pdir(), "spares.json")
 def _search_path() -> str: return os.path.join(_pdir(), "consolidation_search.json")
 def _consol_path() -> str: return os.path.join(_pdir(), "consolidations.json")
 def _active_excel_path() -> str: return os.path.join(_pdir(), "active_excel.json")
+def _last_headers_path() -> str: return os.path.join(_pdir(), "last_headers.json")
 
 
 async def _capture_profile(request: Request):
@@ -148,14 +156,137 @@ def api_orders(file: Optional[str] = None):
     if not files:
         return {"file": None, "count": 0, "orders": [],
                 "message": "No staged orders yet. Run: main.py --create"}
-    path = os.path.join(_orders_dir(), file) if file else files[0]
-    if not os.path.exists(path):
+    # Before showing the latest board, DROP any VIN already live on SuperDispatch so it can't
+    # be double-posted (idempotent — see _auto_remove_sd_duplicates). `dups_removed` is the
+    # running list for this board (cleared on reset), surfaced as a tally.
+    dups_removed = []
+    if not file:
+        try:
+            dups_removed = _auto_remove_sd_duplicates()
+        except Exception:
+            dups_removed = []
+        files = _staged_files()
+    path = os.path.join(_orders_dir(), file) if file else (files[0] if files else None)
+    if not path or not os.path.exists(path):
         raise HTTPException(404, "staged file not found")
     with open(path, encoding="utf-8") as fh:
         orders = json.load(fh)
     for o in orders:
         _annotate_dates(o)
-    return {"file": os.path.basename(path), "count": len(orders), "orders": orders}
+    return {"file": os.path.basename(path), "count": len(orders), "orders": orders,
+            "unpostable": _unpostable_vins(), "duplicates_removed": dups_removed}
+
+
+def _sd_live_vins() -> set:
+    """VINs already on a POSTED or ACCEPTED SuperDispatch order, per the latest loadboard
+    scan (consolidation_search.json). These must not be posted again."""
+    search = _load_json(_search_path(), {})
+    out = set()
+    for o in (search.get("orders") or []):
+        if (o.get("loadboard_status") or "").strip().lower() in ("posted", "accepted"):
+            for v in (o.get("vehicles") or []):
+                vin = (v.get("vin") or "").strip().upper()
+                if vin:
+                    out.add(vin)
+    return out
+
+
+def _dups_removed_path() -> str:
+    return os.path.join(_pdir(), "duplicates_removed.json")
+
+
+def _auto_remove_sd_duplicates() -> list:
+    """DROP any board VIN that's already posted/accepted on SuperDispatch entirely (not to
+    spares) so a re-post can't create a duplicate. Tracks the cumulative removed VINs for
+    this board (cleared on /api/reset) and returns that running list for the tally.
+    Idempotent: once removed, a VIN is off the board, so a second call adds nothing."""
+    removed = list(_load_json(_dups_removed_path(), []))
+    live = _sd_live_vins()
+    files = _staged_files()
+    if live and files:
+        path = files[0]
+        with open(path, encoding="utf-8") as f:
+            batch = json.load(f)
+        on_board = {(v.get("vin") or "").strip().upper() for o in batch for v in (o.get("vehicles") or [])}
+        dups = live & on_board
+        if dups:
+            for o in batch:
+                o["vehicles"] = [v for v in (o.get("vehicles") or [])
+                                 if (v.get("vin") or "").strip().upper() not in dups]
+                _recompute(o)
+            batch = [o for o in batch if o["vehicles"]]
+            _save_batch(path, batch)
+            seen = {x.upper() for x in removed}
+            for d in sorted(dups):
+                if d not in seen:
+                    removed.append(d)
+                    seen.add(d)
+            _save_json(_dups_removed_path(), removed)
+    return removed
+
+
+def _unpostable_vins() -> list[dict]:
+    """Excel VINs that, AFTER the run finished, never made it onto the board or into
+    spares — i.e. Tesla couldn't produce a BOL (no shipment found / download failed). Empty
+    while a run is in progress (those VINs are still pending, not failed) or before any run.
+    Each carries VIN-decoded make/model/year for display."""
+    if _run_state(_pid())["progress"]["running"]:
+        return []
+    excel = _excel_vins()
+    board = _board_vins()
+    # Only flag misses once a run has actually produced a board — otherwise (no run yet, or
+    # right after an Excel load resets the board) we'd wrongly flash EVERY VIN as unpostable.
+    if not excel or not board:
+        return []
+    spares = {s.get("vin") for s in _load_spares() if s.get("vin")}
+    # VINs we intentionally dropped as SD duplicates were removed from the board on purpose —
+    # they're not Tesla-pull failures, so don't flag them as unpostable.
+    dups = {x.strip().upper() for x in _load_json(_dups_removed_path(), []) if x}
+    missing = {v for v in (excel - board - spares)
+               if (v or "").strip().upper() not in dups}
+    if not missing:
+        return []
+    try:
+        import pdf_read
+        return [{"vin": v, **pdf_read._vehicle(v)} for v in sorted(missing)]
+    except Exception:
+        return [{"vin": v} for v in sorted(missing)]
+
+
+@app.get("/api/terminals")
+def api_terminals():
+    """The terminal cache for the Terminals tab. Each group is a CANONICAL terminal —
+    an original scraped terminal ('db') or a standalone learned one ('added') — with the
+    Tesla-BOL/linked names that resolve to it listed as `aliases`. Linked terminals are
+    folded under their original, never shown on their own."""
+    import terminals_db
+    terminals_db.init_db()
+    ts = terminals_db.all_terminals()
+    aliases: dict[str, list[str]] = {}
+    for t in ts:
+        if t.get("linked_sd_id"):
+            aliases.setdefault(t["linked_sd_id"], []).append(t.get("name", ""))
+    groups = []
+    for t in ts:
+        src = t.get("source") or "sd"
+        if src == "bol" and t.get("linked_sd_id"):
+            continue                                   # shown as an alias under its original
+        groups.append({
+            "sd_id": t.get("sd_id", ""), "name": t.get("name", ""),
+            "kind": "added" if src == "bol" else "db",
+            "address": t.get("address", ""), "city": t.get("city", ""),
+            "state": t.get("state", ""), "zip": t.get("zip", ""),
+            "contact_name": t.get("contact_name", ""), "contact_phone": t.get("contact_phone", ""),
+            "carrier_notes": t.get("carrier_notes", ""),
+            "aliases": sorted(a for a in aliases.get(t.get("sd_id", ""), []) if a),
+        })
+    groups.sort(key=lambda g: (g["name"] or "").lower())
+    n_sd = sum(1 for t in ts if (t.get("source") or "sd") == "sd")
+    n_bol = sum(1 for t in ts if t.get("source") == "bol")
+    n_linked = sum(1 for t in ts if t.get("linked_sd_id"))
+    stats = {"total": len(ts), "originals": n_sd, "learned": n_bol,
+             "linked": n_linked, "added": n_bol - n_linked}
+    return {"count": len(groups), "stats": stats, "groups": groups}
 
 
 def _annotate_dates(order: dict) -> dict:
@@ -516,7 +647,82 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
     dest = paths.data_path("uploads", safe)            # DATA_DIR/uploads/<name> (dir auto-created)
     with open(dest, "wb") as f:
         f.write(data)
+
+    # Reject (and delete) any sheet without a NeedByDate column — every shipment needs a
+    # need-by for transit windows, and cache-resolved ones can't fall back to the dashboard.
+    # The ALL profile is exempt: it's just feeding terminals, so any sheet is fine.
+    import excel_ingest
+    try:
+        _, report = excel_ingest.read_rows(dest)
+    except Exception as e:                              # unreadable / not a real spreadsheet
+        try: os.remove(dest)
+        except OSError: pass
+        raise HTTPException(400, f"Couldn't read that spreadsheet: {e}")
+    if not _is_all_profile() and "need_by" not in report.column_mapping:
+        try: os.remove(dest)
+        except OSError: pass
+        raise HTTPException(400, "This Excel has no NeedByDate column. Add a "
+                                 "'NeedByDate' column and re-upload.")
+    # Remember this sheet's header row so DATA-only pasted rows can reuse it later.
+    try:
+        _save_json(_last_headers_path(), excel_ingest.read_headers(dest))
+    except Exception:
+        pass
     return {"path": dest, "name": safe}
+
+
+@app.post("/api/upload-paste")
+def api_upload_paste(body: dict = Body(...)):
+    """Accept rows copied from Excel/Sheets (TSV on the clipboard) and turn them into a
+    real .xlsx that flows through the exact same run/post pipeline as an upload. If the
+    paste starts with a header row we use (and remember) it; otherwise we prepend the
+    headers remembered from the last sheet — so day-to-day you paste DATA only."""
+    import csv, io, re as _re
+    text = ((body or {}).get("text") or "")
+    if not text.strip():
+        raise HTTPException(400, "Paste some rows first.")
+    rows = [r for r in csv.reader(io.StringIO(text), delimiter="\t")
+            if any((c or "").strip() for c in r)]
+    if not rows:
+        raise HTTPException(400, "No rows found in the pasted text.")
+    # A data row always carries a 17-char VIN; a header row doesn't — that's the tell.
+    VIN = _re.compile(r"^[A-HJ-NPR-Z0-9]{17}$")
+    is_header = lambda r: not any(VIN.match((c or "").strip().upper()) for c in r)
+    if is_header(rows[0]):
+        headers, data = rows[0], rows[1:]
+        try: _save_json(_last_headers_path(), [str(h) for h in headers])
+        except Exception: pass
+    else:
+        headers = _load_json(_last_headers_path(), None)
+        if not headers:
+            raise HTTPException(400, "No saved headers yet — include the header row in your "
+                                     "paste, or upload a sheet once first so I can learn them.")
+        data = rows
+    if not data:
+        raise HTTPException(400, "No data rows found (only a header row).")
+    # Write everything as text (preserves leading-zero zips and avoids number reformatting).
+    import openpyxl as _op
+    wb = _op.Workbook(); ws = wb.active
+    ws.append([str(h) for h in headers])
+    width = len(headers)
+    for r in data:
+        ws.append([str(r[i]) if i < len(r) else "" for i in range(width)])
+    dest = paths.data_path("uploads", "pasted.xlsx")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    wb.save(dest)
+    import excel_ingest
+    try:
+        _, report = excel_ingest.read_rows(dest)
+    except Exception as e:
+        try: os.remove(dest)
+        except OSError: pass
+        raise HTTPException(400, f"Couldn't read those rows: {e}")
+    if not _is_all_profile() and "need_by" not in report.column_mapping:
+        try: os.remove(dest)
+        except OSError: pass
+        raise HTTPException(400, "These rows have no NeedByDate column. Include a "
+                                 "'NeedByDate' column (paste the header row once to teach it).")
+    return {"path": dest, "name": "pasted.xlsx", "rows": len(data)}
 
 
 @app.post("/api/run/terminate")
@@ -546,7 +752,8 @@ def api_reset():
             removed += 1
         except OSError:
             pass
-    for p in (_active_excel_path(), _spares_path(), _search_path(), _consol_path()):
+    for p in (_active_excel_path(), _spares_path(), _search_path(), _consol_path(),
+              _dups_removed_path()):
         try:
             if os.path.exists(p):
                 os.remove(p)
@@ -635,13 +842,21 @@ def api_tally():
     # or hide the Post button (spares simply won't be posted).
     spares = {s.get("vin") for s in _load_spares() if s.get("vin")}
     seen = board | spares
-    processed = len(excel & seen) if total else len(seen)
+    # VINs dropped as SD duplicates are resolved-on-purpose: count them as processed so the
+    # Post button still unlocks (they're not on the board/spares and aren't pull failures).
+    dups = {x.strip().upper() for x in _load_json(_dups_removed_path(), []) if x}
+    processed = (len([v for v in excel if v in seen or (v or "").strip().upper() in dups])
+                 if total else len(seen))
+    # VINs Tesla couldn't pull (no BOL) count toward completion as failures — otherwise a
+    # finished run with 1-2 unpullable VINs would sit at total-1/total forever and never
+    # unlock the Post button. They're shown grayed at the top of the board, never posted.
+    unpostable = len(_unpostable_vins())
     path, _sheet = _active_excel()
-    return {"processed": processed, "total": total,
+    return {"processed": processed, "total": total, "unpostable": unpostable,
             "running": _run_state(_pid())["progress"]["running"],
             "active_excel": path,
             "active_excel_name": os.path.basename(path) if path else "",
-            "done": total > 0 and processed >= total}
+            "done": total > 0 and (processed + unpostable) >= total}
 
 
 @app.post("/api/post")
@@ -679,6 +894,9 @@ def api_post_live(body: dict = Body(...)):
     """LIVE — actually POST ONE shipment to SuperDispatch (a prod test of a single
     order). Builds the exact create body for the given order number, fills the active
     dispatcher's phone into the instructions, sends it, and returns the new guid."""
+    if _is_all_profile():
+        raise HTTPException(403, "Posting is disabled for the ALL profile (it only feeds "
+                                 "terminals). Switch to a dispatcher profile to post.")
     import sd_api
     import profiles
     number = (body or {}).get("number")
@@ -704,6 +922,9 @@ def api_post_all(body: dict = Body(default=None)):
     (spares are kept). New shipments are created and any staged consolidations are
     merged onto their existing SD orders. Anything that fails to post stays on the
     board for a retry. Returns only the count of VINs posted (no guids/ids)."""
+    if _is_all_profile():
+        raise HTTPException(403, "Posting is disabled for the ALL profile (it only feeds "
+                                 "terminals). Switch to a dispatcher profile to post.")
     import sd_api
     import profiles
     import config

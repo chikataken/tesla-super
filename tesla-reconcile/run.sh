@@ -9,6 +9,10 @@
 set -e
 cd "$(dirname "$0")"
 
+# Make the graphical-session env available so the real Chrome can open even when
+# launched from a tty / SSH / cron (see session_env.sh).
+. "$(dirname "$0")/session_env.sh"
+
 if [ ! -d .venv ]; then
   echo "First run: creating .venv and installing dependencies..."
   python3 -m venv .venv

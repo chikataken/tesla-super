@@ -7,7 +7,7 @@
 <style>
   :root{
     --bg:#0f1115; --card:#171a21; --card2:#1e222b; --line:#2a2f3a;
-    --text:#e7e9ee; --muted:#9aa3b2; --accent:#4f8cff; --good:#37c97a; --warn:#e0a341;
+    --text:#e7e9ee; --muted:#9aa3b2; --accent:#4f8cff; --good:#37c97a; --warn:#e0a341; --bad:#e2554e;
   }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);
@@ -22,6 +22,8 @@
   .profsel.unset{border-color:var(--accent);box-shadow:0 0 0 2px rgba(79,140,255,.18)}
   .btn.live{background:#7a1f1f;border-color:#a83232;color:#fff;font-weight:650}
   .btn.live:hover{background:#982828}
+  .btn.amber{background:var(--warn);border-color:var(--warn);color:#3a2a06;font-weight:700}
+  .btn.amber:disabled{opacity:.7;cursor:not-allowed}
   .lrow .btn.live{padding:4px 10px;font-size:12px;margin-left:8px}
   .profrow{display:grid;grid-template-columns:80px 130px 1fr auto;gap:10px;align-items:center;margin-bottom:8px}
   .profrow .pname{font-weight:600;font-size:13.5px}
@@ -34,6 +36,7 @@
   .panel{display:none}.panel.active{display:block}
 
   .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:10px}
+  .toolbar input[type=search]{min-width:300px}   /* fit the whole placeholder */
   input[type=search],input[type=text],input[type=number],textarea{background:var(--card);
     border:1px solid var(--line);color:var(--text);border-radius:6px;padding:8px 11px;font-size:14px;outline:none}
   input:focus,textarea:focus{border-color:var(--accent)}
@@ -152,6 +155,30 @@
      whose fill grows with processed/total VINs (GREEN while reading, AMBER + clickable
      to resume when stalled) -> green Post button when done */
   .tally{display:inline-flex;align-items:center;gap:6px}
+  /* Excel+ stays visible always; grays out (still clickable) once a board is loaded */
+  .tally .btn.excelbtn.loaded{background:var(--card2);color:var(--muted);border:1px solid var(--line)}
+  .tally .btn.excelbtn.loaded:hover{background:var(--card);color:var(--text);border-color:var(--accent)}
+  /* Paste rows : sits next to Excel+, same muted-until-hover treatment */
+  .tally .btn.pastebtn{background:var(--card2);color:var(--muted);border:1px solid var(--line)}
+  .tally .btn.pastebtn:hover{background:var(--card);color:var(--text);border-color:var(--accent)}
+  /* Paste modal */
+  .pastemodal{position:fixed;inset:0;z-index:90;background:rgba(0,0,0,.55);
+    display:flex;align-items:center;justify-content:center}
+  .pastemodal[hidden]{display:none}
+  .pastebox{width:min(680px,92vw);background:var(--card);border:1px solid var(--line);
+    border-radius:12px;padding:18px 18px 16px;box-shadow:0 18px 50px rgba(0,0,0,.5)}
+  .pastehdr{font-size:15px;font-weight:600;color:var(--text);margin-bottom:4px}
+  .pastesub{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:10px}
+  .pastebox textarea{width:100%;height:230px;resize:vertical;box-sizing:border-box;
+    background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;
+    padding:10px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow:auto}
+  .pastebox textarea:focus{outline:none;border-color:var(--accent)}
+  .pasterow{display:flex;align-items:center;gap:8px;margin-top:12px}
+  .pastemsg{font-size:12px;color:var(--muted);margin-left:4px}
+  /* Post button slot in the nav (where Settings used to be) */
+  .navpost{display:inline-flex;align-items:center}
+  .navpost .btn{padding:6px 14px;font-size:13px;white-space:nowrap}
+  .navpostlbl{font-size:12px;color:var(--muted);padding:6px 10px;white-space:nowrap}
   .tally .tinyadd{width:26px;height:26px;flex:none;border-radius:7px;border:1px solid var(--line);
     background:var(--card);color:var(--muted);font-size:16px;line-height:1;cursor:pointer;
     display:inline-flex;align-items:center;justify-content:center}
@@ -201,6 +228,18 @@
   .vneed{font-size:11.5px;color:var(--muted);white-space:nowrap;min-width:104px;text-align:right;margin-left:auto}
   .vneed.nb-soon{color:var(--warn)}
   .vneed.nb-over{color:#ff6b6b;font-weight:600}
+  .vneed.nb-missing{color:var(--bad);font-weight:700}
+  /* Unpostable VINs (no Tesla BOL): pinned at top, grayed, non-interactive */
+  .upsec{margin-bottom:14px;border:1px solid var(--bad);border-radius:9px;
+    background:rgba(226,85,78,.06);overflow:hidden}
+  .uphdr{font-size:12px;font-weight:700;color:var(--bad);padding:8px 12px;
+    border-bottom:1px solid rgba(226,85,78,.25)}
+  .vrow.uprow{opacity:.5;cursor:default;background:transparent;filter:grayscale(1)}
+  .vrow.uprow .bvin{color:var(--muted)}
+  .vrow.uprow:hover{background:rgba(255,255,255,.02)}
+  /* VIN with no valid NeedByDate in the Excel — flagged red */
+  .vrow.nbbad{background:rgba(226,85,78,.10);box-shadow:inset 3px 0 0 var(--bad)}
+  .vrow.nbbad:hover{background:rgba(226,85,78,.16)}
   .chev{color:var(--muted);transition:transform .15s;cursor:pointer}.open .chev{transform:rotate(90deg)}
   .bubbles{margin:0 12px 8px;border:1px solid var(--line);border-radius:5px;
     overflow:hidden;background:var(--card2)}
@@ -268,6 +307,36 @@
   .badge.posted{color:#3a2a06;background:var(--warn);border-color:var(--warn);font-weight:700}
   .badge.unposted{color:var(--muted)}
   .badge.match{color:#0b0d12;background:var(--warn);border-color:var(--warn);font-weight:700}
+  /* where a stop's venue came from: green = original scraped terminal DB,
+     yellow = a terminal we LEARNED from a BOL, red = straight off the Tesla BOL */
+  .srcbadge{font-size:9.5px;border-radius:4px;padding:0 5px;margin-left:6px;border:1px solid var(--line);
+    white-space:nowrap;vertical-align:middle;font-weight:700;letter-spacing:.02em}
+  .srcbadge.db{color:#06210f;background:var(--good);border-color:var(--good)}
+  .srcbadge.linked{color:#06210f;background:var(--good);border-color:var(--good)}
+  .srcbadge.added{color:#3a2a06;background:var(--warn);border-color:var(--warn)}
+  .srcbadge.excel{color:var(--muted);background:rgba(255,255,255,.06);border-color:var(--line)}
+  /* Review group: shipments with any Excel-only stop, pinned at the very top */
+  .reviewsec{border:1px solid var(--warn);border-radius:9px;margin-bottom:14px;overflow:hidden;
+    background:rgba(224,163,65,.05)}
+  .reviewhdr{font-size:12px;font-weight:700;color:var(--warn);padding:8px 12px;
+    border-bottom:1px solid rgba(224,163,65,.3)}
+  .reviewsec .lrow:hover{background:rgba(224,163,65,.10)}
+  .dupcount{color:var(--bad);font-weight:600}
+  .dupcount:empty{display:none}
+  .srcbadge.bol{color:#fff;background:var(--bad);border-color:var(--bad)}
+  /* Terminals tab */
+  .term-main{padding:16px 20px;max-width:980px;margin:0 auto;width:100%}
+  .term-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+  .t-row{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:10px 12px}
+  .t-head{display:flex;align-items:center;gap:8px}
+  .t-name{font-weight:700;font-size:13.5px;color:var(--text)}
+  .t-meta{font-size:12px;color:var(--muted);margin-top:3px}
+  .t-contact{color:var(--text)}
+  .t-notes{font-size:11.5px;color:var(--muted);margin-top:4px;white-space:pre-wrap;border-left:2px solid var(--line);padding-left:8px}
+  .t-aliases{margin-top:7px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  .t-allabel{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-right:2px}
+  .t-alias{display:inline-flex;align-items:center;font-size:11.5px;color:var(--text);
+    background:var(--card2);border:1px solid var(--line);border-radius:5px;padding:1px 6px}
   .croute{color:var(--text);font-size:13px;margin:6px 0}
   .caddr{display:flex;gap:8px;align-items:baseline;font-size:12px;margin:3px 0;color:var(--text)}
   .caddr .al{flex:none;width:54px;color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em}
@@ -376,7 +445,8 @@
   <div class="tabs">
     <div id="tally" class="tally"></div>
     <button class="tab active" data-tab="orders">Orders</button>
-    <button class="tab" data-tab="settings">Settings</button>
+    <button class="tab" data-tab="terminals">Terminals</button>
+    <span id="navpost" class="navpost"></span>
   </div>
 </header>
 
@@ -386,16 +456,17 @@
     <div class="orders-layout">
       <aside class="sidebar" id="sidebar">
         <div class="side-title">Sort by</div>
-        <button class="sortbtn active" data-sort="urgency">Most urgent<span class="dir"></span></button>
-        <button class="sortbtn" data-sort="origin">Origin state<span class="dir"></span></button>
+        <button class="sortbtn" data-sort="urgency">Most urgent<span class="dir"></span></button>
+        <button class="sortbtn active" data-sort="origin">Origin state<span class="dir"></span></button>
         <button class="sortbtn" data-sort="dest">Destination state<span class="dir"></span></button>
         <img id="profileImg" class="profimg" alt="" hidden onerror="this.hidden=true">
       </aside>
       <div class="orders-main">
         <div class="toolbar" id="listbar">
           <input id="q" type="search" placeholder="Filter by city, state, or VIN…">
-          <button class="btn ghost" onclick="load()">Refresh</button>
+          <button class="btn ghost" onclick="clearBoard()">Clear shipments</button>
           <span class="count" id="count"></span>
+          <span class="count dupcount" id="dupcount"></span>
         </div>
         <div class="routehdr" id="routehdr" style="display:none">
           <button class="btn ghost" onclick="backToList()">← All shipments</button>
@@ -412,40 +483,15 @@
     </div>
   </div>
 
-  <!-- SETTINGS -->
-  <div class="panel" id="settings">
-    <div class="form">
-      <div class="full"><h2 class="seth">Clear board</h2></div>
-      <div class="full hint">
-        Deletes the current board (all Excel VINs), every SuperDispatch match, and all
-        staged consolidations/connections — back to a blank slate. Your dispatcher
-        profile and credentials are kept. (The <b>Excel +</b> button does this too when
-        you load a new sheet.)
+  <!-- TERMINALS -->
+  <div class="panel" id="terminals">
+    <div class="term-main">
+      <div class="toolbar">
+        <input id="tq" type="search" placeholder="Search terminals by name or address…" oninput="renderTerminals()">
+        <button class="btn ghost" onclick="loadTerminals(true)">Refresh</button>
+        <span class="count" id="tstats"></span>
       </div>
-      <div class="full">
-        <button class="btn" id="clearBtn" onclick="clearBoard()">Clear board, matches &amp; connections</button>
-        <span class="count" id="clearMsg" style="margin-left:12px"></span>
-      </div>
-
-      <div class="full"><h2 class="seth">Test post (LIVE)</h2></div>
-      <div class="full hint">
-        Posts the <b>topmost shipment</b> on the board to SuperDispatch as a single real
-        order (production) — the same one-shipment live test, tucked away here.
-      </div>
-      <div class="full">
-        <button class="btn live" id="postLiveBtn" onclick="postLiveTop()">Post topmost shipment LIVE</button>
-      </div>
-
-      <div class="full"><h2 class="seth">One-time sign-in</h2></div>
-      <div class="full hint">
-        Opens Chrome on the shared login profile at both the Tesla Vendor Portal and
-        SuperDispatch so you can sign in once. Your password is typed into each site's
-        own page — it is never stored by this app. Cookies persist for future runs.
-      </div>
-      <div class="full">
-        <button class="btn" id="loginBtn" onclick="doLogin()">Sign in to Tesla &amp; SuperDispatch</button>
-        <span class="count" id="loginMsg" style="margin-left:12px"></span>
-      </div>
+      <div id="tlist" class="term-list"></div>
     </div>
   </div>
 </div>
@@ -464,6 +510,21 @@
 </div>
 <div id="toast"></div>
 
+<div id="pasteModal" class="pastemodal" hidden onclick="if(event.target===this)closePaste()">
+  <div class="pastebox">
+    <div class="pastehdr">Paste shipment rows</div>
+    <div class="pastesub">Copy cells from Excel/Sheets and paste below. Headers are remembered
+      from your last sheet, so paste <b>data rows only</b> — or include a header row.</div>
+    <textarea id="pasteArea" spellcheck="false"
+      placeholder="Paste rows here (tab-separated, straight from Excel/Sheets)…"></textarea>
+    <div class="pasterow">
+      <button class="btn green" onclick="submitPaste()">Load &amp; run</button>
+      <button class="btn ghost" onclick="closePaste()">Cancel</button>
+      <span id="pasteMsg" class="pastemsg"></span>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = s => document.querySelector(s);
 // small padlock used to mark locked (already-on-SuperDispatch) VIN bubbles
@@ -471,6 +532,8 @@ const LOCK='<svg width="9" height="11" viewBox="0 0 9 11" aria-hidden="true" sty
   +'<rect x="1" y="4.6" width="7" height="5.4" rx="1.2" fill="currentColor"/>'
   +'<path d="M2.4 4.6V3.1a2.1 2.1 0 0 1 4.2 0v1.5" fill="none" stroke="currentColor" stroke-width="1.1"/></svg>';
 let ORDERS = [];
+let UNPOSTABLE = [];             // Excel VINs Tesla had no BOL for — shown grayed at top
+let DUP_REMOVED = [];            // VINs dropped from the board for already being live on SD
 let SPARES = [];                 // set-aside VINs (the third column), off the board
 let PENDING = null;              // a spare VIN being placed (click-to-place flow)
 let CSEARCH = {orders:[]};       // last Super Dispatch VIN-search payload
@@ -478,13 +541,13 @@ let CMATCHES = [];               // discovered SD orders (annotated w/ board-rou
 let CSTAGED = [];                // queued VIN->existing-order merges (consolidations.json)
 let VIEW = {mode:'list'};        // or {mode:'route', key, label}
 let SEL = new Set();             // selected VINs (route view)
-let SORT = {key:'urgency', dir:1};   // dir 1 = A→Z / soonest-first, -1 = reversed
+let SORT = {key:'origin', dir:1};    // default sort: Origin state (A→Z); -1 = reversed
 
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
   t.classList.add('active'); $('#'+t.dataset.tab).classList.add('active');
-  if(t.dataset.tab==='settings') loadSettings();
+  if(t.dataset.tab==='terminals') loadTerminals();
 });
 
 function money(p){ return p==null?'—':'$'+Number(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
@@ -510,8 +573,8 @@ function addr(v){
   return [v.address, cs].filter(Boolean).join(', ') || '—';
 }
 function contact(v){ return [v.contact_name, v.contact_phone].filter(Boolean).join(' · ') || '—'; }
-function leg(title, v){
-  return `<div class="leg"><h4>${title}</h4>
+function leg(title, v, src){
+  return `<div class="leg"><h4>${title}${srcBadge({source:src})}</h4>
     <div class="name">${v.name||'—'}</div>
     <div class="addr">${addr(v)}</div>
     <div class="contact">${contact(v)}</div></div>`;
@@ -598,17 +661,15 @@ function routeHitStatus(key){
   return '';
 }
 // Tint a route row when the loadboard has a shipment on this route: AMBER if any are
-// posted (amber wins when both are present), else GREEN for accepted-only. Considers BOTH
-// the scan's zip-pair hits and any street-matched consolidation candidates.
+// posted (amber wins when both are present), else GREEN for accepted-only. Uses ONLY the
+// street-matched consolidation candidates — the SAME set the route detail shows on click —
+// so a coloured route always has an actual load behind it. (We deliberately do NOT colour
+// from the coarse zip-pair scan hits: many terminals share a zip, so a zip-pair match
+// without a street match would light up a route that shows nothing when opened.)
 function routeSdClass(o){
-  const key=routeKey(o);
-  const m=matchesForRoute(key);
-  let posted = m.some(x=>x.loadboard_status==='posted' || x.is_posted_to_loadboard);
-  let accepted = m.some(x=>x.loadboard_status==='accepted');
-  const hs=routeHitStatus(key);
-  if(hs==='posted') posted=true; else if(hs==='accepted') accepted=true;
-  if(posted) return 'sd-amber';
-  if(accepted) return 'sd-green';
+  const m=matchesForRoute(routeKey(o));
+  if(m.some(x=>x.loadboard_status==='posted' || x.is_posted_to_loadboard)) return 'sd-amber';
+  if(m.some(x=>x.loadboard_status==='accepted')) return 'sd-green';
   return '';
 }
 // ----- unread state (Gmail-like): a shipment is "unread" until you open it.
@@ -620,6 +681,11 @@ function pruneRead(nums){           // drop read-state for shipments no longer o
   let changed=false;
   for(const n of [...READ]) if(!nums.has(n)){ READ.delete(n); changed=true; }
   if(changed) localStorage.setItem('readShipments', JSON.stringify([...READ]));
+}
+// A shipment with ANY stop whose terminal info came SOLELY from the Excel (no DB match) —
+// pickup OR delivery, even if the other stop is a DB terminal. These go in the Review group.
+function hasExcelStop(o){
+  return ((o.pickup&&o.pickup.source)==='excel') || ((o.delivery&&o.delivery.source)==='excel');
 }
 function listRow(o){
   const p=(o.pickup&&o.pickup.venue)||{}, d=(o.delivery&&o.delivery.venue)||{};
@@ -670,13 +736,14 @@ function routeCard(o){
     const desc=[x.year,x.make,x.model].filter(v=>v&&v!=='Tesla').join(' ');
     const vts=(x.need_by_ts==null)?null:x.need_by_ts;
     const sel=SEL.has(x.vin)?' sel':'';
-    return `<div class="vrow${sel}" data-vin="${x.vin||''}" draggable="true"
+    return `<div class="vrow${sel}${vts==null?' nbbad':''}" data-vin="${x.vin||''}" draggable="true"
+      title="${vts==null?'No valid NeedByDate for this VIN in the Excel':''}"
       onclick="toggleVin('${esc(x.vin)}')"
       ondragstart="onDragStart(event,'${n}','${esc(x.vin)}')" ondragend="onDragEnd(event)">
       <span class="vdesc">${desc||'—'}</span>
       <span class="bvin">${x.vin||''}</span>
       <button class="copyvin" title="Copy VIN" onclick="copyVin(event,'${esc(x.vin)}')">Copy VIN</button>
-      <span class="vneed ${needCls(vts)}">${vts==null?'':needFmt(vts)}</span>
+      <span class="vneed ${vts==null?'nb-missing':needCls(vts)}">${vts==null?'⚠ no need-by':needFmt(vts)}</span>
       <span class="brate">${money(effPerVeh(o, x))}</span></div>`;
   }).join('');
   return `<div class="card" data-num="${num}"
@@ -689,13 +756,67 @@ function routeCard(o){
       <span class="chev" onclick="this.closest('.card').classList.toggle('open')">›</span>
     </div>
     <div class="bubbles">${rows||'<div class="vrow"><span class="muted">no VINs</span></div>'}</div>
-    <div class="body"><div class="legs">${leg('Pickup',p)}${leg('Delivery',d)}</div></div>
+    <div class="body"><div class="legs">${leg('Pickup',p,o.pickup&&o.pickup.source)}${leg('Delivery',d,o.delivery&&o.delivery.source)}</div></div>
   </div>`;
 }
 function render(){ VIEW.mode==='route' ? renderRoute() : renderList(); renderSpares(); renderConsolidation(); }
 
+// ----- Terminals tab: the terminal cache, grouped by canonical terminal -----
+let TERMINALS=null;          // {groups, stats} from /api/terminals
+async function loadTerminals(force){
+  if(TERMINALS && !force){ renderTerminals(); return; }
+  const tlist=$('#tlist'); if(tlist) tlist.innerHTML='<div class="empty">Loading terminals…</div>';
+  try{ TERMINALS=await fetch('/api/terminals').then(r=>r.json()); }
+  catch(e){ if(tlist) tlist.innerHTML='<div class="empty">Could not load terminals.</div>'; return; }
+  renderTerminals();
+}
+function termMatch(g,q){
+  if(!q) return true;
+  return [g.name,g.address,g.city,g.state,g.zip,...(g.aliases||[])].join(' ').toLowerCase().includes(q);
+}
+function termRow(g){
+  const badge = g.kind==='added' ? srcBadge({source:'added'}) : srcBadge({source:'db'});
+  const cz=[g.city,[g.state,g.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+  const addr=[g.address,cz].filter(Boolean).join(', ');
+  const contact=[g.contact_name,g.contact_phone].filter(Boolean).join(' · ');
+  const aliases=(g.aliases&&g.aliases.length)
+    ? `<div class="t-aliases"><span class="t-allabel">Tesla BOL / linked names</span>${
+        g.aliases.map(a=>`<span class="t-alias">${escHtml(a)}${srcBadge({source:'linked'})}</span>`).join('')}</div>` : '';
+  return `<div class="t-row">
+    <div class="t-head"><span class="t-name">${escHtml(g.name||'—')}</span>${badge}</div>
+    <div class="t-meta">${escHtml(addr||'—')}</div>
+    ${contact?`<div class="t-meta t-contact">${escHtml(contact)}</div>`:''}
+    ${g.carrier_notes?`<div class="t-notes">${escHtml(g.carrier_notes)}</div>`:''}
+    ${aliases}
+  </div>`;
+}
+function renderTerminals(){
+  if(!TERMINALS){ return; }
+  const q=(($('#tq')&&$('#tq').value)||'').trim().toLowerCase();
+  const groups=(TERMINALS.groups||[]).filter(g=>termMatch(g,q));
+  const s=TERMINALS.stats||{};
+  const st=$('#tstats'); if(st) st.textContent=
+    `${groups.length} shown · ${s.total||0} terminals (${s.originals||0} original · ${s.linked||0} linked · ${s.added||0} added)`;
+  const tlist=$('#tlist'); if(!tlist) return;
+  tlist.innerHTML = groups.length ? groups.map(termRow).join('') : '<div class="empty">No terminals match your search.</div>';
+}
+
 // ----- consolidation helpers (Super Dispatch existing-order matching) -----
 function venueOf(leg){ return (leg && leg.venue) || leg || {}; }
+// Where a stop's venue data came from. Each stop has EXACTLY ONE source, so a stop only
+// ever shows its own badge. Four labels (db + added both come from our terminal DB):
+//   SD terminal (green) — matched a terminal in our SuperDispatch terminal database
+//   SD link     (green) — name linked (by exact address) to an SD terminal
+//   Tesla BOL   (red)   — pulled straight from this run's Tesla BOL (no DB match)
+//   Excel       (grey)  — no DB match; using this row's own Excel address/contact/phone
+function srcBadge(leg){
+  const s = leg && leg.source;
+  if(s==='db' || s==='added') return '<span class="srcbadge db" title="Matched a terminal in your SuperDispatch terminal database">SD terminal</span>';
+  if(s==='linked') return '<span class="srcbadge linked" title="This name was linked (by exact address) to an SD terminal — pulling its info">SD link</span>';
+  if(s==='bol')    return '<span class="srcbadge bol" title="Pulled from this run\'s Tesla BOL — no matching terminal in the database">Tesla BOL</span>';
+  if(s==='excel')  return '<span class="srcbadge excel" title="No matching terminal in the database — using this row\'s own Excel address/contact/phone">Excel</span>';
+  return '';
+}
 function venueLabel(leg){ const v=venueOf(leg);
   return [v.city, [v.state, v.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ') || '?'; }
 function venueRoute(p, d){ return venueLabel(p) + ' → ' + venueLabel(d); }
@@ -705,7 +826,7 @@ function venueFull(leg){ const v=venueOf(leg);
   return {name:v.name||'', street:street||'(no address)',
           contact:[v.contact_name, v.contact_phone].filter(Boolean).join(' · ')}; }
 function addrBlock(label, leg){ const a=venueFull(leg);
-  return `<div class="caddr"><span class="al">${label}</span>
+  return `<div class="caddr"><span class="al">${label}${srcBadge(leg)}</span>
     <span class="astreet">${a.name?`<b>${a.name}</b> — `:''}${a.street}</span>
     ${a.contact?`<span class="acontact">${a.contact}</span>`:''}</div>`; }
 function matchesForRoute(key){
@@ -771,7 +892,7 @@ function legBlock(label, leg){
   const addr=[v.name, v.address, cityZip].filter(Boolean);
   const contact=[v.contact_name, v.contact_phone].filter(Boolean);
   return `<div class="loc">
-    <div class="loc-h">${label}</div>
+    <div class="loc-h">${label}${srcBadge(leg)}</div>
     <div class="loc-addr">${addr.map(l=>`<div>${l}</div>`).join('') || '<div class="muted">—</div>'}</div>
     ${contact.length?`<div class="loc-contact">${contact.map(l=>`<div>${l}</div>`).join('')}</div>`:''}
   </div>`;
@@ -799,9 +920,13 @@ function addVinLine(a){
 function routeNotes(o){
   const pn=(o&&o.pickup_notes||'').trim(), dn=(o&&o.delivery_notes||'').trim();
   if(!pn && !dn) return '';
-  const block=(label,txt)=> txt
-    ? `<div class="loc"><div class="loc-h">${label} notes</div>
-         <div class="loc-contact">${escHtml(txt)}</div></div>` : '';
+  // ALWAYS render both columns so each note sits under its own terminal: pickup on the
+  // LEFT, delivery on the RIGHT. The empty side stays a blank placeholder rather than
+  // collapsing (which would slide delivery notes over to the left).
+  const block=(label,txt)=>
+    `<div class="loc">${txt
+      ? `<div class="loc-h">${label} notes</div><div class="loc-contact">${escHtml(txt)}</div>`
+      : ''}</div>`;
   return `<details class="rnotes">
     <summary>Shipment comments</summary>
     <div class="routeloc-grid">${block('Pickup',pn)}${block('Delivery',dn)}</div>
@@ -913,7 +1038,7 @@ function renderList(){
   $('#sidebar').style.display=''; $('#listbar').style.display=''; $('#routehdr').style.display='none';
   const q=$('#q').value.trim().toLowerCase();
   const hits=ORDERS.filter(o=>!q||JSON.stringify(o).toLowerCase().includes(q));
-  const sorted=sortOrders(hits);
+  let sorted=sortOrders(hits);
   // routes the board already covers; ghost rows for staged-only routes (no board order left)
   const boardKeys=new Set(ORDERS.map(routeKey)), seen=new Set();
   const ghosts=CSTAGED.filter(s=>{
@@ -922,12 +1047,33 @@ function renderList(){
     if(boardKeys.has(k)||seen.has(k)) return false;
     seen.add(k); return !q||JSON.stringify(s).toLowerCase().includes(q);
   });
+  // Pull shipments with ANY Excel-only stop into a pinned "Review" group at the very top.
+  const review=sorted.filter(hasExcelStop), rest=sorted.filter(o=>!hasExcelStop(o));
   const total=sorted.length+ghosts.length;
   $('#count').textContent=total+' shipment'+(total===1?'':'s');
-  $('#list').innerHTML=total
-    ? sorted.map(listRow).join('')+ghosts.map(consolGhostRow).join('')
-    : '<div class="empty">No staged shipments. Click <b>Excel +</b> (top bar) to choose a sheet and start.</div>';
+  const dc=$('#dupcount'); if(dc) dc.textContent = DUP_REMOVED.length
+    ? `${DUP_REMOVED.length} duplicate VIN${DUP_REMOVED.length===1?'':'s'} removed` : '';
+  const reviewHtml = review.length
+    ? `<div class="reviewsec"><div class="reviewhdr">⚠ Review — ${review.length} shipment${review.length===1?'':'s'} with `
+      +`Excel-only terminal info (no DB match — open to verify)</div>${review.map(listRow).join('')}</div>`
+    : '';
+  $('#list').innerHTML=unpostableSection()+reviewHtml+(rest.length||ghosts.length
+    ? rest.map(listRow).join('')+ghosts.map(consolGhostRow).join('')
+    : (review.length ? '' : '<div class="empty">No staged shipments. Click <b>Excel +</b> (top bar) to choose a sheet and start.</div>'));
   updateSortUI(); updateBar();
+}
+// VINs Tesla had no BOL for — pinned at the very top, grayed and non-interactive (can't be
+// dragged, selected, or posted). Copy VIN is the only affordance, to look them up by hand.
+function unpostableSection(){
+  if(!UNPOSTABLE.length) return '';
+  const rows=UNPOSTABLE.map(v=>`<div class="vrow uprow" title="Tesla had no BOL for this VIN, so it couldn't be built into a shipment">
+      <span class="vdesc">${vehDesc(v)}</span><span class="bvin">${v.vin||''}</span>
+      <button class="copyvin" title="Copy VIN" onclick="copyVin(event,'${esc(v.vin)}')">Copy VIN</button></div>`).join('');
+  const n=UNPOSTABLE.length;
+  return `<div class="upsec">
+    <div class="uphdr">⚠ Couldn't pull from Tesla — ${n} VIN${n===1?'':'s'} skipped (no BOL, not postable)</div>
+    <div>${rows}</div>
+  </div>`;
 }
 function renderRoute(){
   $('#sidebar').style.display='none';
@@ -983,7 +1129,8 @@ async function load(){
       fetch('/api/spares').then(r=>r.json()),
       fetch('/api/consolidation/matches').then(r=>r.json()).catch(()=>({})),
     ]);
-    ORDERS=od.orders||[]; SPARES=(sp&&sp.spares)||[];
+    ORDERS=od.orders||[]; UNPOSTABLE=od.unpostable||[]; SPARES=(sp&&sp.spares)||[];
+    DUP_REMOVED=od.duplicates_removed||[];          // VINs dropped for already being live on SD
     CSEARCH=(cm&&cm.search)||{orders:[]}; CMATCHES=CSEARCH.orders||[]; CSTAGED=(cm&&cm.staged)||[];
     pruneRead(new Set(ORDERS.map(o=>o.number)));   // forget read-state for posted/removed shipments
     render(); syncTally();
@@ -1138,7 +1285,7 @@ async function saveSettings(){
   try{
     const r=await api('/api/settings', body);
     $('#setMsg').textContent='Saved.'; $('#set_secret').value='';
-    $('#env').textContent='SD_ENV: '+(r.sd_env||'');
+    $('#env').textContent='SD_ENV: prod v1.3';
     await loadSettings();
     toast('Settings saved');
   }catch(e){ $('#setMsg').textContent='Save failed.'; }
@@ -1238,6 +1385,7 @@ async function clearBoard(){
 // LIVE post of a single shipment (prod test). Lives in the Settings tab now; posts
 // the topmost shipment on the board.
 async function postLive(number){
+  if(ACTIVE_PROFILE==='all'){ toast('Posting is disabled for the ALL profile (terminal-feeding only).'); return; }
   if(!confirm('LIVE post shipment '+number+' to SuperDispatch (PRODUCTION)?\nThis creates one real order.')) return;
   try{ const r=await api('/api/post-live',{number});
     toast((r.vins||0)+' VIN(s) successfully posted to SuperDispatch');
@@ -1279,6 +1427,7 @@ const STALL_MS = 60000;          // no new VINs for this long while "running" =>
                                  // for a stuck run while the pipeline is still working.
 const RUN_DEFAULTS = {create:true, download_bols:false, live:false, workers:4, limit:0, sheet:''};
 let _runPoll=null, _runStarted=0, _lastProcessed=-1, _lastChange=0;
+let _wasRunning=false;    // tracks run finishing so we reload matches once the scan completes
 
 async function syncRunBar(){
   let s; try{ s=await fetch('/api/run/status').then(r=>r.json()); }catch(e){ syncTally(); return; }
@@ -1291,35 +1440,54 @@ async function syncRunBar(){
 }
 
 async function syncTally(){
-  const el=$('#tally'); if(!el) return;
+  const el=$('#tally'), np=$('#navpost'); if(!el) return;
   let t,s;
   try{ t=await fetch('/api/tally').then(r=>r.json()); }catch(e){ return; }
   try{ s=await fetch('/api/run/status').then(r=>r.json()); }catch(e){ s={running:false}; }
-
-  if(!t || !t.total){                                    // nothing built yet -> pick a file
-    el.innerHTML=`<button class="btn" onclick="pickAndRun()">Excel +</button>`;
-    _lastProcessed=-1; return;
-  }
-  // small "load a different Excel" affordance, present in every non-empty state
-  const newBtn = `<button class="tinyadd" title="Load a different Excel (clears the current board)" onclick="pickAndRun()">+</button>`;
-  if(t.done){                                            // all VINs in -> ready to post
-    el.innerHTML=`<button class="btn green" onclick="doPost()">Post to SuperDispatch</button>`+newBtn;
-    return;
-  }
-  const now=Date.now();
-  if(t.processed!==_lastProcessed){ _lastProcessed=t.processed; _lastChange=now; }  // progress!
-  const inGrace = _runStarted && (now-_runStarted < 10000);   // just kicked off; give it a sec
+  const hasBoard = !!(t && t.total);
   const running = !!(s && s.running);
-  const stalled = inGrace ? false : (running ? (now-_lastChange > STALL_MS) : true);
-  const spinning = !stalled && (running || inGrace);
-  const pct=Math.max(0,Math.min(100,(t.processed/t.total)*100));
-  const dots = spinning ? `<span class="dots"><span>.</span><span>.</span><span>.</span></span>` : '…';
-  const cls = stalled ? 'amber' : 'green';
-  const onclick = stalled ? ' onclick="resumeRun()" role="button"'
-    + ` title="Reading stalled — click to resume from ${t.active_excel_name||'the Excel'}"` : '';
-  el.innerHTML = `<span class="counter ${cls}"${onclick}>`
-    + `<span class="fill" style="width:${pct}%"></span>`
-    + `<span class="lbl">${t.processed} / ${t.total} VINs processed${dots}</span></span>`+newBtn;
+
+  // Excel+ is ALWAYS shown. Once a board is loaded it grays out (but stays clickable) —
+  // loading a different Excel clears the current board.
+  const excelBtn = `<button class="btn excelbtn${hasBoard?' loaded':''}" onclick="pickAndRun()"`
+    + ` title="${hasBoard?'Load a different Excel — clears the current board':'Choose an Excel to start'}">Excel +</button>`
+    + `<button class="btn pastebtn" onclick="openPaste()"`
+    + ` title="Paste rows copied from Excel/Sheets — headers remembered from your last sheet">Paste</button>`;
+
+  if(!hasBoard){ el.innerHTML=excelBtn; if(np) np.innerHTML=''; _lastProcessed=-1; return; }
+
+  // While VINs are still landing, show the progress counter next to Excel+.
+  let extra='';
+  if(!t.done){
+    const now=Date.now();
+    if(t.processed!==_lastProcessed){ _lastProcessed=t.processed; _lastChange=now; }
+    const inGrace = _runStarted && (now-_runStarted < 10000);
+    const stalled = inGrace ? false : (running ? (now-_lastChange > STALL_MS) : true);
+    const spinning = !stalled && (running || inGrace);
+    const pct=Math.max(0,Math.min(100,(t.processed/t.total)*100));
+    const dots = spinning ? `<span class="dots"><span>.</span><span>.</span><span>.</span></span>` : '…';
+    const onclick = stalled ? ' onclick="resumeRun()" role="button"'
+      + ` title="Reading stalled — click to resume from ${t.active_excel_name||'the Excel'}"` : '';
+    extra = `<span class="counter ${stalled?'amber':'green'}"${onclick}>`
+      + `<span class="fill" style="width:${pct}%"></span>`
+      + `<span class="lbl">${t.processed} / ${t.total} VINs processed${dots}</span></span>`;
+  }
+  el.innerHTML = excelBtn + extra;
+
+  // Post button lives in the nav slot (where Settings used to be).
+  if(np){
+    if(ACTIVE_PROFILE==='all'){
+      np.innerHTML=`<span class="navpostlbl" title="ALL is a developer profile for feeding the terminal cache — posting is disabled">Posting disabled (ALL)</span>`;
+    } else if(!t.done){
+      np.innerHTML='';                                   // not ready to post yet
+    } else if(running){
+      if(!_wasRunning) _wasRunning=true;
+      np.innerHTML=`<button class="btn amber" disabled title="Finishing the SuperDispatch loadboard scan — posting unlocks when posted/accepted matches are in">Scanning loadboard…<span class="dots"><span>.</span><span>.</span><span>.</span></span></button>`;
+    } else {
+      if(_wasRunning){ _wasRunning=false; load(); }      // scan just finished -> pull in matches
+      np.innerHTML=`<button class="btn green" onclick="doPost()">Post to SuperDispatch</button>`;
+    }
+  }
 }
 
 // start a run on the given excel with the standard settings (no console, the tally IS
@@ -1383,6 +1551,41 @@ async function onExcelChosen(ev){
     ev.target.value = '';                               // reset so the same file re-fires change
   }
 }
+// "Paste" : drop rows copied from Excel/Sheets (TSV) into a box and run them like an
+// upload. Headers are remembered from your last sheet, so you paste DATA only — but a
+// pasted header row is detected and used too. Same reset+run pipeline as Excel +.
+function openPaste(){
+  if(!ACTIVE_PROFILE){
+    toast('Select a dispatcher profile first (top-left).');
+    const sel=$('#profileSel'); if(sel){ sel.classList.add('unset'); sel.focus(); }
+    return;
+  }
+  const m=$('#pasteModal'); if(!m) return;
+  m.hidden=false;
+  const ta=$('#pasteArea'); if(ta){ ta.value=''; ta.focus(); }
+  const msg=$('#pasteMsg'); if(msg) msg.textContent='';
+}
+function closePaste(){ const m=$('#pasteModal'); if(m) m.hidden=true; }
+async function submitPaste(){
+  const ta=$('#pasteArea'), msg=$('#pasteMsg');
+  const text=(ta&&ta.value||'').trim();
+  if(!text){ if(msg) msg.textContent='Paste some rows first.'; return; }
+  let t; try{ t=await fetch('/api/tally').then(r=>r.json()); }catch(e){ t={}; }
+  if(t && t.total && !confirm('Load these rows? This clears the current board.')) return;
+  if(msg) msg.textContent='Loading…';
+  let saved;
+  try{
+    const r=await fetch('/api/upload-paste',{method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({text})});
+    if(!r.ok){ if(msg) msg.textContent=(await r.json().catch(()=>({}))).detail || 'Could not load those rows'; return; }
+    saved=await r.json();
+  }catch(e){ if(msg) msg.textContent='Could not load those rows'; return; }
+  closePaste();
+  try{ await fetch('/api/reset',{method:'POST'}); }catch(e){}
+  _runStarted=0; _lastProcessed=-1;
+  toast('Running '+(saved.rows||'')+' pasted row(s)…');
+  await startRun(saved.path);
+}
 // amber state click : stop any stuck run, then re-read the active Excel from the start
 async function resumeRun(){
   let t; try{ t=await fetch('/api/tally').then(r=>r.json()); }catch(e){ return; }
@@ -1391,8 +1594,11 @@ async function resumeRun(){
   toast('Resuming '+(t.active_excel_name||'Excel')+'…');
   await startRun(t.active_excel);
 }
-// Post EVERYTHING live to SuperDispatch, then clear the board (spares are kept).
+// Post EVERYTHING live to SuperDispatch, then clear the board (spares are kept). The
+// Post button is only enabled once the run (incl. the loadboard scan) has fully finished
+// — see syncTally — so by here all posted/accepted matches are already in.
 async function doPost(){
+  if(ACTIVE_PROFILE==='all'){ toast('Posting is disabled for the ALL profile (terminal-feeding only).'); return; }
   if(!confirm('Post ALL staged shipments LIVE to SuperDispatch (production)?\nThis creates real orders, then clears the board. Spares are kept; anything that fails stays on the board.')) return;
   const el=$('#tally'); if(el) el.innerHTML='<span class="counter green"><span class="lbl">Posting…</span></span>';
   try{
@@ -1456,7 +1662,7 @@ function startLive(){
 }
 
 fetch('/api/env').then(r=>r.json()).then(d=>{
-  $('#env').textContent='SD_ENV: '+d.sd_env;
+  $('#env').textContent='SD_ENV: prod v1.3';
 }).catch(()=>{});
 // restore the active dispatcher FIRST, then open the live stream for its board (so the
 // SSE carries ?profile= from the start), load that board, and pick up any run already

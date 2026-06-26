@@ -53,3 +53,26 @@ cp .env.example .env                 # fill in tokens when needed
 python main.py --excel /path/to/sheet.xlsx           # parse + preview (writes nothing)
 python main.py --excel sheet.xlsx --sheet "Loads"    # pick a worksheet by name
 ```
+
+## Run as a service (persistent, like direct-pickup-checks)
+
+`web.sh` is fine for a desktop session, but it dies when that session ends. To keep the
+site (`https://shipments.wastake.com`) up across crashes and reboots, install two system
+services — the app and its Cloudflare tunnel — mirroring direct-pickup-checks:
+
+```bash
+sudo cp systemd/shipment-creator-web.service        /etc/systemd/system/
+sudo cp systemd/cloudflared-shipment-creator.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now shipment-creator-web cloudflared-shipment-creator
+```
+
+- `shipment-creator-web` runs `run_web.sh` → `app.py` on `127.0.0.1:8000`. `run_web.sh`
+  imports the graphical-session env (DISPLAY/Wayland/XAUTHORITY) so the pipeline can drive
+  the shared CDP Chrome under systemd — same approach as `run_worker.sh`.
+- `cloudflared-shipment-creator` runs the tunnel (`~/.cloudflared/config.yml`,
+  `shipments.wastake.com` → `:8000`), replacing the one `web.sh` used to start.
+
+Logs: `journalctl -u shipment-creator-web -f` (and `-u cloudflared-shipment-creator`).
+Don't run `web.sh` at the same time — both would bind `:8000` and the app would fall back
+to a random port, breaking the tunnel.

@@ -115,6 +115,8 @@ def main():
         import pdf_read
         import sd_api
         import tesla_bol
+        import terminals_lookup
+        import terminals_db
         dry = not args.live
 
         import os
@@ -164,14 +166,25 @@ def main():
         ordered.sort(key=lambda t: _pk.get(t[0], ("zzzz", "zzzz")))
         if args.limit:
             ordered = ordered[:args.limit]               # limit the NEW VINs
-        vins = [v for v, _, _ in ordered]
+
+        # Terminal names from the Excel (OriginLocation/DestinationLocation) — the ONLY
+        # key we match against the local terminal cache. When BOTH a shipment's terminals
+        # are already cached we skip the Tesla portal for it; otherwise we fetch the BOL
+        # and LEARN the new terminal(s) so next time it's skippable.
+        names_by_vin = {r.vin: ((r.get("pickup_name") or "").strip(),
+                                (r.get("delivery_name") or "").strip())
+                        for r in rows if r.ok}
 
         stage = os.path.join(orders_dir,
                               f"orders_{datetime.datetime.now():%Y%m%d-%H%M%S}.json")
 
         rec_by_vin = {}
         bols = set()
-        need_by = {}                                   # vin -> 'Need By' date (from dashboard)
+        # vin -> 'Need By' date. Seeded from the Excel NeedByDate column so cache-resolved
+        # shipments (which skip the dashboard) still get a need-by; the dashboard value
+        # overrides it for VINs we actually download (see tesla_bol.download_for).
+        need_by = {r.vin: r.get("need_by") for r in rows
+                   if r.ok and (r.get("need_by") or "").strip()}
 
         def _restage():
             """(Re)group the NEW VINs parsed so far and write base + new to the staged
@@ -194,6 +207,10 @@ def main():
             routes_here = set()                         # (pickup_zip, delivery_zip) this BOL adds
             for rec in pdf_read.extract_records(path):
                 rec_by_vin[rec["vin"]] = rec
+                # LEARN any not-yet-cached terminal from this BOL (keyed on the Excel name)
+                # so the next run can skip the portal for it.
+                pn, dn = names_by_vin.get(rec["vin"], ("", ""))
+                terminals_lookup.learn_from_bol_record(rec, pn, dn)
                 pz = (rec.get("pickup") or {}).get("zip")
                 dz = (rec.get("delivery") or {}).get("zip")
                 if pz and dz:
@@ -310,17 +327,71 @@ def main():
 
         if skipped:
             print(f"\nSkipping {skipped} VIN(s) already on the board.")
-        print(f"Fetching BOLs for {len(vins)} new VIN(s) (source of shipment info)...")
-        _restage()                                     # preserve base up front
-        if vins:
-            tesla_bol.download_for(vins, workers=args.workers, on_bol=_on_bol,
-                                   need_by=need_by, sd_scan_pairs=sd_scan_pairs,
-                                   sd_hits=sd_hits)
-        elif config.SD_SCAN:
-            # No new VINs to download -> no concurrent BOL run; scan standalone.
-            import sd_scrape
-            sd_hits = sd_scrape.scan_loadboard(sd_scan_pairs)
-        payloads = _restage()                          # final
+
+        import profiles
+        is_all = (_pid == profiles.ALL_PROFILE_ID)
+        row_by_vin = {r.vin: r for r in rows if r.ok}
+
+        if not is_all:
+            # NON-ALL dispatchers NEVER touch Tesla (auth problems). Build every shipment
+            # from the Excel row; the posting overlay upgrades any stop whose terminal name
+            # matches the DB, and leaves the rest as the Excel's own data (badged 'Excel').
+            for vin, cost, shp in ordered:
+                r = row_by_vin.get(vin)
+                if r:
+                    rec_by_vin[vin] = terminals_lookup.build_record_from_excel(vin, r.fields)
+            print(f"Built {len(rec_by_vin)} shipment(s) from the terminal DB + Excel — "
+                  f"no Tesla portal.")
+            _restage()
+            if config.SD_SCAN:
+                import sd_scrape
+                sd_hits = sd_scrape.scan_loadboard(sd_scan_pairs)
+            payloads = _restage()                      # final
+        else:
+            # ALL: the terminal-feeding profile. GATE: skip the Tesla portal for any shipment
+            # whose BOTH terminals are already cached (synthesize from cache); the rest hit
+            # the portal and seed the cache via learn_from_bol_record.
+            portal_vins, from_cache = [], 0
+            for vin, cost, shp in ordered:
+                pn, dn = names_by_vin.get(vin, ("", ""))
+                rec = terminals_lookup.build_synthetic_record(vin, pn, dn)
+                if rec:
+                    rec_by_vin[vin] = rec
+                    from_cache += 1
+                else:
+                    portal_vins.append(vin)
+            if from_cache:
+                print(f"Resolved {from_cache} VIN(s) from the terminal cache — no Tesla portal "
+                      f"for those.")
+            print(f"Fetching BOLs for {len(portal_vins)} new VIN(s) (source of shipment info)...")
+            _restage()                                 # preserve base + cache-resolved up front
+            if portal_vins:
+                # download_for runs the SD loadboard scan CONCURRENTLY (async). The async
+                # path can't drive the sync Vaultwarden login, so restore the shared session
+                # here (sync) first — the async tabs then inherit it.
+                if config.SD_SCAN:
+                    import sd_login
+                    st = sd_login.ensure_session()
+                    if st != sd_login.LOGIN_OK:
+                        print(f"⚠ SuperDispatch auto-login could not complete ({st}); the "
+                              f"loadboard scan may return no matches this run.")
+                tesla_bol.download_for(portal_vins, workers=args.workers, on_bol=_on_bol,
+                                       need_by=need_by, sd_scan_pairs=sd_scan_pairs,
+                                       sd_hits=sd_hits)
+            elif config.SD_SCAN:
+                import sd_scrape
+                sd_hits = sd_scrape.scan_loadboard(sd_scan_pairs)
+            # Link terminals learned THIS run to their original (strict + reasoned).
+            if portal_vins:
+                try:
+                    terminals_db.link_learned_by_address()
+                    sm = terminals_db.link_learned_smart()
+                    if sm.get("total"):
+                        print(f"  linked {sm['total']} newly-learned terminal(s) to originals "
+                              f"({sm['linked_addr_multi']} same-addr/name, {sm['linked_zip_fuzzy']} fuzzy)")
+                except Exception as exc:               # never fail a run on bookkeeping
+                    print(f"  terminal linking skipped: {exc}")
+            payloads = _restage()                      # final
         print(f"\n=== {len(payloads)} new order(s) from {len(bols)} BOL(s); "
               f"{skipped} VIN(s) skipped; {len(base) + len(payloads)} order(s) total "
               f"on the board (SD_ENV={config.SD_ENV}) -> {stage} ===")

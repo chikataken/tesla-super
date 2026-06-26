@@ -49,10 +49,14 @@ def _map_columns(headers: list) -> tuple[dict, list]:
     """Return (col_index_by_canonical, unmapped_headers)."""
     lut = _build_lookup()
     variants = list(lut.keys())
+    ignore = {_norm_header(h) for h in getattr(config, "IGNORE_HEADERS", [])}
     mapping, unmapped = {}, []
     for idx, raw in enumerate(headers):
         norm = _norm_header(raw)
         if not norm:
+            continue
+        if norm in ignore:                 # blocked header (e.g. DriverContact) -> never map
+            unmapped.append(str(raw))
             continue
         canonical = lut.get(norm)
         if canonical is None and _FUZZY:
@@ -90,7 +94,12 @@ def _clean_str(v) -> str:
 def _clean_zip(v) -> str:
     s = _clean_str(v)
     m = re.search(r"\d{5}", s)
-    return m.group(0) if m else s        # preserve leading zeros, drop +4 noise
+    if m:
+        return m.group(0)                # full 5-digit zip present -> use it (drop +4 noise)
+    # A NE-US zip that starts with 0 (NH/MA/CT/NJ/…) is read as a NUMBER by Excel, which
+    # drops the leading zero (03449 -> 3449). Re-pad a 1-4 digit run back to 5 digits.
+    d = re.sub(r"\D", "", s)
+    return d.zfill(5) if 1 <= len(d) <= 4 else s
 
 
 def read_rows(path: str, sheet: str | None = None) -> tuple[list[RawRow], ParseReport]:
@@ -164,3 +173,22 @@ def read_rows(path: str, sheet: str | None = None) -> tuple[list[RawRow], ParseR
     report.good_rows = sum(1 for r in rows if r.ok)
     report.bad_rows = [r for r in rows if not r.ok]
     return rows, report
+
+
+def read_headers(path: str, sheet: str | None = None) -> list:
+    """The sheet's header row (same detection as read_rows). Used to 'remember' a sheet's
+    columns so DATA-only pasted rows can be matched without re-typing headers."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    if sheet and sheet in wb.sheetnames:
+        ws = wb[sheet]
+    elif sheet:
+        want = sheet.strip().lower()
+        ws = wb[next((n for n in wb.sheetnames if n.strip().lower() == want), wb.sheetnames[0])]
+    else:
+        ws = wb.active
+    grid = [list(r) for r in ws.iter_rows(values_only=True)]
+    if not grid:
+        return []
+    i = next((j for j, r in enumerate(grid)
+              if sum(1 for c in r if str(c or "").strip()) >= 2), 0)
+    return [str(c) if c is not None else "" for c in grid[i]]

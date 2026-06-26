@@ -14,11 +14,43 @@ close_chrome() detaches — and shuts Chrome down only if we started it.
 """
 import asyncio
 import os
+import re
 import subprocess
 import time
 import urllib.request
 
 import config
+
+
+def _profile_on_cdp_port(port: str):
+    """The --user-data-dir of the Chrome currently serving CDP on `port`, from the OS
+    process table. Catches the ATTACH TRAP: attaching to an already-running Chrome uses
+    ITS profile and ignores our CDP_PROFILE_DIR, so a Chrome on the port with a different
+    profile would silently give us a logged-out session. None if undeterminable."""
+    try:
+        out = subprocess.run(["pgrep", "-af", f"remote-debugging-port={port}"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:                                    # noqa: BLE001 - pgrep missing/non-Linux
+        return None
+    for line in out.splitlines():
+        m = re.search(r"--user-data-dir=(\S+)", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _assert_attached_profile_matches() -> None:
+    """Before attaching to a live Chrome, ensure it runs OUR configured profile; on a
+    mismatch fail loudly with the fix rather than silently driving a foreign session."""
+    port = config.CDP_URL.rsplit(":", 1)[-1].strip("/")
+    running = _profile_on_cdp_port(port)
+    if running and os.path.abspath(running) != os.path.abspath(config.CDP_PROFILE_DIR):
+        raise RuntimeError(
+            f"A Chrome is already serving CDP on port {port} using profile {running!r}, "
+            f"NOT the configured {config.CDP_PROFILE_DIR!r}. Attaching would drive that "
+            f"other (likely not-logged-in) session. Stop it first — "
+            f"`pkill -f 'remote-debugging-port={port}'` — so the correct profile "
+            f"launches, or point CDP_PROFILE_DIR at the running profile.")
 
 
 def _cdp_alive(endpoint: str) -> bool:
@@ -75,6 +107,7 @@ def ensure_chrome():
     Returns the Popen handle if WE launched it (caller closes it when done),
     or None if one was already running (leave that one alone)."""
     if _cdp_alive(config.CDP_URL):
+        _assert_attached_profile_matches()           # never silently drive a foreign profile
         return None
     port = config.CDP_URL.rsplit(":", 1)[-1].strip("/")
     args = [

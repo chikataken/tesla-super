@@ -4,6 +4,14 @@ uvicorn[standard]>=0.27  # ASGI server the listener runs under (systemd)
 requests>=2.31           # SuperDispatch API calls (worker + subscribe.py)
 python-dotenv>=1.0       # load secrets/.env + app-local .env
 
+# --- Vaultwarden auto re-login (sd_login.py / vault_totp.py) ---
+# When the worker finds the SD web session logged out, it pulls the SD
+# username/password from Vaultwarden and re-logs in (captcha-aware). These decrypt
+# the vault's protected keys; argon2-cffi is needed when the account KDF is Argon2id.
+cryptography>=42         # decrypt Bitwarden/Vaultwarden EncStrings
+argon2-cffi>=23.0        # Argon2id master-key derivation (this account's KDF)
+pyotp>=2.9               # TOTP (unused for SD email/SMS 2FA, kept for parity)
+
 # --- Playwright web automation (open order, download pickup photos, edit tags) ---
 playwright>=1.44         # drives the SD web app; run `playwright install chromium`
 

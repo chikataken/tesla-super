@@ -31,7 +31,12 @@ _BUNDLED_DIR = paths.resource_path("profiles")
 # Seeded on first run if profiles.json doesn't exist yet. Fill in `phone` (the number
 # the <dispatcher> token becomes) and `states` (2-letter codes this dispatcher pulls
 # from the Excel; an empty list means "no state filter yet" → all VINs pass).
+# The "all" profile is special: it NEVER filters by state (see allowed_states), so it
+# pulls every VIN in the Excel — handy for feeding the terminal cache without a region cap.
+ALL_PROFILE_ID = "all"
+
 DEFAULT_PROFILES = [
+    {"id": "all",   "name": "ALL",   "phone": "", "states": []},
     {"id": "soyo",  "name": "Soyo",  "phone": "", "states": []},
     {"id": "kelly", "name": "Kelly", "phone": "", "states": []},
     {"id": "duka",  "name": "Duka",  "phone": "", "states": []},
@@ -161,6 +166,10 @@ def row_pickup_state(row) -> str:
 
 
 def allowed_states(profile: dict | None) -> set:
+    # The ALL profile is unfiltered by design — never apply a state cap to it, even if a
+    # `states` list somehow got saved on it. An empty set means filter_rows keeps every row.
+    if (profile or {}).get("id") == ALL_PROFILE_ID:
+        return set()
     return {_norm_state(s) for s in (profile or {}).get("states", []) if str(s).strip()}
 
 

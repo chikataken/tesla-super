@@ -31,9 +31,10 @@ _STATES = {
 # Catches "6026205933", "(602)620-5933", "602-620-5933", "602.620.5933", "602 620 5933".
 _PHONE = re.compile(r"(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}")
 _ZIP = re.compile(r"\b\d{5}\b")
-# Tesla VIN -> model (WMI + line) and model-year (10th char).
-_TESLA_MODEL = {"5YJ3": "Model 3", "7SA3": "Model 3", "5YJY": "Model Y", "7SAY": "Model Y",
-                "5YJS": "Model S", "7SAS": "Model S", "5YJX": "Model X", "7SAX": "Model X"}
+# Tesla VIN -> model and model-year. The 4th character is the model line (the same
+# across WMIs — Fremont 5YJ, Austin 7SA/7G2), so decode on it once we know it's a Tesla.
+_TESLA_LINE = {"3": "Model 3", "Y": "Model Y", "S": "Model S", "X": "Model X",
+               "A": "Cybercab", "C": "Cybertruck"}
 _VIN_YEAR = {"L": 2020, "M": 2021, "N": 2022, "P": 2023, "R": 2024, "S": 2025,
              "T": 2026, "V": 2027, "W": 2028}
 
@@ -153,8 +154,12 @@ def split_comments(text: str, origin_name: str, dest_name: str) -> dict:
 
 def _vehicle(vin: str) -> dict:
     vin = (vin or "").upper()
-    return {"make": "Tesla" if vin[:2] in ("5Y", "7S") else "",
-            "model": _TESLA_MODEL.get(vin[:4], ""),
+    make = "Tesla" if (vin[:2] in ("5Y", "7S") or vin[:3] == "7G2") else ""
+    # Model line is the 4th char (3/Y/S/X/A=Cybercab/C=Cybertruck), decoded only once
+    # we've confirmed a Tesla WMI so non-Tesla VINs never get a bogus model.
+    model = _TESLA_LINE.get(vin[3], "") if (make and len(vin) >= 4) else ""
+    return {"make": make,
+            "model": model,
             "year": _VIN_YEAR.get(vin[9]) if len(vin) >= 10 else None}
 
 
