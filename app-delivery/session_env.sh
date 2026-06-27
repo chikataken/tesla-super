@@ -10,7 +10,7 @@
 #
 # Source this (don't exec) early in a wrapper:  . "$(dirname "$0")/session_env.sh"
 # Guarded: if a usable display is already in the environment, it leaves it alone.
-if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
   if command -v systemctl >/dev/null 2>&1; then
     while IFS= read -r _line; do
       case "$_line" in
@@ -25,7 +25,7 @@ if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
   : "${DISPLAY:=:0}"
   : "${DBUS_SESSION_BUS_ADDRESS:=unix:path=${XDG_RUNTIME_DIR}/bus}"
   : "${XDG_SESSION_TYPE:=wayland}"
-  if [ -z "$XAUTHORITY" ]; then
+  if [ -z "${XAUTHORITY:-}" ]; then
     XAUTHORITY=$(ls -1 "$XDG_RUNTIME_DIR"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
   fi
   export XDG_RUNTIME_DIR WAYLAND_DISPLAY DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE XAUTHORITY

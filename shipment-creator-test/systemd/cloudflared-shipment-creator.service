@@ -1,0 +1,21 @@
+[Unit]
+# Cloudflare Tunnel for the Shipment Creator app. Routes shipments.wastake.com to the
+# local app on 127.0.0.1:8000 (ingress in ~/.cloudflared/config.yml). Replaces the
+# tunnel that web.sh used to start, so it survives reboots and crashes on its own.
+Description=cloudflared tunnel (shipments.wastake.com) for shipment-creator
+After=network-online.target shipment-creator-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mbdtf
+Group=mbdtf
+ExecStart=/home/mbdtf/.local/bin/cloudflared --no-autoupdate tunnel \
+    --config /home/mbdtf/.cloudflared/config.yml run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

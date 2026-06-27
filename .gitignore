@@ -43,3 +43,17 @@ build/
 # Linux). The dir name has a real backslash, which gitignore treats as an escape —
 # so it must be doubled (\\) to match literally.
 **/C:\\tesla-profile/
+
+# ───── more local / generated artifacts ─────
+# .venv as a symlink (e.g. the test site links to the prod venv) — the trailing-slash
+# rules above only match real directories, so catch the bare name too.
+.venv
+**/.venv
+# SuperDispatch vehicle photos scraped by sd_photos.py — customer data, like output/.
+sd_photos/
+**/sd_photos/
+# local DB backups + the promote-to-prod safety snapshot (old code already in git history)
+*.db.bak.*
+**/*.db.bak.*
+.promote-backup-*/
+**/.promote-backup-*/

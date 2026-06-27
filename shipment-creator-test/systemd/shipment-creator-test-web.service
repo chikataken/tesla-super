@@ -1,0 +1,31 @@
+[Unit]
+# The TEST build of the Shipment Creator web app (test.wastake.com), served on
+# 127.0.0.1:8001. Same code as prod but run with SC_TEST_MODE=1 (set in run_web.sh), so
+# every SuperDispatch WRITE is blocked — posting and terminal-push refuse; reads still work.
+# The shared cloudflared tunnel routes test.wastake.com here (ingress in ~/.cloudflared/config.yml).
+Description=shipment-creator TEST web app (test.wastake.com, read-only / no SD writes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/shipment-creator-test
+ExecStart=/home/mbdtf/projects/tesla-super/shipment-creator-test/run_web.sh
+
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Logs: journalctl -u shipment-creator-test-web -f
+StandardOutput=journal
+StandardError=journal
+
+# NOTE: deliberately NOT PrivateTmp — launching Chrome can need the shared /tmp
+# (X11 socket at /tmp/.X11-unix) when the CDP browser isn't already running.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

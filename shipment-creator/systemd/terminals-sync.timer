@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the SuperDispatch terminal sync daily at 13:30 (1:30 PM local)
+
+[Timer]
+# 1:30 PM every day, local time (the box runs America/Los_Angeles).
+OnCalendar=*-*-* 13:30:00
+# If the machine was off/asleep at 13:30, run as soon as it's back up (don't skip the day).
+Persistent=true
+# Small jitter so it doesn't fire at the exact same instant as other jobs.
+RandomizedDelaySec=60
+Unit=terminals-sync.service
+
+[Install]
+WantedBy=timers.target

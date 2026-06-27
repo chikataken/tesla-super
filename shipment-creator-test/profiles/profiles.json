@@ -1,0 +1,91 @@
+[
+  {
+    "id": "all",
+    "name": "ALL",
+    "phone": "",
+    "states": []
+  },
+  {
+    "id": "soyo",
+    "name": "Soyo",
+    "phone": "213-371-7347",
+    "states": [
+      "CT",
+      "WI",
+      "UT",
+      "IL",
+      "IN",
+      "OH",
+      "MI",
+      "KY",
+      "TN",
+      "MS",
+      "AL",
+      "SC",
+      "NC",
+      "NJ",
+      "RI",
+      "MA",
+      "NH",
+      "VT",
+      "ME",
+      "NY",
+      "PA"
+    ]
+  },
+  {
+    "id": "kelly",
+    "name": "Kelly",
+    "phone": "310-387-3241",
+    "states": [
+      "VA",
+      "MD",
+      "GA",
+      "FL",
+      "DE",
+      "WV",
+      "DC"
+    ]
+  },
+  {
+    "id": "duka",
+    "name": "Duka",
+    "phone": "562-777-5654",
+    "states": [
+      "CA"
+    ]
+  },
+  {
+    "id": "burte",
+    "name": "Burte",
+    "phone": "562-670-7646",
+    "states": [
+      "NV",
+      "AZ",
+      "NM",
+      "CO",
+      "ID",
+      "WY",
+      "MT",
+      "ND",
+      "SD",
+      "NE",
+      "KS",
+      "OK",
+      "MO",
+      "IA",
+      "MN",
+      "AR",
+      "LA",
+      "TX",
+      "OR",
+      "WA"
+    ]
+  },
+  {
+    "id": "test-user",
+    "name": "test user",
+    "phone": "3106925984",
+    "states": []
+  }
+]

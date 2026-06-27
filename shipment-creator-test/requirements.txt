@@ -1,0 +1,14 @@
+openpyxl>=3.1          # read .xlsx sheets
+python-dotenv>=1.0     # .env config
+rapidfuzz>=3.0         # fuzzy header matching fallback
+playwright>=1.44       # Tesla BOL download (wired later)
+requests>=2.31         # SuperDispatch API calls (deferred)
+pdfplumber>=0.11       # read text out of the downloaded BOL PDFs
+
+fastapi>=0.110
+uvicorn[standard]>=0.27
+keyring>=24.0          # store the SuperDispatch secret in Windows Credential Manager
+pystray>=0.19          # system-tray icon (Quit) for the windowed packaged app
+pillow>=10.0           # icon image for the tray (pystray dependency)
+
+pytest>=8.0            # unit tests (matcher + SD client, HTTP mocked)

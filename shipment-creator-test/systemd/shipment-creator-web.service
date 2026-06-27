@@ -1,0 +1,31 @@
+[Unit]
+# The Shipment Creator web app (FastAPI/uvicorn on 127.0.0.1:8000). The Cloudflare
+# Tunnel (cloudflared-shipment-creator) forwards shipments.wastake.com to it. The app
+# spawns the pipeline (main.py --create), which drives the shared real Chrome over CDP
+# — run_web.sh imports the graphical session env so that works under systemd.
+Description=shipment-creator web app (shipments.wastake.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/shipment-creator
+ExecStart=/home/mbdtf/projects/tesla-super/shipment-creator/run_web.sh
+
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Structured logs go to stdout -> journald: journalctl -u shipment-creator-web -f
+StandardOutput=journal
+StandardError=journal
+
+# NOTE: deliberately NOT PrivateTmp — launching Chrome can need the shared /tmp
+# (X11 socket at /tmp/.X11-unix) when the CDP browser isn't already running.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

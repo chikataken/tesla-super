@@ -1,0 +1,28 @@
+[Unit]
+# Daily SuperDispatch terminal sync: push local edits back to SD, then pull the catalog
+# into the local cache (terminals.db). Driven by terminals-sync.timer at 13:30 local.
+# run_sync.sh imports the graphical session env so the CDP Chrome can launch under systemd.
+Description=SuperDispatch terminal sync (push local edits, then pull catalog)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/shipment-creator
+ExecStart=/home/mbdtf/projects/tesla-super/shipment-creator/run_sync.sh
+
+# A sync drives a real browser + the network; give it room but don't hang forever.
+TimeoutStartSec=1800
+
+# Structured logs go to stdout -> journald: journalctl -u terminals-sync -f
+StandardOutput=journal
+StandardError=journal
+
+# NOTE: deliberately NOT PrivateTmp — launching Chrome can need the shared /tmp
+# (X11 socket at /tmp/.X11-unix) when the CDP browser isn't already running.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# Emulator runtime artifacts — never commit
+emulator.log
+*.log
+
+# APKs are not source — keep them out of git
+*.apk
+
+# Local Android stragglers (the real SDK + AVDs live under ~/Android)
+.android/
+
+# emulator screen grabs
+screenshots/
