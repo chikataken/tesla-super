@@ -64,16 +64,35 @@ def is_login_page(page) -> bool:
         return False
 
 
+def _surface_window(page) -> None:
+    """Bring OUR (ghost/off-screen) Chrome window on-screen and focus it so a person can
+    see the Tesla sign-in page and log in. Best-effort; no-op under headless. Sync."""
+    if getattr(config, "HEADLESS", False):
+        return
+    try:
+        sess = page.context.new_cdp_session(page)
+        wid = sess.send("Browser.getWindowForTarget")["windowId"]
+        sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds":
+            {"left": 120, "top": 60, "width": 1480, "height": 900, "windowState": "normal"}})
+    except Exception:                        # noqa: BLE001
+        pass
+    try:
+        page.bring_to_front()
+    except Exception:                        # noqa: BLE001
+        pass
+
+
 def require_logged_in(page, where: str = "") -> None:
-    """Raise immediately if `page` is on the Tesla SSO login screen — i.e. the session
-    expired or was killed mid-run (e.g. Akamai bot-detection). Call right after a
-    goto() so a run fails fast with a clear message instead of hanging on a load wait
-    or scraping an empty board."""
+    """Raise if `page` is on the Tesla SSO login screen — i.e. the session expired or was
+    killed mid-run (e.g. Akamai bot-detection). Call right after a goto() so a run fails
+    fast with a clear message instead of hanging. In ghost mode the off-screen window is
+    first SURFACED on-screen so a human can sign in, then re-run."""
     if is_login_page(page):
         loc = f" at {where}" if where else ""
+        _surface_window(page)                # pop the ghost window on-screen for the human
         raise RuntimeError(
             f"Tesla session is logged out{loc} (redirected to the auth.tesla.com "
-            "sign-in page). Re-login (run the login flow), then retry.")
+            "sign-in page). A browser window has been surfaced — sign in, then retry.")
 
 
 # --------------------------------------------------------------------------
@@ -299,8 +318,10 @@ def _close_own_and_detach(browser, own_pages) -> None:
 # Coordinates far off any monitor on the Windows virtual desktop (valid range is
 # roughly ±32767). Width/height are kept normal so the window is a real, painted
 # window — just nowhere a display can show it.
-_OFFSCREEN = {"left": -32000, "top": -32000, "width": 1560, "height": 920,
-              "windowState": "normal"}
+# MINIMIZE rather than park off-screen: some Linux WMs clamp off-screen positions back
+# on-screen, but a runtime minimize sticks reliably. The --disable-backgrounding/occlusion
+# launch flags keep every tab fully live while minimized, so scraping is unaffected.
+_OFFSCREEN = {"windowState": "minimized"}
 
 
 def _onscreen_bounds() -> dict:

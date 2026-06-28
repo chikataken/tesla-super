@@ -250,13 +250,13 @@ def _close_own_and_detach(browser, own_pages) -> None:
 
 
 # --------------------------------------------------------------------------
-# Ghost mode: force the window off-screen *after* startup
+# Ghost mode: hide the window *after* startup
 # --------------------------------------------------------------------------
-# Coordinates far off any monitor on the Windows virtual desktop (valid range is
-# roughly ±32767). Width/height are kept normal so the window is a real, painted
-# window — just nowhere a display can show it.
-_OFFSCREEN = {"left": -32000, "top": -32000, "width": 1560, "height": 920,
-              "windowState": "normal"}
+# We MINIMIZE rather than park off-screen: some Linux WMs clamp off-screen positions
+# back on-screen (the window reappears at 0,0), but a runtime minimize sticks reliably.
+# The --disable-backgrounding/occlusion launch flags keep every tab fully live while the
+# window is minimized, so automation is unaffected.
+_OFFSCREEN = {"windowState": "minimized"}
 
 
 def _onscreen_bounds() -> dict:

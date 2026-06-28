@@ -73,6 +73,12 @@
   .profrow .pname{font-weight:600;font-size:13.5px}
   .profrow .btn{padding:6px 12px;font-size:13px}
   .tabs{display:flex;gap:6px;margin-left:auto;align-items:center}
+  /* Per-tab search/sort row, centered in the top bar (only the active tab's group shows) */
+  .header-tools{flex:1;min-width:0;display:flex;justify-content:center}
+  .ht-group{display:flex;align-items:center;gap:10px;white-space:nowrap}
+  .ht-group[hidden]{display:none}
+  .header-tools .toolbar{margin:0}
+  .header-tools input[type=search]{min-width:220px}
   .tab{background:transparent;border:1px solid transparent;color:var(--muted);
     padding:7px 16px;border-radius:8px;cursor:pointer;font-size:13.5px;font-weight:600;
     transition:background .12s,color .12s,border-color .12s}
@@ -87,10 +93,10 @@
     padding:18px 12px;overflow-y:auto}
   .nav-logo{color:#fff;font-weight:700;font-size:16px;letter-spacing:.02em;padding:4px 10px 18px}
   .navrail .navitem{display:block;width:100%;text-align:left;background:transparent;border:none;
-    border-left:3px solid transparent;color:#aeb8c8;font-size:14px;font-weight:600;
+    color:#aeb8c8;font-size:14px;font-weight:600;
     padding:10px 12px;border-radius:8px;cursor:pointer;transition:background .12s,color .12s}
   .navrail .navitem:hover{background:rgba(255,255,255,.06);color:#fff}
-  .navrail .navitem.active{background:rgba(255,255,255,.10);color:#fff;border-left-color:var(--accent)}
+  .navrail .navitem.active{background:rgba(255,255,255,.10);color:#fff}
   .navrail .profimg{margin-top:auto;width:86%;align-self:center;border-radius:12px;display:block}
   /* ---- toolbar sort dropdown (SD-style: label + direction toggle) ---- */
   .sortwrap{position:relative;display:flex;align-items:center}
@@ -109,10 +115,53 @@
   .panel{display:none}
   .panel.active{display:flex;flex-direction:column;flex:1;min-height:0}
   /* terminals & users just scroll as one block; the orders panel uses two internal scroll panes */
-  #terminals.panel.active,#users.panel.active{display:block;overflow:auto;padding-bottom:40px}
+  #terminals.panel.active,#users.panel.active,#recorded.panel.active{display:block;overflow:auto;padding-bottom:40px}
+  /* ---- Recorded shipments ---- */
+  /* status groups as a sub-list in the dark left nav rail */
+  .recnav{display:flex;flex-direction:column;gap:1px;margin:2px 0 6px;
+    border-left:2px solid rgba(255,255,255,.08);padding-left:4px}
+  .recnav .ritem{display:flex;align-items:center;justify-content:space-between;gap:8px;
+    width:100%;background:transparent;border:none;color:rgba(255,255,255,.62);
+    font:inherit;font-size:12.5px;padding:5px 10px;border-radius:7px;cursor:pointer;
+    text-transform:capitalize;text-align:left}
+  .recnav .ritem:hover{background:rgba(255,255,255,.06);color:#fff}
+  .recnav .ritem.active{background:rgba(255,255,255,.12);color:#fff}
+  .recnav .ritem .rn{font-variant-numeric:tabular-nums;font-size:11px;opacity:.7;
+    background:rgba(255,255,255,.08);border-radius:999px;padding:0 7px;min-width:20px;text-align:center}
+  .rec-list{padding:0 4px}
+  .rec-empty{padding:30px;color:var(--muted)}
+  .rec-table{width:100%;border-collapse:collapse;font-size:13px}
+  .rec-table th{text-align:left;padding:7px 10px;color:var(--muted);font-weight:600;
+    border-bottom:1px solid rgba(0,0,0,.08);position:sticky;top:0;background:var(--bg)}
+  .rec-table td{padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
+  .rec-table tr:hover td{background:var(--card2)}
+  .rec-table .rnum{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .rec-table .rroute{color:var(--text)}
+  .rec-table .rroute .arr{color:var(--muted);padding:0 4px}
+  .rec-table .rdate{color:var(--muted);white-space:nowrap}
+  .rec-table .vin{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
+    background:rgba(0,0,0,.05);border-radius:4px;padding:1px 5px;white-space:nowrap}
+  .rbadge{display:inline-block;border-radius:999px;padding:1px 8px;font-size:11px;
+    font-weight:700;text-transform:capitalize;background:rgba(0,0,0,.06);color:var(--muted)}
+  .rb-posted{background:#e8f0fe;color:#2563eb}
+  .rb-accepted{background:#e7f6ec;color:#15803d}
+  .rb-picked_up{background:#fff4e5;color:#b45309}
+  .rb-delivered{background:#eafaf1;color:#0f766e}
+  .rb-invoiced{background:#f3e8ff;color:#7c3aed}
+  .rb-paid{background:#dcfce7;color:#166534}
+  .rb-pending,.rb-new,.rb-requests{background:#f1f5f9;color:#475569}
 
   /* dispatcher "bubble" dropdown (replaces the native select) */
   .profwrap{position:relative}
+  /* dispatcher selector relocated into the dark left rail */
+  .navrail .profwrap{margin:2px 0 8px}
+  /* dispatcher selector styled like the other rail options: rectangular, flush, no accent */
+  .navrail .profbtn{width:100%;justify-content:space-between;background:transparent;border:none;
+    border-radius:8px;color:#aeb8c8;font-size:14px;font-weight:600;padding:10px 12px}
+  .navrail .profbtn:hover{background:rgba(255,255,255,.06);color:#fff}
+  .navrail .profbtn.unset{border:none;box-shadow:none}
+  .navrail .profbtn .caret{color:rgba(255,255,255,.6)}
+  .navrail .profmenu{left:0;right:0;min-width:0}
   .profbtn{display:inline-flex;align-items:center;gap:7px;background:var(--card);
     border:1px solid var(--line);color:var(--text);border-radius:999px;
     padding:6px 14px;font-size:13.5px;font-weight:600;cursor:pointer}
@@ -616,26 +665,72 @@
     display:block;flex:none;z-index:99999;background:#b4520a;color:#fff;
     text-align:center;font-size:12px;font-weight:700;letter-spacing:.03em;padding:5px 8px}
   .testpill{background:#b4520a!important;color:#fff!important;border-color:#b4520a!important}
+  /* TEST SITE: posting is disabled, so the "Post to SuperDispatch" button is a transparent,
+     non-clickable placeholder (keeps the layout, but it's clearly inert). Inert on prod. */
+  body.testmode .navpost .btn.green{background:transparent!important;color:var(--muted)!important;
+    border:1px dashed var(--line)!important;box-shadow:none!important;cursor:default;pointer-events:none}
 </style>
 </head>
 <body>
 <div class="appshell">
   <nav class="navrail">
     <div class="nav-logo">TFI TRANS</div>
-    <button class="tab navitem active" data-tab="orders">Orders</button>
+    <div class="profwrap" id="profWrap">
+      <button class="profbtn unset" id="profBtn" type="button" onclick="toggleProfMenu(event)"
+              title="Dispatcher — select before uploading an Excel">
+        <span id="profBtnLabel">Select dispatcher…</span><span class="caret">▾</span>
+      </button>
+      <div class="profmenu" id="profMenu" hidden></div>
+    </div>
+    <button class="tab navitem active" data-tab="orders">Shipments</button>
+    <button class="tab navitem" data-tab="recorded">Recorded</button>
+    <div id="recNav" class="recnav" hidden></div>
     <button class="tab navitem" data-tab="terminals">Terminals</button>
+    <button class="tab navitem" data-tab="users">Settings</button>
     <img id="profileImg" class="profimg" alt="" hidden onerror="this.hidden=true">
   </nav>
   <div class="appmain">
 <header>
-  <div class="profwrap" id="profWrap">
-    <button class="profbtn unset" id="profBtn" type="button" onclick="toggleProfMenu(event)"
-            title="Dispatcher — select before uploading an Excel">
-      <span id="profBtnLabel">Select dispatcher…</span><span class="caret">▾</span>
-    </button>
-    <div class="profmenu" id="profMenu" hidden></div>
-  </div>
   <span class="pill" id="env"></span>
+  <!-- Each tab's own search/sort row, centered in the top bar — only the active tab's shows. -->
+  <div id="headerTools" class="header-tools">
+    <div id="ht-orders" class="ht-group">
+      <div class="toolbar" id="listbar">
+        <div class="sortwrap" id="sortWrap">
+          <button class="sortbtn-dd" id="sortBtn" type="button" onclick="toggleSortMenu(event)">
+            Sort by: <b id="sortLabel">Origin state</b><span class="caret">▾</span>
+          </button>
+          <button class="sortdir" id="sortDir" type="button" title="Toggle sort direction"
+                  onclick="toggleSortDir(event)">↑</button>
+          <div class="sortmenu profmenu" id="sortMenu" hidden></div>
+        </div>
+        <input id="q" type="search" placeholder="Filter by city, state, or VIN…">
+        <button class="btn ghost" onclick="clearBoard()">Clear shipments</button>
+        <span class="count" id="count"></span>
+        <span class="count dupcount" id="dupcount"></span>
+      </div>
+    </div>
+    <div id="ht-recorded" class="ht-group" hidden>
+      <div class="sortwrap" id="recSortWrap">
+        <button class="sortbtn-dd" id="recSortBtn" type="button" onclick="toggleRecSortMenu(event)">
+          Sort by: <b id="recSortLabel">Updated</b><span class="caret">▾</span>
+        </button>
+        <button class="sortdir" id="recSortDir" type="button" title="Toggle sort direction"
+                onclick="toggleRecSortDir(event)">↓</button>
+        <div class="sortmenu profmenu" id="recSortMenu" hidden></div>
+      </div>
+      <input id="rq" type="search" placeholder="Search recorded by number, city, or VIN…" oninput="recDebounced()">
+      <button class="btn ghost" onclick="loadRecorded()">Refresh</button>
+      <span class="count" id="rstats"></span>
+      <span class="count" id="rlive" style="color:#15803d"></span>
+      <span class="count" id="rmeta" style="opacity:.7"></span>
+    </div>
+    <div id="ht-terminals" class="ht-group" hidden>
+      <input id="tq" type="search" placeholder="Search terminals by name or address…" oninput="renderTerminals()">
+      <button class="btn ghost" onclick="loadTerminals(true)">Refresh</button>
+      <span class="count" id="tstats"></span>
+    </div>
+  </div>
   <div class="tabs">
     <div id="tally" class="tally"></div>
     <span id="navpost" class="navpost"></span>
@@ -647,20 +742,6 @@
   <div class="panel active" id="orders">
     <div class="orders-layout">
       <div class="orders-main">
-        <div class="toolbar" id="listbar">
-          <div class="sortwrap" id="sortWrap">
-            <button class="sortbtn-dd" id="sortBtn" type="button" onclick="toggleSortMenu(event)">
-              Sort by: <b id="sortLabel">Origin state</b><span class="caret">▾</span>
-            </button>
-            <button class="sortdir" id="sortDir" type="button" title="Toggle sort direction"
-                    onclick="toggleSortDir(event)">↑</button>
-            <div class="sortmenu profmenu" id="sortMenu" hidden></div>
-          </div>
-          <input id="q" type="search" placeholder="Filter by city, state, or VIN…">
-          <button class="btn ghost" onclick="clearBoard()">Clear shipments</button>
-          <span class="count" id="count"></span>
-          <span class="count dupcount" id="dupcount"></span>
-        </div>
         <div class="routehdr" id="routehdr" style="display:none">
           <button class="btn ghost" onclick="backToList()">← All shipments</button>
           <span class="rlabel" id="routelabel"></span>
@@ -679,14 +760,16 @@
     </div>
   </div>
 
+  <!-- RECORDED (local Super Dispatch shipment mirror) -->
+  <div class="panel" id="recorded">
+    <div class="term-main">
+      <div id="rlist" class="rec-list"></div>
+    </div>
+  </div>
+
   <!-- TERMINALS -->
   <div class="panel" id="terminals">
     <div class="term-main">
-      <div class="toolbar">
-        <input id="tq" type="search" placeholder="Search terminals by name or address…" oninput="renderTerminals()">
-        <button class="btn ghost" onclick="loadTerminals(true)">Refresh</button>
-        <span class="count" id="tstats"></span>
-      </div>
       <div id="tlist" class="term-list"></div>
     </div>
   </div>
@@ -696,7 +779,7 @@
     <div class="users-layout">
       <div class="users-main">
         <div class="users-bar">
-          <h2 class="users-h">Edit users</h2>
+          <h2 class="users-h">Settings</h2>
           <button class="btn" onclick="addUser()">+ Add user</button>
           <button class="btn ghost" onclick="saveAllUsers()">Save all</button>
           <span class="count" id="usersMsg"></span>
@@ -768,9 +851,102 @@ let SORT = {key:'origin', dir:1};    // default sort: Origin state (A→Z); -1 =
 document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
   document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
-  t.classList.add('active'); $('#'+t.dataset.tab).classList.add('active');
-  if(t.dataset.tab==='terminals') loadTerminals();
+  const tab=t.dataset.tab;
+  t.classList.add('active'); $('#'+tab).classList.add('active');
+  if(tab==='terminals') loadTerminals();
+  if(tab==='users'){ USERS_EDIT=JSON.parse(JSON.stringify(PROFILES||[]));
+    const m=$('#usersMsg'); if(m) m.textContent=''; renderUsersEditor(); }   // Settings = edit users
+  const onRecorded = tab==='recorded';
+  const rn = $('#recNav'); if(rn) rn.hidden = !onRecorded;   // status groups stay Recorded-only
+  // Centered header slot shows ONLY the active tab's own toolbar group.
+  ['orders','recorded','terminals'].forEach(k=>{ const g=$('#ht-'+k); if(g) g.hidden = (k!==tab); });
+  if(onRecorded){ loadRecorded(); startRecPoll(); } else { stopRecPoll(); }
 });
+
+// ---- Recorded shipments (local Super Dispatch mirror) ----------------------
+let REC = {status:'all', q:'', sort:'updated', dir:'desc'};   // default: most-recently updated on top
+const REC_SORT_OPTS = [{k:'updated',label:'Updated'},{k:'created',label:'Created'},
+                       {k:'number',label:'Order #'},{k:'status',label:'Status'}];
+function recSortLabel(){ const o=REC_SORT_OPTS.find(x=>x.k===REC.sort); return o?o.label:REC.sort; }
+function renderRecSortMenu(){ const m=$('#recSortMenu'); if(!m) return;
+  m.innerHTML=REC_SORT_OPTS.map(o=>`<div class="pm-item${o.k===REC.sort?' active':''}" onclick="pickRecSort('${o.k}')">${o.label}</div>`).join(''); }
+function toggleRecSortMenu(ev){ if(ev) ev.stopPropagation(); const m=$('#recSortMenu'); if(!m) return;
+  renderRecSortMenu(); m.hidden=!m.hidden; if(!m.hidden) document.addEventListener('click', closeRecSortMenu); }
+function closeRecSortMenu(){ const m=$('#recSortMenu'); if(m) m.hidden=true; document.removeEventListener('click', closeRecSortMenu); }
+function pickRecSort(k){ closeRecSortMenu(); REC.sort=k; REC.dir='desc'; loadRecorded(); }
+function toggleRecSortDir(ev){ if(ev) ev.stopPropagation(); REC.dir = REC.dir==='desc'?'asc':'desc'; loadRecorded(); }
+function syncRecSortUI(){ const l=$('#recSortLabel'); if(l) l.textContent=recSortLabel();
+  const d=$('#recSortDir'); if(d){ d.textContent=REC.dir==='desc'?'↓':'↑';
+    d.title=REC.dir==='desc'?'Descending (newest first) — click to reverse':'Ascending (oldest first) — click to reverse'; } }
+let _recTimer = null;
+let _recPoll = null;
+// Order the status groups follow the SD lifecycle, not just count, in the left column.
+const REC_ORDER = ['new','posted','requests','pending','accepted','picked_up',
+                   'delivered','invoiced','paid','canceled','archived'];
+function recDebounced(){ clearTimeout(_recTimer); _recTimer=setTimeout(loadRecorded, 250); }
+// Poll while the Recorded tab is open so webhook updates show up live (~8s).
+function startRecPoll(){ stopRecPoll(); _recPoll=setInterval(()=>{ if($('#recorded').classList.contains('active')) loadRecorded(true); }, 8000); }
+function stopRecPoll(){ if(_recPoll){ clearInterval(_recPoll); _recPoll=null; } }
+function recEsc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function fmtCreated(iso){ if(!iso) return '—';
+  const d=new Date(String(iso).replace(' ','T')); if(isNaN(d)) return '—';
+  return d.toLocaleDateString(undefined,{year:'2-digit',month:'short',day:'numeric'}); }
+function fmtUpdated(ep){ if(!ep) return '—'; const d=new Date(Number(ep)*1000); if(isNaN(d)) return '—';
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
+async function loadRecorded(silent){
+  REC.q = ($('#rq')||{}).value || '';
+  syncRecSortUI();
+  const u = new URL(location.origin + '/api/recorded');
+  if(REC.status && REC.status!=='all') u.searchParams.set('status', REC.status);
+  if(REC.q) u.searchParams.set('q', REC.q);
+  u.searchParams.set('sort', REC.sort); u.searchParams.set('dir', REC.dir);
+  let data;
+  try{ data = await (await fetch(u)).json(); }
+  catch(e){ if(!silent) $('#rlist').innerHTML = '<div class="rec-empty">Could not load recorded shipments.</div>'; return; }
+  if(data.error){ $('#rstats').textContent = data.error; }
+  renderRecNav(data.counts||{}, data.total||0);
+  const m = data.meta||{};
+  $('#rmeta').textContent = m.at ? ('backfill '+m.at+' · '+(m.window?m.window[0]+'→'+m.window[1]:'')) : '';
+  $('#rlive').textContent = '● live';   // polling is active while this tab is open
+  const orders = data.orders||[];
+  $('#rstats').textContent = orders.length + ' shown' + (data.total? (' of '+data.total+' recorded'):'');
+  if(!orders.length){ $('#rlist').innerHTML = '<div class="rec-empty">No recorded shipments yet. Run: <code>python recorder_backfill.py</code></div>'; return; }
+  const rows = orders.map(o=>{
+    const route = recEsc((o.pickup_city||'')+', '+(o.pickup_state||'')+' '+(o.pickup_zip||'')) +
+                  ' <span class="arr">→</span> ' +
+                  recEsc((o.delivery_city||'')+', '+(o.delivery_state||'')+' '+(o.delivery_zip||''));
+    const vins = (o.vins||[]).map(v=>'<span class="vin">'+recEsc(v)+'</span>').join(' ');
+    const dates = recEsc((o.pickup_date||'')+(o.delivery_date?(' → '+o.delivery_date):''));
+    return `<tr>
+      <td class="rnum">${recEsc(o.number||'')}</td>
+      <td><span class="rbadge rb-${recEsc(o.status||'')}">${recEsc(o.status||'')}</span></td>
+      <td class="rroute">${route}</td>
+      <td class="rvins">${vins}</td>
+      <td class="rdate">${dates}</td>
+      <td class="rdate">${recEsc(fmtCreated(o.created_at))}</td>
+      <td class="rdate">${recEsc(fmtUpdated(o.updated_at))}</td>
+    </tr>`;
+  }).join('');
+  const sortHint = (k)=> REC.sort===k ? (' '+(REC.dir==='desc'?'↓':'↑')) : '';
+  $('#rlist').innerHTML =
+    `<table class="rec-table"><thead><tr>
+       <th>Order${sortHint('number')}</th><th>Status${sortHint('status')}</th><th>Route</th>
+       <th>VIN(s)</th><th>Pickup → Delivery</th>
+       <th>Created${sortHint('created')}</th><th>Updated${sortHint('updated')}</th>
+     </tr></thead><tbody>${rows}</tbody></table>`;
+}
+// Status groups live in the LEFT column (nav rail), ordered by SD lifecycle.
+function renderRecNav(counts, total){
+  const known = REC_ORDER.filter(s=>counts[s]!=null);
+  const extra = Object.keys(counts).filter(s=>!REC_ORDER.includes(s)).sort();
+  const order = known.concat(extra);
+  const item = (key,label,n)=>`<button class="ritem ${REC.status===key?'active':''}" onclick="recSetStatus('${key}')">`+
+    `<span class="rl">${label}</span><span class="rn">${n}</span></button>`;
+  let html = item('all','All', total);
+  for(const s of order) html += item(s, s.replace('_',' '), counts[s]);
+  $('#recNav').innerHTML = html;
+}
+function recSetStatus(s){ REC.status = s; loadRecorded(); }
 
 function money(p){ return p==null?'—':'$'+Number(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtDate(iso){ const d=new Date(iso+'T00:00:00'); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
@@ -1668,7 +1844,7 @@ async function saveSettings(){
   try{
     const r=await api('/api/settings', body);
     $('#setMsg').textContent='Saved.'; $('#set_secret').value='';
-    $('#env').textContent='SD_ENV: prod v2';
+    $('#env').textContent='SD_ENV: prod v2.1';
     await loadSettings();
     toast('Settings saved');
   }catch(e){ $('#setMsg').textContent='Save failed.'; }
@@ -1730,9 +1906,7 @@ function renderProfMenu(){
   const m=$('#profMenu'); if(!m) return;
   m.innerHTML=(PROFILES||[]).map(p=>
     `<div class="pm-item${p.id===ACTIVE_PROFILE?' active':''}" onclick="pickProfile('${esc(p.id)}')">${escHtml(p.name||p.id)}</div>`
-  ).join('')
-   +`<div class="pm-sep"></div>`
-   +`<div class="pm-item pm-edit" onclick="openUsersEditor()">✎ Edit users</div>`;
+  ).join('');
 }
 function toggleProfMenu(ev){ if(ev) ev.stopPropagation();
   const m=$('#profMenu'); if(!m) return;
@@ -1741,14 +1915,17 @@ function toggleProfMenu(ev){ if(ev) ev.stopPropagation();
 }
 function closeProfMenu(){ const m=$('#profMenu'); if(m) m.hidden=true;
   document.removeEventListener('click', closeProfMenu); }
-function pickProfile(id){ closeProfMenu(); setProfile(id); }
+// Selecting ANY dispatcher (even the current one) jumps to the Orders board.
+function goToOrders(){ const b=document.querySelector('.navitem[data-tab="orders"]'); if(b) b.click(); }
+function pickProfile(id){ closeProfMenu(); goToOrders(); setProfile(id); }
 
 // ----- Edit users page: name / phone / states per dispatcher + unclaimed states -----
 const US_STATES=["AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN","IA",
   "KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND",
   "OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"];
 let USERS_EDIT=null;          // working copy while the editor page is open
-function isAllUser(u){ return (u.id||'')==='all'; }
+// didi (like the old ALL) bypasses the state filter, so it has no editable states.
+function isAllUser(u){ const id=(u.id||''); return id==='didi'||id==='all'; }
 function claimedSet(){
   const s=new Set();
   (USERS_EDIT||[]).forEach(u=>{ if(!isAllUser(u)) (u.states||[]).forEach(st=>s.add(String(st).toUpperCase())); });
@@ -2221,7 +2398,7 @@ fetch('/api/env').then(r=>r.json()).then(d=>{
     document.body.classList.add('testmode');
     const e=$('#env'); if(e){ e.textContent='TEST SITE — SD disabled'; e.classList.add('testpill'); }
   } else {
-    $('#env').textContent='SD_ENV: prod v2';
+    $('#env').textContent='SD_ENV: prod v2.1';
   }
 }).catch(()=>{});
 // restore the active dispatcher FIRST, then open the live stream for its board (so the

@@ -31,12 +31,18 @@ _BUNDLED_DIR = paths.resource_path("profiles")
 # Seeded on first run if profiles.json doesn't exist yet. Fill in `phone` (the number
 # the <dispatcher> token becomes) and `states` (2-letter codes this dispatcher pulls
 # from the Excel; an empty list means "no state filter yet" → all VINs pass).
-# The "all" profile is special: it NEVER filters by state (see allowed_states), so it
-# pulls every VIN in the Excel — handy for feeding the terminal cache without a region cap.
+# The "didi" profile is special: it NEVER filters by state (see allowed_states), so it
+# pulls EVERY VIN in the Excel regardless of region — and, unlike the old "all" dev
+# profile, posting is enabled and duplicate-removal is skipped, so didi can post every
+# single VIN they receive. ALL_PROFILE_ID is kept only as a legacy id (no such profile
+# ships anymore) so older references stay harmless.
 ALL_PROFILE_ID = "all"
+DIDI_PROFILE_ID = "didi"
+# Profiles that bypass the pickup-state filter (pull every VIN).
+BYPASS_FILTER_IDS = {ALL_PROFILE_ID, DIDI_PROFILE_ID}
 
 DEFAULT_PROFILES = [
-    {"id": "all",   "name": "ALL",   "phone": "", "states": []},
+    {"id": "didi",  "name": "didi",  "phone": "", "states": []},
     {"id": "soyo",  "name": "Soyo",  "phone": "", "states": []},
     {"id": "kelly", "name": "Kelly", "phone": "", "states": []},
     {"id": "duka",  "name": "Duka",  "phone": "", "states": []},
@@ -109,10 +115,10 @@ def save_profile(pid: str, phone=None, states=None, name=None) -> dict:
         # Invariant: a state belongs to AT MOST ONE dispatcher. Saving these states to this
         # user strips them from every other user (the 'all' profile has none). This keeps
         # profiles.json consistent no matter what order the cards are saved in.
-        if pid != ALL_PROFILE_ID:
+        if pid not in BYPASS_FILTER_IDS:
             claimed = set(new_states)
             for other in profs:
-                if other is p or other.get("id") == ALL_PROFILE_ID:
+                if other is p or other.get("id") in BYPASS_FILTER_IDS:
                     continue
                 if other.get("states"):
                     other["states"] = [s for s in other["states"] if s not in claimed]
@@ -134,7 +140,7 @@ def add_profile(name: str) -> dict:
     if not str(name).strip():
         raise ValueError("a name is required")
     profs = list_profiles()
-    existing = {p.get("id") for p in profs} | {ALL_PROFILE_ID}
+    existing = {p.get("id") for p in profs} | BYPASS_FILTER_IDS
     base = _slug(name)
     pid, n = base, 2
     while pid in existing:
@@ -204,9 +210,9 @@ def row_pickup_state(row) -> str:
 
 
 def allowed_states(profile: dict | None) -> set:
-    # The ALL profile is unfiltered by design — never apply a state cap to it, even if a
-    # `states` list somehow got saved on it. An empty set means filter_rows keeps every row.
-    if (profile or {}).get("id") == ALL_PROFILE_ID:
+    # Bypass profiles (didi) are unfiltered by design — never apply a state cap, even if a
+    # `states` list somehow got saved on them. An empty set means filter_rows keeps every row.
+    if (profile or {}).get("id") in BYPASS_FILTER_IDS:
         return set()
     return {_norm_state(s) for s in (profile or {}).get("states", []) if str(s).strip()}
 

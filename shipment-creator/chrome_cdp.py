@@ -152,10 +152,48 @@ def ensure_chrome():
     deadline = time.time() + 30
     while time.time() < deadline:
         if _cdp_alive(config.CDP_URL):
+            if config.WINDOW_MODE == "ghost" and not config.HEADLESS:
+                _park_offscreen()        # WMs that clamp the off-screen launch flag → nudge via CDP
             return proc
         time.sleep(0.25)
     proc.kill()
     raise RuntimeError(f"Chrome did not open the CDP endpoint {config.CDP_URL} within 30s")
+
+
+def _park_offscreen() -> None:
+    """Hide the freshly-launched ghost window. Off-screen `--window-position` is CLAMPED
+    back on-screen by some Linux WMs (and re-clamped even via runtime setWindowBounds at
+    launch), but a runtime **minimize** sticks reliably — and the --disable-backgrounding/
+    occlusion flags above keep its tabs fully live while minimized. Best-effort no-op on
+    failure."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:                                   # noqa: BLE001
+        return
+    try:
+        with sync_playwright() as p:
+            b = p.chromium.connect_over_cdp(config.CDP_URL)
+            try:
+                ctxs = list(b.contexts) or []
+                pages = [pg for c in ctxs for pg in c.pages]
+                if not pages and ctxs:
+                    pages = [ctxs[0].new_page()]
+                seen = set()
+                for pg in pages:
+                    try:
+                        s = pg.context.new_cdp_session(pg)
+                        wid = s.send("Browser.getWindowForTarget")["windowId"]
+                        if wid in seen:
+                            continue
+                        seen.add(wid)
+                        s.send("Browser.setWindowBounds",
+                               {"windowId": wid, "bounds": {"windowState": "minimized"}})
+                    except Exception:                   # noqa: BLE001
+                        pass
+            finally:
+                b.close()
+    except Exception:                                   # noqa: BLE001
+        return
 
 
 def center_window() -> None:

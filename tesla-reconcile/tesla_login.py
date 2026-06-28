@@ -139,10 +139,29 @@ def _fresh_totp() -> str | None:
     return code
 
 
+def _surface_window(page) -> None:
+    """Bring OUR (ghost/off-screen) Chrome window on-screen and focus it so a person can
+    clear the Tesla captcha. Best-effort; no-op under headless. Sync."""
+    if getattr(config, "HEADLESS", False):
+        return
+    try:
+        sess = page.context.new_cdp_session(page)
+        wid = sess.send("Browser.getWindowForTarget")["windowId"]
+        sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds":
+            {"left": 120, "top": 60, "width": 1480, "height": 900, "windowState": "normal"}})
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        page.bring_to_front()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def _bail_if_captcha(page, where: str) -> bool:
     if _visible_captcha(page):
-        log(f"visible captcha {where} — leaving it for a human")
+        log(f"visible captcha {where} — surfacing the window for a human")
         _record(page, f"captcha_{where}")
+        _surface_window(page)
         return True
     return False
 

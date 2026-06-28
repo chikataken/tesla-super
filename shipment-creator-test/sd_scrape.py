@@ -119,30 +119,41 @@ def _scan_tab(page, status: str, zip_pairs: set) -> list:
     base = TAB_URL.get(status)
     found, seen = [], set()
     for pageno in range(1, config.SD_SCAN_MAX_PAGES + 1):
-        if base:
-            page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}"
-                      f"&size={config.SD_SCAN_PAGE_SIZE}")    # 100 rows/page -> fewer page turns
-        elif pageno == 1:
-            page.goto(LOADBOARD_URL)
+        # Retry EVERY page with a growing timeout: a slow REAL page (e.g. under concurrency)
+        # must not be mistaken for end-of-data and drop the rest of the tab.
+        attempts = 3
+        rows_ready = False
+        for attempt in range(1, attempts + 1):
+            if base:
+                page.goto(f"{base}{'&' if '?' in base else '?'}page={pageno}"
+                          f"&size={config.SD_SCAN_PAGE_SIZE}")    # 100 rows/page
+            elif pageno == 1:
+                page.goto(LOADBOARD_URL)
+                try:
+                    page.get_by_role("tab", name=TAB_LABEL[status]).first.click()
+                except Exception:
+                    pass
+            else:
+                break                                # base-less tabs don't paginate past 1
+            page.wait_for_load_state("domcontentloaded")
+            _check_login(page)
             try:
-                page.get_by_role("tab", name=TAB_LABEL[status]).first.click()
+                page.locator(ORDER_LINK).first.wait_for(timeout=10000 + 5000 * (attempt - 1))
+                rows_ready = True
+                break
             except Exception:
-                pass
-        else:
-            break                                    # no URL pagination available
-        page.wait_for_load_state("domcontentloaded")
-        _check_login(page)
-        try:
-            page.locator(ORDER_LINK).first.wait_for(timeout=10000)
-        except Exception:
-            os.makedirs("./output", exist_ok=True)
-            shot = f"./output/sd_scan_{status}_p{pageno}.png"
-            try:
-                page.screenshot(path=shot)
-            except Exception:
-                pass
-            print(f"  [{status}] page {pageno}: no preview cards found at {page.url} "
-                  f"(ORDER_LINK selector likely needs tuning) -> {shot}")
+                if attempt < attempts:
+                    page.wait_for_timeout(1500)      # brief backoff, then re-load and retry
+        if not rows_ready:
+            if pageno == 1:                          # an empty later page is normal; page 1 isn't
+                os.makedirs("./output", exist_ok=True)
+                shot = f"./output/sd_scan_{status}_p{pageno}.png"
+                try:
+                    page.screenshot(path=shot)
+                except Exception:
+                    pass
+                print(f"  [{status}] page {pageno}: no order rows at {page.url} after {attempts} tries "
+                      f"(slow load, or ORDER_LINK selector) -> {shot}")
             break
         cards = page.evaluate(_CARDS_JS)
         ids = {c.get("href") for c in cards}
@@ -150,6 +161,10 @@ def _scan_tab(page, status: str, zip_pairs: set) -> list:
             break
         seen |= ids
         found.extend(_cards_to_hits(cards, status, zip_pairs))
+        # A short page (< a full page of rows) is the LAST page — stop without loading the
+        # empty trailing page (which would just time out: the "blank page").
+        if len(cards) < config.SD_SCAN_PAGE_SIZE:
+            break
         time.sleep(config.SD_SCAN_THROTTLE_S)
     return found
 
@@ -231,10 +246,10 @@ async def _scan_tab_async(page, status: str, zip_pairs: set) -> list:
         # Load this page of the status tab and wait for order rows. CONCURRENCY: when a
         # second dispatcher is running at the same time, both share this Chrome, so the
         # loadboard can render noticeably slower. A single 10s wait would then time out and
-        # leave THIS dispatcher with ZERO SD hits (no posted/accepted route highlights) — the
-        # "second profile shows no matches" bug. So the FIRST page is retried with a growing
-        # timeout; transient slowness recovers instead of silently yielding nothing.
-        attempts = 3 if pageno == 1 else 1
+        # drop the rest of the tab — mistaking a slow REAL page for end-of-data. So EVERY
+        # page (not just the first) is retried with a growing timeout; transient slowness
+        # recovers instead of silently yielding nothing.
+        attempts = 3
         rows_ready = False
         for attempt in range(1, attempts + 1):
             if base:
@@ -274,6 +289,10 @@ async def _scan_tab_async(page, status: str, zip_pairs: set) -> list:
             break
         seen |= ids
         found.extend(_cards_to_hits(cards, status, zip_pairs))
+        # A short page (fewer than a full page of rows) is the LAST page — stop here so we
+        # don't load the empty trailing page (which would just time out: the "blank page").
+        if len(cards) < config.SD_SCAN_PAGE_SIZE:
+            break
         await page.wait_for_timeout(int(config.SD_SCAN_THROTTLE_S * 1000))
     return found
 

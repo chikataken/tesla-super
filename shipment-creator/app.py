@@ -24,7 +24,7 @@ import time
 from typing import Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 
 import paths
 
@@ -51,9 +51,23 @@ def _pid() -> str:
 
 def _is_all_profile() -> bool:
     """The ALL profile is a developer tool for feeding the terminal cache only: no
-    NeedByDate requirement on upload, and posting to SuperDispatch is disabled."""
+    NeedByDate requirement on upload, and posting to SuperDispatch is disabled.
+    (Legacy — no 'all' profile ships anymore; kept defensively.)"""
     import profiles
     return _pid() == profiles.ALL_PROFILE_ID
+
+
+def _is_didi_profile() -> bool:
+    """The didi profile bypasses the pickup-state filter AND posts every VIN: no
+    NeedByDate requirement on upload, and duplicate-removal is skipped so VINs already
+    live on SuperDispatch are NOT dropped from the board. Posting stays ENABLED."""
+    import profiles
+    return _pid() == profiles.DIDI_PROFILE_ID
+
+
+def _skip_needby_requirement() -> bool:
+    """Profiles allowed to upload without a NeedByDate column (receive every VIN)."""
+    return _is_all_profile() or _is_didi_profile()
 
 
 def _pdir() -> str:
@@ -159,8 +173,9 @@ def api_orders(file: Optional[str] = None):
     # Before showing the latest board, DROP any VIN already live on SuperDispatch so it can't
     # be double-posted (idempotent — see _auto_remove_sd_duplicates). `dups_removed` is the
     # running list for this board (cleared on reset), surfaced as a tally.
+    # didi is exempt: it posts EVERY VIN it receives, so we keep duplicates on the board.
     dups_removed = []
-    if not file:
+    if not file and not _is_didi_profile():
         try:
             dups_removed = _auto_remove_sd_duplicates()
         except Exception:
@@ -737,7 +752,7 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read that spreadsheet: {e}")
-    if not _is_all_profile() and "need_by" not in report.column_mapping:
+    if not _skip_needby_requirement() and "need_by" not in report.column_mapping:
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, "This Excel has no NeedByDate column. Add a "
@@ -796,7 +811,7 @@ def api_upload_paste(body: dict = Body(...)):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read those rows: {e}")
-    if not _is_all_profile() and "need_by" not in report.column_mapping:
+    if not _skip_needby_requirement() and "need_by" not in report.column_mapping:
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, "These rows have no NeedByDate column. Include a "
@@ -1662,6 +1677,70 @@ def api_consolidation_price(body: dict = Body(...)):
         entry["price_override"] = price
     _save_json(_consol_path(), staged)
     return {"ok": True, "price_override": entry.get("price_override")}
+
+
+# ---- Recorded shipments (the local Super Dispatch mirror) --------------------
+# Read-only views over recorder.db, populated by recorder_backfill.py (and, later,
+# the live webhook feed). Kept self-contained: a missing/empty DB returns empties
+# rather than 500ing, so the tab degrades gracefully before the first backfill.
+@app.get("/api/recorded")
+def api_recorded(status: Optional[str] = None, q: Optional[str] = None,
+                 limit: int = 500, offset: int = 0,
+                 sort: str = "updated", dir: str = "desc"):
+    try:
+        import recorder_db as rdb
+    except Exception as e:                                   # noqa: BLE001
+        return {"orders": [], "total": 0, "counts": {}, "error": f"recorder unavailable: {e}"}
+    try:
+        con = rdb.connect()
+    except Exception as e:                                   # noqa: BLE001
+        return {"orders": [], "total": 0, "counts": {}, "error": str(e)}
+    try:
+        return {
+            "orders": rdb.list_orders(con, status=status, q=q,
+                                      limit=min(limit, 2000), offset=offset,
+                                      sort=sort, direction=dir),
+            "total": rdb.total(con),
+            "counts": rdb.counts_by_status(con),
+            "meta": _recorded_meta(con),
+        }
+    finally:
+        con.close()
+
+
+def _recorded_meta(con) -> dict:
+    try:
+        row = con.execute("SELECT value FROM meta WHERE key='last_backfill'").fetchone()
+        import json as _json
+        return _json.loads(row["value"]) if row else {}
+    except Exception:                                        # noqa: BLE001
+        return {}
+
+
+# ---- Webhook passthrough to the direct-pickup listener -----------------------
+# Super Dispatch posts webhooks to test.wastake.com/webhooks/superdispatch, but the
+# Cloudflare tunnel routes that hostname here (:8001), not to the listener (:8077) —
+# so the events 404'd. Forward them to the local listener, which validates the token,
+# dedups, and fans out to BOTH the pickup pipeline and the recorder mirror. (Proper
+# long-term fix: a path-based tunnel ingress rule /webhooks/* -> :8077.)
+_LISTENER_WEBHOOK = "http://127.0.0.1:8077/webhooks/superdispatch"
+_SD_TOKEN_HEADER = "x-super-dispatch-verification-token"
+
+
+@app.post("/webhooks/superdispatch")
+async def webhook_forward(request: Request):
+    import requests as _requests
+    body = await request.body()
+    headers = {"Content-Type": request.headers.get("content-type", "application/json")}
+    tok = request.headers.get(_SD_TOKEN_HEADER)
+    if tok:
+        headers[_SD_TOKEN_HEADER] = tok
+    try:
+        r = _requests.post(_LISTENER_WEBHOOK, data=body, headers=headers, timeout=10)
+        return PlainTextResponse(r.text or "ok", status_code=r.status_code)
+    except Exception as e:                                   # noqa: BLE001
+        # Listener down/unreachable -> 503 so Super Dispatch retries later.
+        return PlainTextResponse(f"listener unavailable: {e}", status_code=503)
 
 
 @app.get("/", response_class=HTMLResponse)

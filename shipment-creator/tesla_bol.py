@@ -221,7 +221,12 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
         await page.goto(config.TESLA_DASHBOARD_URL)
         await page.wait_for_load_state("domcontentloaded")
         if await _on_tesla_login(page):
-            raise RuntimeError("Tesla session is logged out (auth.tesla.com sign-in) — re-login then retry")
+            # Logged out: surface the (ghost) window so the human can sign in, then reload.
+            if not await _ensure_tesla_login(page, lock):
+                raise RuntimeError("Tesla session is logged out (auth.tesla.com sign-in) — "
+                                   "login not completed in time")
+            await page.goto(config.TESLA_DASHBOARD_URL)
+            await page.wait_for_load_state("domcontentloaded")
         await page.locator("button.search-btn").first.wait_for(timeout=20000)
         await _configure_filters(page)
         print(f"{tag} ready — {len(vins)} VIN(s)")
@@ -236,13 +241,22 @@ async def _worker(wid: int, page, vins: list[str], seen: dict, lock, results: di
         # Tesla login page. Detect it and stop cleanly — otherwise every remaining VIN
         # would be silently mis-reported as "no shipment found".
         if await _on_tesla_login(page):
-            unprocessed = [v for v in vins if v not in results]
-            print(f"{tag} Tesla session logged out mid-run — stopping; "
-                  f"{len(unprocessed)} VIN(s) unprocessed (re-login needed)")
-            for v in unprocessed:
-                results[v] = {"shp": None, "path": None, "need_by": None,
-                              "status": "tesla session logged out"}
-            return
+            # Mid-run logout (e.g. Akamai killing the session): surface the window for a
+            # human sign-in, then recover the dashboard and keep going. Only give up if the
+            # login isn't completed in time.
+            if await _ensure_tesla_login(page, lock):
+                await page.goto(config.TESLA_DASHBOARD_URL)
+                await page.wait_for_load_state("domcontentloaded")
+                await page.locator("button.search-btn").first.wait_for(timeout=20000)
+                await _configure_filters(page)
+            else:
+                unprocessed = [v for v in vins if v not in results]
+                print(f"{tag} Tesla login not completed — stopping; "
+                      f"{len(unprocessed)} VIN(s) unprocessed")
+                for v in unprocessed:
+                    results[v] = {"shp": None, "path": None, "need_by": None,
+                                  "status": "tesla session logged out"}
+                return
         try:
             card = await _search_vin(page, vin)
             if card is None:
@@ -354,7 +368,10 @@ async def _place_window(ctx, page):
     if config.HEADLESS:
         return
     if config.WINDOW_MODE == "ghost":
-        bounds = {"left": -32000, "top": -32000, "width": 1480, "height": 900, "windowState": "normal"}
+        # Minimize, not off-screen: some Linux WMs clamp off-screen positions back on-screen.
+        # Minimize hides reliably; the --disable-backgrounding/occlusion launch flags keep
+        # all tabs fully live while hidden.
+        bounds = {"windowState": "minimized"}
     else:
         return                                          # visible: leave Chrome's placement
     try:
@@ -363,6 +380,48 @@ async def _place_window(ctx, page):
         await sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds": bounds})
     except Exception:                                   # noqa: BLE001 - best-effort
         pass
+
+
+async def _surface_window(page):
+    """Bring OUR window ON-SCREEN and focus it — used when Tesla needs an interactive
+    login during a ghost run (the window is normally parked off-screen). Best-effort;
+    no-op under true headless (there's no window to show)."""
+    if config.HEADLESS:
+        return
+    try:
+        sess = await page.context.new_cdp_session(page)
+        wid = (await sess.send("Browser.getWindowForTarget"))["windowId"]
+        await sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds":
+            {"left": 120, "top": 60, "width": 1480, "height": 900, "windowState": "normal"}})
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        await page.bring_to_front()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+async def _ensure_tesla_login(page, lock, timeout_s: int = 600) -> bool:
+    """If `page` is on Tesla's sign-in screen, SURFACE the (ghost) window on-screen so a
+    human can sign in, wait up to `timeout_s` for the login to clear, then re-hide the
+    window. Serialized by `lock` so concurrent workers handle one shared login once.
+    Returns True once logged in (or if never logged out), False on timeout."""
+    if not await _on_tesla_login(page):
+        return True
+    async with lock:
+        if not await _on_tesla_login(page):            # another worker already cleared it
+            return True
+        print(f"🔓 Tesla login required — a browser window has been brought on-screen. "
+              f"Please sign in (waiting up to {max(1, timeout_s // 60)} min)…")
+        await _surface_window(page)
+        for _ in range(max(1, timeout_s // 2)):        # poll every 2s up to timeout
+            await page.wait_for_timeout(2000)
+            if not await _on_tesla_login(page):
+                print("✓ Tesla login detected — hiding the window and resuming.")
+                await _place_window(page.context, page)   # back off-screen (ghost)
+                return True
+        print("✗ Tesla login not completed in time — stopping the run.")
+        return False
 
 
 async def _open_run_window(browser, ctx, workers, launched):

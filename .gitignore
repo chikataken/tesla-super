@@ -9,6 +9,10 @@ instance.json
 active_profile.json
 **/active_profile.json
 
+# ───── local shipment-recorder mirror DB (runtime data, not shared) ─────
+**/data/recorder.db
+**/data/recorder.db-*
+
 # ───── customer data: input sheets + staged output (PII) ─────
 *.xlsx
 *.xls

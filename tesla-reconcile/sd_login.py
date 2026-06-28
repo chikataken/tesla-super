@@ -132,6 +132,24 @@ def _click_submit(page) -> None:
     page.keyboard.press("Enter")    # fallback: submit the form
 
 
+def _surface_window(page) -> None:
+    """Bring OUR (ghost/off-screen) Chrome window on-screen and focus it so a person can
+    resolve a captcha or enter a 2FA code. Best-effort; no-op under headless. Sync."""
+    if getattr(config, "HEADLESS", False):
+        return
+    try:
+        sess = page.context.new_cdp_session(page)
+        wid = sess.send("Browser.getWindowForTarget")["windowId"]
+        sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds":
+            {"left": 120, "top": 60, "width": 1480, "height": 900, "windowState": "normal"}})
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        page.bring_to_front()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def ensure_logged_in(page) -> bool:
     """If `page` is on the SD login screen, log in from Vaultwarden creds.
 
@@ -161,7 +179,8 @@ def ensure_logged_in(page) -> bool:
         page.wait_for_timeout(2500)
 
     if _visible_captcha(page):
-        log("sd_login: visible captcha on the login page — leaving it for a human")
+        log("sd_login: visible captcha on the login page — surfacing the window for a human")
+        _surface_window(page)
         return False
 
     # Step 1: username. Some SD logins are one page (user+pass together), some are
@@ -178,7 +197,7 @@ def ensure_logged_in(page) -> bool:
         _click_submit(page)                            # two-step: advance to password
         page.wait_for_timeout(2500)
         if _visible_captcha(page):
-            log("sd_login: captcha after username step — leaving it for a human"); return False
+            log("sd_login: captcha after username step — surfacing the window for a human"); _surface_window(page); return False
         pfield = _first_visible(page, _PASS_SELECTORS)
     if pfield is None:
         log("sd_login: could not find the password field"); return False
@@ -186,19 +205,20 @@ def ensure_logged_in(page) -> bool:
     time.sleep(random.uniform(0.3, 0.7))
 
     if _visible_captcha(page):
-        log("sd_login: captcha before submit — leaving it for a human"); return False
+        log("sd_login: captcha before submit — surfacing the window for a human"); _surface_window(page); return False
     _click_submit(page)
     page.wait_for_timeout(5000)
 
     # Verify outcome.
     if _visible_captcha(page):
-        log("sd_login: captcha after submit — leaving it for a human"); return False
+        log("sd_login: captcha after submit — surfacing the window for a human"); _surface_window(page); return False
     if not is_login_page(page):
         log("sd_login: re-login succeeded")
         return True
     # Still on a login-ish page — likely a 2FA email/SMS code prompt we can't fill.
     if page.locator("input[autocomplete=one-time-code], input[name*=code], input[name*=otp]").count():
-        log("sd_login: SD wants a 2FA code (email/SMS) — can't auto-fill; needs a human")
+        log("sd_login: SD wants a 2FA code (email/SMS) — can't auto-fill; surfacing for a human")
+        _surface_window(page)
     else:
         log("sd_login: still on the login page after submit — wrong creds or unknown layout")
     return False

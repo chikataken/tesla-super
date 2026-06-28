@@ -124,6 +124,31 @@ def _click_submit(page) -> None:
     page.keyboard.press("Enter")    # fallback: submit the form
 
 
+def _surface_window(page) -> None:
+    """Bring OUR (ghost/off-screen) Chrome window on-screen and focus it so a person can
+    resolve a captcha or enter a 2FA code. Best-effort; no-op under headless. Sync."""
+    if getattr(config, "HEADLESS", False):
+        return
+    try:
+        sess = page.context.new_cdp_session(page)
+        wid = sess.send("Browser.getWindowForTarget")["windowId"]
+        sess.send("Browser.setWindowBounds", {"windowId": wid, "bounds":
+            {"left": 120, "top": 60, "width": 1480, "height": 900, "windowState": "normal"}})
+    except Exception:                                   # noqa: BLE001
+        pass
+    try:
+        page.bring_to_front()
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
+def _needs_human(page, reason: str) -> str:
+    """Surface the window (so a human can act on the captcha/2FA), then return the reason
+    code unchanged. The worker's auth-gate re-probe loop resumes once it's resolved."""
+    _surface_window(page)
+    return reason
+
+
 def ensure_logged_in(page) -> str:
     """If `page` is on the SD login screen, log in from Vaultwarden creds.
 
@@ -137,7 +162,7 @@ def ensure_logged_in(page) -> str:
 
     if _visible_captcha(page):
         log("visible captcha on the login page — leaving it for a human")
-        return "captcha"
+        return _needs_human(page, "captcha")
 
     item = os.getenv("BW_SD_ITEM", "SuperDispatch").strip()
     try:
@@ -164,7 +189,7 @@ def ensure_logged_in(page) -> str:
         _click_submit(page)                            # two-step: advance to password
         page.wait_for_timeout(2500)
         if _visible_captcha(page):
-            log("captcha after username step — leaving it for a human"); return "captcha"
+            log("captcha after username step — leaving it for a human"); return _needs_human(page, "captcha")
         pfield = _first_visible(page, _PASS_SELECTORS)
     if pfield is None:
         log("could not find the password field"); return "unknown"
@@ -172,20 +197,20 @@ def ensure_logged_in(page) -> str:
     time.sleep(random.uniform(0.3, 0.7))
 
     if _visible_captcha(page):
-        log("captcha before submit — leaving it for a human"); return "captcha"
+        log("captcha before submit — leaving it for a human"); return _needs_human(page, "captcha")
     _click_submit(page)
     page.wait_for_timeout(5000)
 
     # Verify outcome.
     if _visible_captcha(page):
-        log("captcha after submit — leaving it for a human"); return "captcha"
+        log("captcha after submit — leaving it for a human"); return _needs_human(page, "captcha")
     if not is_login_page(page):
         log("re-login succeeded")
         return LOGIN_OK
     # Still on a login-ish page — likely a 2FA email/SMS code prompt we can't fill.
     if page.locator("input[autocomplete=one-time-code], input[name*=code], input[name*=otp]").count():
         log("SD wants a 2FA code (email/SMS) — can't auto-fill; needs a human")
-        return "2fa"
+        return _needs_human(page, "2fa")
     log("still on the login page after submit — wrong creds or unknown layout")
     return "unknown"
 

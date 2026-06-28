@@ -26,9 +26,12 @@ from typing import Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 
 import config
 import db
+import sd_client
+import recorder_sink
 from logging_setup import setup, get_logger
 
 setup("listener")
@@ -78,6 +81,31 @@ def extract_fields(payload: dict) -> dict:
         guid = f"{action}:{order_guid}:{occurred_at or ''}"
     return {"guid": guid, "action": action, "order_guid": order_guid,
             "occurred_at": occurred_at}
+
+
+# --------------------------------------------------------------------------
+# Recorder fan-out. Independent of the direct-pickup queue/worker: for ANY accepted
+# event we fetch the full order and mirror it into the shipment-recorder DB, so the
+# Recorded page live-updates. Runs as a Starlette BackgroundTask (sync fn → threadpool)
+# AFTER the 200 is sent, and is fully wrapped so a recorder failure never affects the
+# ack or the pickup pipeline.
+# --------------------------------------------------------------------------
+def _recorder_fanout(order_guid: Optional[str], action: Optional[str],
+                     occurred_at: Optional[str], payload_text: str) -> None:
+    if not order_guid:
+        return
+    try:
+        order = None
+        try:
+            order = sd_client.get_order(order_guid)
+        except Exception as e:                               # noqa: BLE001
+            log.warning("recorder fanout get_order failed",
+                        extra={"order_guid": order_guid, "err": str(e)[:200]})
+        recorder_sink.record_and_upsert(order_guid, action, occurred_at, payload_text, order)
+        log.info("recorder updated", extra={"order_guid": order_guid, "action": action,
+                                            "status": recorder_sink.derive_status(order) if order else None})
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("recorder fanout failed", extra={"order_guid": order_guid, "err": str(e)[:200]})
 
 
 def _token_ok(token: Optional[str]) -> bool:
@@ -131,14 +159,17 @@ async def webhook(request: Request) -> Response:
         guid=f["guid"], action=f["action"] or "", order_guid=f["order_guid"],
         occurred_at=f["occurred_at"], raw_payload=raw_text,
     )
+    # (4) ack fast. 200 whether new or duplicate — a duplicate is success from SD's
+    # perspective (we already have it), and acking stops the retry storm. On a NEW
+    # event, fan out to the recorder AFTER the response (BackgroundTask), so the
+    # Recorded mirror updates live without slowing the ack.
     if accepted:
         log.info("accepted", extra={"guid": f["guid"], "action": f["action"],
                                     "order_guid": f["order_guid"]})
-    else:
-        log.info("duplicate dropped", extra={"guid": f["guid"], "action": f["action"]})
-
-    # (4) ack fast. 200 whether new or duplicate — a duplicate is success from SD's
-    # perspective (we already have it), and acking stops the retry storm.
+        return Response(status_code=200, content="ok",
+                        background=BackgroundTask(_recorder_fanout, f["order_guid"],
+                                                  f["action"], f["occurred_at"], raw_text))
+    log.info("duplicate dropped", extra={"guid": f["guid"], "action": f["action"]})
     return Response(status_code=200, content="ok")
 
 
