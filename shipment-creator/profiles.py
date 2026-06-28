@@ -209,6 +209,40 @@ def row_pickup_state(row) -> str:
     return _norm_state(row.get("pickup_state"))
 
 
+def order_pickup_state(order) -> str:
+    """The effective PICKUP region of a STAGED ORDER (board JSON), same DC-ZIP-wins rule
+    as row_pickup_state but reading the order's pickup venue."""
+    venue = ((order or {}).get("pickup") or {}).get("venue") or {}
+    if _is_dc_zip(venue.get("zip")):
+        return "DC"
+    return _norm_state(venue.get("state"))
+
+
+def phone_for_state(state) -> str | None:
+    """Phone of the dispatcher who COVERS `state` (the per-state owner). Bypass profiles
+    (Didi) don't own states, so they're skipped. None if nobody covers it."""
+    st = _norm_state(state)
+    if not st:
+        return None
+    for p in list_profiles():
+        if p.get("id") in BYPASS_FILTER_IDS:
+            continue
+        if st in {_norm_state(s) for s in (p.get("states") or []) if str(s).strip()}:
+            return (p.get("phone") or "").strip() or None
+    return None
+
+
+def dispatcher_phone_for_order(order, profile: dict | None = None) -> str | None:
+    """The <dispatcher> phone to stamp on THIS order. A normal dispatcher uses its own
+    phone for every order. A BYPASS profile (Didi) piggybacks off the others: it stamps
+    the phone of whichever dispatcher owns the order's pickup state — so each order carries
+    its region's rep — falling back to the bypass profile's own phone if nobody covers it."""
+    p = profile if profile is not None else active_profile()
+    if (p or {}).get("id") in BYPASS_FILTER_IDS:
+        return phone_for_state(order_pickup_state(order)) or dispatcher_phone(p)
+    return dispatcher_phone(p)
+
+
 def allowed_states(profile: dict | None) -> set:
     # Bypass profiles (didi) are unfiltered by design — never apply a state cap, even if a
     # `states` list somehow got saved on them. An empty set means filter_rows keeps every row.

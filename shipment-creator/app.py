@@ -969,13 +969,15 @@ def api_post(body: dict = Body(...)):
                 board = json.load(f)
         except (OSError, ValueError):
             board = []
-    dispatcher = profiles.dispatcher_phone(profiles.get_profile(_pid()))  # phone of the POSTING profile
+    _prof = profiles.get_profile(_pid())               # posting profile (Didi piggybacks per state)
     payloads = []
     for o in board:
         total, _per = _effective_prices(o)             # override total, else sum of rates
         # The exact SuperDispatch create body: one carrier payment (no per-VIN price),
-        # the check/15-day payment block, and the instruction templates.
-        payloads.append(sd_api.to_sd_order(o, total=total, dispatcher=dispatcher))
+        # the check/15-day payment block, and the instruction templates. The <dispatcher>
+        # phone is resolved per-order: Didi stamps the phone of whoever owns its pickup state.
+        payloads.append(sd_api.to_sd_order(
+            o, total=total, dispatcher=profiles.dispatcher_phone_for_order(o, _prof)))
     # TODO (next): also read consolidations.json and PATCH staged VINs onto the
     # matched existing SD orders (build_vehicles_merge), then actually POST these.
     consol = _load_json(_consol_path(), [])
@@ -1005,8 +1007,9 @@ def api_post_live(body: dict = Body(...)):
     if not o:
         raise HTTPException(404, "that shipment isn't on the board")
     total, _per = _effective_prices(o)
-    payload = sd_api.to_sd_order(o, total=total,
-                                 dispatcher=profiles.dispatcher_phone(profiles.get_profile(_pid())))
+    payload = sd_api.to_sd_order(
+        o, total=total,
+        dispatcher=profiles.dispatcher_phone_for_order(o, profiles.get_profile(_pid())))
     try:
         res = sd_api.create_order(payload, dry_run=False)
     except sd_api.SDError as e:
@@ -1029,7 +1032,7 @@ def api_post_all(body: dict = Body(default=None)):
                                  "terminals). Switch to a dispatcher profile to post.")
     import sd_api
     import profiles
-    dispatcher = profiles.dispatcher_phone(profiles.get_profile(_pid()))  # phone of the POSTING profile
+    _prof = profiles.get_profile(_pid())               # posting profile (Didi piggybacks per state)
 
     path = _staged_files()[0] if _staged_files() else None
     board = []
@@ -1044,7 +1047,8 @@ def api_post_all(body: dict = Body(default=None)):
     for o in board:
         try:
             total, _per = _effective_prices(o)
-            payload = sd_api.to_sd_order(o, total=total, dispatcher=dispatcher)
+            payload = sd_api.to_sd_order(
+                o, total=total, dispatcher=profiles.dispatcher_phone_for_order(o, _prof))
             sd_api.create_order(payload, dry_run=False)
             posted_vins += len(o.get("vehicles") or [])
         except sd_api.SDError as e:
