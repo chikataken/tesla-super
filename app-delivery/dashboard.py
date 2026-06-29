@@ -271,7 +271,7 @@ async function tick(){
  document.getElementById('dropoffs').textContent = d.stats.dropoffs;
  document.getElementById('last').textContent = d.last_seen
    ? (d.last_seen_age_s<60?`${d.last_seen_age_s}s ago`:d.last_seen.replace('T',' ')) : '—';
- document.getElementById('current').textContent = d.current_vin || (up?'idle — waiting for shipments':'—');
+ document.getElementById('current').textContent = d.current_vin || (up?'idle - add "Andrew Enkh 3106925984" as driver to auto mark':'—');
  document.getElementById('gen').textContent = 'updated '+(d.generated_at||'').replace('T',' ');
  document.getElementById('log').textContent = (d.log||[]).join('\\n') || '(no shipment marked yet)';
  const lg=document.getElementById('log'); lg.scrollTop=lg.scrollHeight;

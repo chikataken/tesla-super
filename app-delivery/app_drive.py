@@ -145,9 +145,20 @@ def shot(tag=""):
 
 
 def dump():
-    """Return list of nodes: {rid,text,desc,clickable,bounds:(x1,y1,x2,y2),cx,cy}."""
-    adb("shell", "uiautomator", "dump", "/sdcard/ui.xml")
-    xml = shell("cat /sdcard/ui.xml")
+    """Return list of nodes: {rid,text,desc,clickable,bounds,cx,cy}, or [] when
+    uiautomator can't produce a FRESH tree.
+
+    Critical wedge case: when the app is stuck on an animating spinner (e.g. the login
+    screen frozen mid-load), the UI never goes idle, so `uiautomator dump` fails with
+    'could not get idle state' and writes NOTHING. We delete the file FIRST so a failed
+    dump can't silently read the stale last-good tree (which would make the wedged app
+    look like a healthy home screen). A [] result is the wedge signal — goto_in_transit_
+    home() then counts it as 'nothing actionable' and force-restarts the app."""
+    shell("rm -f /sdcard/ui.xml")
+    adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", timeout=25)
+    xml = shell("cat /sdcard/ui.xml 2>/dev/null")
+    if "<node" not in xml:                     # dump failed -> app wedged / UI not idle
+        return []
     nodes = []
     for m in re.finditer(r"<node[^>]*?>", xml):
         s = m.group(0)
@@ -1074,12 +1085,32 @@ def process_cycle(confirm, max_shipments):
     return (n_pick, n_drop)
 
 
+# Overnight the queues are quiet, so poll far less often (the day cadence is --watch).
+NIGHT_INTERVAL = int(os.environ.get("DRIVE_NIGHT_INTERVAL", "600"))   # 8PM–7AM: every 10 min
+NIGHT_START_HOUR = int(os.environ.get("DRIVE_NIGHT_START", "20"))     # 8 PM (host local time)
+NIGHT_END_HOUR = int(os.environ.get("DRIVE_NIGHT_END", "7"))          # 7 AM
+
+
+def _is_night(hour=None):
+    """True during the quiet overnight window (default 8PM–7AM, host local time)."""
+    h = datetime.datetime.now().hour if hour is None else hour
+    s, e = NIGHT_START_HOUR, NIGHT_END_HOUR
+    return (h >= s or h < e) if s > e else (s <= h < e)
+
+
+def poll_interval(day_interval):
+    """Seconds to sleep between cycles: NIGHT_INTERVAL overnight, else the day value."""
+    return NIGHT_INTERVAL if _is_night() else day_interval
+
+
 def serve(interval, confirm, max_shipments):
-    """Run forever: keep the emulator + app alive, poll every `interval` seconds, and
-    PICK UP + DROP OFF whatever has arrived. Survives emulator crashes, app crashes,
-    and per-cycle errors (each is logged; the loop continues)."""
-    log(f"service up: pick up + drop off every {interval}s "
-        f"(confirm={confirm}, max {max_shipments}/queue). Ctrl-C to stop.")
+    """Run forever: keep the emulator + app alive, poll, and PICK UP + DROP OFF whatever
+    has arrived. Polls every `interval`s during the day and every NIGHT_INTERVAL overnight
+    (8PM–7AM). Survives emulator crashes, app crashes, and per-cycle errors (each logged;
+    the loop continues)."""
+    log(f"service up: pick up + drop off (day every {interval}s, overnight "
+        f"{NIGHT_START_HOUR:02d}:00–{NIGHT_END_HOUR:02d}:00 every {NIGHT_INTERVAL}s; "
+        f"confirm={confirm}, max {max_shipments}/queue). Ctrl-C to stop.")
     idle = True
     cycle = 0
     while True:
@@ -1087,7 +1118,7 @@ def serve(interval, confirm, max_shipments):
         try:
             if not ensure_emulator():
                 log("  emulator unavailable; retrying next cycle.")
-                time.sleep(interval); continue
+                time.sleep(poll_interval(interval)); continue
             ensure_app()
             grant_location()
             n_pick, n_drop = process_cycle(confirm, max_shipments)
@@ -1103,7 +1134,7 @@ def serve(interval, confirm, max_shipments):
         except Exception as e:
             import traceback
             log(f"  ! cycle {cycle} error: {e}\n{traceback.format_exc()}")
-        time.sleep(interval)
+        time.sleep(poll_interval(interval))
 
 
 def main():
