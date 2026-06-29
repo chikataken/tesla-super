@@ -2143,7 +2143,7 @@ async function syncTally(){
   const excelBtn = `<button class="btn excelbtn${hasBoard?' loaded':''}" onclick="openPaste()"`
     + ` title="Add shipments — paste cells from Excel/Sheets, or pick an .xlsx file">Excel +</button>`;
 
-  if(!hasBoard){ el.innerHTML=excelBtn; if(np) np.innerHTML=''; _lastProcessed=-1; return; }
+  if(!hasBoard){ el.innerHTML=excelBtn; if(np) np.innerHTML='<button class="btn ghostpost" disabled title="Load a board to enable posting">Post to SuperDispatch</button>'; _lastProcessed=-1; return; }
 
   // No "N / N VINs processed" counter — only the Excel+ button shows here.
   el.innerHTML = excelBtn;
