@@ -14,10 +14,20 @@ import from their folders (it only reuses the shared credentials in
    fetch order details, record/upsert the shipment (+ VINs), push a live UI update.
 2. **Photos available → VIN check** — on `order.picked_up_bol` (fires *later*, once
    the pickup BOL/photos exist): open the order in the Super Dispatch **web app**,
-   download the **pickup** inspection photos, read each shipment VIN off them with
-   **easyOCR**, and apply tags to the order:
+   download the **pickup** inspection photos, and confirm each shipment VIN is
+   present in them with **Claude vision** (default; on-device easyOCR is a fallback).
+   A cheap on-device OCR pass first picks the **candidate** photos that plausibly
+   show the VIN, and **only those** are sent to Claude (cost control) — then apply
+   tags to the order:
    - every VIN in the shipment found in the photos → tags **`VIN`** + **`CLAUDE`**
    - any VIN missing / unreadable / not matched → tags **`NO VIN`** + **`CLAUDE`**
+
+   > **Presence anywhere, not placement.** Unlike the sibling `tesla-reconcile`
+   > (which requires the VIN to be a *permanent part of the car* — windshield/door-
+   > jamb/dash — and rejects it on a key fob or paperwork), this check only asks
+   > whether the VIN is **legible anywhere in the photo set**. Any surface counts:
+   > the key tag, a printout, the BOL, a sticker, the windshield, the dash — all
+   > fine. The only question is presence.
 
 > ⚠️ **The timing rule that's easy to get wrong:** the order's status flips to
 > picked up **before** the driver's photos finish uploading. So the photo job is
@@ -74,8 +84,9 @@ direct-pickup-checks/
 ├── worker.py            # queue consumer: two-tier routing; API enrich + Playwright tag flow
 ├── browser.py           # Playwright CDP/launch context (copied from tesla-reconcile/auth.py)
 ├── sd_web.py            # SD web ops: find order, download PICKUP photos, edit tags (copied/adapted)
-├── ocr.py               # easyOCR VIN reader (copied from tesla-reconcile/ocr.py)
-├── tagging.py           # decide_order_tags(): per-shipment VIN/NO VIN decision via ocr.py
+├── vision.py            # DEFAULT VIN check: Claude vision — VIN legible ANYWHERE in the set
+├── ocr.py               # fallback VIN check: easyOCR reader (copied from tesla-reconcile/ocr.py)
+├── tagging.py           # decide_order_tags(): per-shipment VIN/NO VIN decision (claude|ocr)
 ├── subscribe.py         # one-shot: actions / list / subscribe / unsubscribe
 ├── verify_api.py        # READ-ONLY probe: auth, webhook actions, order fields, photo shape
 ├── run_login.py         # one-time SD web login (saves the shared browser session)
@@ -91,22 +102,26 @@ direct-pickup-checks/
 ```bash
 cd direct-pickup-checks
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt      # NOTE: easyocr pulls torch (~1GB download)
+pip install -r requirements.txt      # NOTE: the ocr fallback (easyocr) pulls torch (~1GB)
 playwright install chromium          # browser for the web-app photo/tag steps
 cp .env.example .env                 # fill in the webhook-specific values
 python config.py                     # prints resolved config (secrets masked) — sanity check
-python -m pytest -q                  # 21 tests; API + browser + OCR all mocked
+python -m pytest -q                  # 29 tests; API + browser + Claude + OCR all mocked
 python run_login.py                  # one-time: log into Super Dispatch (shared profile)
 ```
 
 The browser profile is **shared** with `tesla-reconcile` / `shipment-creator`
 (same `CDP_PROFILE_DIR`), so if you've already logged in there, `run_login.py` is a
 no-op. On a **headless Linux server**, either set `AUTH_MODE=launch` + `HEADLESS=true`,
-or run under `xvfb` (see the worker unit). Tests need neither a browser nor torch.
+or run under `xvfb` (see the worker unit). Tests need neither a browser, the
+`anthropic` SDK, nor torch (the Claude and OCR layers are both mocked).
 
-> **No Claude / external vision API.** VIN reading is 100% on-device (easyOCR /
-> Tesseract in `ocr.py`); inspection photos are never sent to Claude or anywhere
-> else. `CLAUDE` is only the literal tag label. (`anthropic` isn't a dependency.)
+> **VIN check engine.** Default is **Claude vision** (`vision.py`): a cheap on-device
+> OCR pass (`ocr.scan_for_vin`) picks the candidate photos that plausibly show the
+> VIN, then *only those* are downscaled and sent to Claude to confirm the VIN is
+> legible *anywhere* in them. (So the claude path still needs easyOCR/torch for the
+> pre-filter.) Set `VIN_CHECK_ENGINE=ocr` to do it 100% **on-device** with no API
+> calls and no photos leaving the box. The `CLAUDE` tag label is applied either way.
 
 ## Run
 
@@ -150,7 +165,11 @@ webhook-specific keys below.
 | `AUTH_MODE` | no | `launch` (Mac/Linux default) or `cdp` (attach to real Chrome). |
 | `HEADLESS` / `WINDOW_MODE` | no | Browser visibility. Headless server → `HEADLESS=true`. |
 | `CDP_PROFILE_DIR` / `USER_DATA_DIR` | no | Browser profile dirs (CDP profile shared with siblings). |
-| `OCR_ENGINE` / `OCR_ROTATIONS` | no | `easyocr` (default) or `tesseract`; rotate-retry angles. |
+| `VIN_CHECK_ENGINE` | no | `claude` (default, Claude vision) or `ocr` (on-device). |
+| `ANTHROPIC_API_KEY` | yes (for `claude`) | Claude API key (inherited from `../secrets/.env`). |
+| `VISION_MODEL` | no | Vision model (default `claude-sonnet-4-6`). |
+| `VISION_MAX_SIDE` / `VISION_JPEG_QUALITY` | no | Photo downscale before upload (default `1568` / `90`). |
+| `OCR_ENGINE` / `OCR_ROTATIONS` / `OCR_MIN_RUN` | no | OCR reader settings — used by the `ocr` engine **and** the `claude` engine's candidate pre-filter: `easyocr` (default) or `tesseract`; rotate-retry angles; min VIN-char run to flag a candidate. |
 | `TAG_VIN` / `TAG_NO_VIN` / `TAG_BOT` | no | Tag labels (default `VIN` / `NO VIN` / `CLAUDE`). |
 
 Tunnel credentials are **never stored in this repo** — they live in `~/.cloudflared`
@@ -218,21 +237,36 @@ python subscribe.py unsubscribe <subscription_guid>
 
 ## The VIN check + tagging step
 
-The decision lives in `tagging.decide_order_tags(groups, expected_vins)`:
+The decision lives in `tagging.decide_order_tags(groups, expected_vins, engine=…)`:
 - `expected_vins` come from the API order (authoritative).
 - `groups` are the downloaded pickup photos grouped per vehicle.
-- For each VIN it calls `ocr.scan_for_vin(images, vin)` (easyOCR with the smart
-  rotation fallback, copied from `tesla-reconcile/ocr.py`). Non-empty → found.
+- For each VIN, the configured engine confirms presence:
+  - **`claude`** (default) → `ocr.scan_for_vin(pool, vin)` first selects the
+    candidate photos (rotation-aware, ranked, surface-agnostic) from the whole pool;
+    `vision.vin_present_in_photos(candidates, vin)` then asks Claude whether that VIN
+    is legible *anywhere* in them, on *any* surface (key fob / paperwork / sticker /
+    dash / windshield — placement does not matter). `vin_present` true → found. One
+    call per VIN; **no** candidates → not found, **no** API call. (Trade-off: a VIN
+    too faint for the OCR pre-filter at any rotation never reaches Claude — lower
+    `OCR_MIN_RUN` to widen the net.)
+  - **`ocr`** → `ocr.scan_for_vin(images, vin)` (easyOCR with the smart rotation
+    fallback, copied from `tesla-reconcile/ocr.py`), scanning the VIN's own section
+    first. Non-empty → found.
 - **All** VINs found → `["VIN", "CLAUDE"]`; otherwise → `["NO VIN", "CLAUDE"]`.
+
+Either engine degrades to **not found** (→ `NO VIN`) on an error rather than
+crashing the tag flow. Switch engines with `VIN_CHECK_ENGINE` in `.env`.
 
 `worker.handle_bol_event` then drives the web app (`sd_web.py`) to apply those tags
 on the order's edit page (`add_tags` — clear-then-set, SD caps an order at 3 tags).
 The result is recorded in the `tags` table (one row per order, idempotent) and
 pushed to the UI feed.
 
-Per the isolation rule, `browser.py`, `sd_web.py`, and `ocr.py` are **copies** of
-the tesla-reconcile logic, not imports. The one behavioral change in `sd_web.py` is
-collecting the **Pickup** Inspection photos (the sibling collected Delivery).
+Per the isolation rule, `browser.py`, `sd_web.py`, `ocr.py`, and `vision.py` are
+**copies/adaptations** of the tesla-reconcile logic, not imports. Two behavioral
+changes: `sd_web.py` collects the **Pickup** Inspection photos (the sibling
+collected Delivery), and `vision.py` checks VIN **presence anywhere** (the sibling
+requires the VIN to be physically on the car — see the callout above).
 
 ## UI push
 
@@ -249,10 +283,11 @@ python -m pytest -q
 
 Covers: the listener (validates token, dedups, acks fast, enqueues, makes no API
 calls), worker routing (status event uses the API and never opens a browser; BOL
-event runs the Playwright flow), the VIN-check decision (`VIN` vs `NO VIN` via a
-mocked `ocr.scan_for_vin`), tag application, and idempotency (a redelivered BOL
-event doesn't re-tag). Every external layer — the SD API, the browser, the SD web
-ops, and OCR — is **mocked**: no live calls, no real browser, no torch.
+event runs the Playwright flow), the VIN-check decision (`VIN` vs `NO VIN`) for
+**both** engines via a mocked `vision.vin_present_in_photos` (claude) and
+`ocr.scan_for_vin` (ocr), tag application, and idempotency (a redelivered BOL event
+doesn't re-tag). Every external layer — the SD API, the browser, the SD web ops,
+Claude, and OCR — is **mocked**: no live calls, no real browser, no API key, no torch.
 
 ---
 

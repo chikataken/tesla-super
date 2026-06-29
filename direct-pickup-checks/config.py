@@ -112,6 +112,28 @@ TAG_NAME_MARKERS = tuple(
     if m.strip()
 )
 
+# --- VIN check engine -------------------------------------------------------
+# How a shipment VIN is confirmed in the pickup photos (tagging.decide_order_tags):
+#   "claude" (default) -> on-device OCR (ocr.scan_for_vin) pre-selects the candidate
+#                         photos that plausibly show the VIN; ONLY those are sent to
+#                         Claude vision (vision.py), which confirms the VIN is legible
+#                         ANYWHERE in them, on ANY surface (key fob/paperwork/sticker/
+#                         dash/windshield — placement does NOT matter). Pre-filtering
+#                         keeps cost down; the claude path still needs the OCR deps.
+#   "ocr"              -> on-device easyOCR/Tesseract reader only (ocr.py), no API calls.
+# Unlike the sibling tesla-reconcile, this check does NOT require the VIN to be
+# physically on the car — any legible match counts (including on the key).
+VIN_CHECK_ENGINE = os.getenv("VIN_CHECK_ENGINE", "claude").strip().lower()
+
+# --- Claude vision (used when VIN_CHECK_ENGINE=claude) -----------------------
+# API key resolves like the other secrets (real env > app .env > ../secrets/.env).
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+VISION_MODEL = os.getenv("VISION_MODEL", "claude-sonnet-4-6").strip()
+# Photos are downscaled before upload (cost control). 1568px / q90 is Claude's
+# high-fidelity image sweet spot — enough to read a faint VIN without wasting tokens.
+VISION_MAX_SIDE = int(os.getenv("VISION_MAX_SIDE", "1568"))
+VISION_JPEG_QUALITY = int(os.getenv("VISION_JPEG_QUALITY", "90"))
+
 
 def callback_url() -> str:
     """The public callback URL registered with Super Dispatch (tunnel + path)."""
@@ -196,4 +218,8 @@ if __name__ == "__main__":
           f"{callback_url() if TUNNEL_PUBLIC_URL else '(set TUNNEL_PUBLIC_URL)'}")
     print(f"DATA_DIR             = {DATA_DIR}")
     print(f"DB_PATH              = {DB_PATH}")
+    print(f"VIN_CHECK_ENGINE     = {VIN_CHECK_ENGINE}")
+    if VIN_CHECK_ENGINE == "claude":
+        print(f"VISION_MODEL         = {VISION_MODEL}")
+        print(f"ANTHROPIC_API_KEY    = {_mask(ANTHROPIC_API_KEY)}")
     print(f"SUBSCRIBE_ACTIONS    = {', '.join(SUBSCRIBE_ACTIONS)}")

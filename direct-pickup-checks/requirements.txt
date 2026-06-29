@@ -15,10 +15,18 @@ pyotp>=2.9               # TOTP (unused for SD email/SMS 2FA, kept for parity)
 # --- Playwright web automation (open order, download pickup photos, edit tags) ---
 playwright>=1.44         # drives the SD web app; run `playwright install chromium`
 
-# --- OCR (read VINs off the pickup photos) ---
-# Copied from tesla-reconcile/ocr.py. easyocr is the default engine and pulls in
-# torch (~1GB download). pytesseract is the lighter fallback (OCR_ENGINE=tesseract,
-# needs the system `tesseract` binary).
+# --- VIN check: Claude vision (default engine, VIN_CHECK_ENGINE=claude) ---
+# vision.py sends the OCR-selected candidate photos to Claude to confirm the VIN is
+# legible ANYWHERE in them (any surface — see vision.py). pillow (below) downscales
+# first. NOTE: the claude engine still needs the OCR deps below for its pre-filter.
+anthropic>=0.40
+
+# --- OCR (used by BOTH engines) ---
+# Copied from tesla-reconcile/ocr.py. The `ocr` engine reads VINs entirely on-device;
+# the `claude` engine uses the SAME reader to pre-select which photos to send. easyocr
+# pulls in torch (~1GB download); pytesseract is the lighter alternative
+# (OCR_ENGINE=tesseract, needs the system `tesseract` binary). pillow is used by both
+# the OCR reader and vision.py's downscale.
 easyocr>=1.7
 pillow>=10.0
 pytesseract>=0.3.10

@@ -20,10 +20,14 @@ import os
 import sqlite3
 import time
 
-# Default to the test site's DB; override with RECORDER_DB.
-RECORDER_DB = os.getenv(
-    "RECORDER_DB",
-    "/home/mbdtf/projects/tesla-super/shipment-creator-test/data/recorder.db")
+# Mirror the recorder into BOTH the prod and test site DBs, so each site's Recorded
+# tab stays live. Override with RECORDER_DB (comma-separated paths) to change the set.
+_DEFAULT_RECORDER_DBS = (
+    "/home/mbdtf/projects/tesla-super/shipment-creator/data/recorder.db",        # prod
+    "/home/mbdtf/projects/tesla-super/shipment-creator-test/data/recorder.db",   # test
+)
+RECORDER_DBS = [p.strip() for p in
+                os.getenv("RECORDER_DB", ",".join(_DEFAULT_RECORDER_DBS)).split(",") if p.strip()]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS orders (
@@ -48,9 +52,9 @@ CREATE INDEX IF NOT EXISTS ix_events_uuid   ON events(web_uuid);
 """
 
 
-def connect() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(RECORDER_DB), exist_ok=True)
-    con = sqlite3.connect(RECORDER_DB, timeout=30)
+def connect(db_path: str) -> sqlite3.Connection:
+    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    con = sqlite3.connect(db_path, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA busy_timeout=30000")
@@ -164,15 +168,20 @@ def upsert_from_order(con: sqlite3.Connection, o: dict) -> None:
 
 def record_and_upsert(order_guid: str, action: str | None, occurred_at: str | None,
                       payload_text: str | None, order: dict | None) -> None:
-    """One-call helper for the listener fan-out: open, log the event, upsert the
-    snapshot (if we fetched the order), commit, close. Never raises."""
-    con = connect()
-    try:
-        number = (order or {}).get("number")
-        status = derive_status(order) if order else None
-        record_event(con, order_guid, action, occurred_at, number, status, payload_text)
-        if order:
-            upsert_from_order(con, order)
-        con.commit()
-    finally:
-        con.close()
+    """One-call helper for the listener fan-out: log the event + upsert the snapshot
+    (if we fetched the order) into EVERY recorder DB (prod + test mirror), commit, close.
+    Never raises — one DB failing doesn't stop the others or the listener."""
+    number = (order or {}).get("number")
+    status = derive_status(order) if order else None
+    for db_path in RECORDER_DBS:
+        try:
+            con = connect(db_path)
+            try:
+                record_event(con, order_guid, action, occurred_at, number, status, payload_text)
+                if order:
+                    upsert_from_order(con, order)
+                con.commit()
+            finally:
+                con.close()
+        except Exception:                       # never let one DB break the listener
+            pass
