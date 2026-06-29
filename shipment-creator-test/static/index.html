@@ -495,7 +495,7 @@
   .spare-row.pending{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset;background:#e8f0fe}
 
   #toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);background:#222833;
-    border:1px solid var(--line);color:var(--text);padding:9px 16px;border-radius:10px;
+    border:1px solid var(--line);color:#fff;padding:9px 16px;border-radius:10px;
     font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:40}
 
   .form{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;
@@ -669,6 +669,10 @@
      non-clickable placeholder (keeps the layout, but it's clearly inert). Inert on prod. */
   body.testmode .navpost .btn.green{background:transparent!important;color:var(--muted)!important;
     border:1px dashed var(--line)!important;box-shadow:none!important;cursor:default;pointer-events:none}
+  /* Transparent "Post to SuperDispatch" placeholder — keeps the top bar's width static
+     when there's no live post action (initial load / ALL profile). */
+  .navpost .btn.ghostpost{background:transparent;color:var(--muted);border:1px dashed var(--line);
+    box-shadow:none;cursor:default;pointer-events:none;font-weight:600}
 </style>
 </head>
 <body>
@@ -733,7 +737,7 @@
   </div>
   <div class="tabs">
     <div id="tally" class="tally"></div>
-    <span id="navpost" class="navpost"></span>
+    <span id="navpost" class="navpost"><button class="btn ghostpost" disabled>Post to SuperDispatch</button></span>
   </div>
 </header>
 
@@ -2148,7 +2152,7 @@ async function syncTally(){
   // Disabled only for the ALL profile; shows "Scanning…" while a run is still in progress.
   if(np){
     if(ACTIVE_PROFILE==='all'){
-      np.innerHTML=`<span class="navpostlbl" title="ALL is a developer profile for feeding the terminal cache — posting is disabled">Posting disabled (ALL)</span>`;
+      np.innerHTML=`<button class="btn ghostpost" disabled title="ALL is a developer profile for feeding the terminal cache — posting is disabled">Post to SuperDispatch</button>`;
     } else if(running){
       if(!_wasRunning) _wasRunning=true;
       np.innerHTML=`<button class="btn amber" disabled title="Finishing the SuperDispatch loadboard scan — posting unlocks when the scan is in">Scanning loadboard…<span class="dots"><span>.</span><span>.</span><span>.</span></span></button>`;
