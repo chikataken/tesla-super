@@ -214,6 +214,34 @@ def ensure_chrome():
     raise RuntimeError(f"Chrome did not open the CDP endpoint {config.CDP_URL} within 30s")
 
 
+def _kill_cdp_chrome() -> None:
+    """Force-kill whatever Chrome is serving the CDP debug port. Used to recover from a
+    browser left in a bad state (see _ensure_and_connect)."""
+    port = config.CDP_URL.rsplit(":", 1)[-1].strip("/")
+    try:
+        subprocess.run(["pkill", "-f", f"remote-debugging-port={port}"], timeout=5)
+    except Exception:                                    # noqa: BLE001 - pkill missing/non-unix
+        pass
+    time.sleep(1.5)
+
+
+def _ensure_and_connect(p):
+    """ensure_chrome() + connect_over_cdp(), with one self-heal retry.
+
+    connect_over_cdp can fail with "Browser.setDownloadBehavior: Browser context
+    management is not supported" when re-attaching to a Chrome that's been left in a bad
+    state (a stale/abandoned debug session). The reliable fix is to relaunch a FRESH
+    Chrome on the port and connect once. Returns (proc_or_None, browser); proc is
+    non-None only when WE launched the Chrome we ended up connected to."""
+    try:
+        proc = ensure_chrome()
+        return proc, p.chromium.connect_over_cdp(config.CDP_URL)
+    except Exception:                                    # noqa: BLE001 - heal and retry once
+        _kill_cdp_chrome()
+        proc = ensure_chrome()                           # fresh launch on a clean port
+        return proc, p.chromium.connect_over_cdp(config.CDP_URL)
+
+
 # --------------------------------------------------------------------------
 # Shared-Chrome window management
 # --------------------------------------------------------------------------
@@ -349,9 +377,8 @@ def _onscreen_bounds() -> dict:
 def browser_context():
     with sync_playwright() as p:
         if config.AUTH_MODE == "cdp":
-            proc = ensure_chrome()
+            proc, browser = _ensure_and_connect(p)       # self-heals a bad CDP session
             launched = proc is not None
-            browser = p.chromium.connect_over_cdp(config.CDP_URL)
             ctx = browser.contexts[0] if browser.contexts else browser.new_context()
 
             # SHARED CHROME. This run opens ONLY its own tabs, in its OWN window, and

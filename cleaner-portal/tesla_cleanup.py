@@ -84,6 +84,18 @@ def compute_dates():
 
 
 # ----------------------- generic helpers -----------------------
+def _settle(page: Page, timeout_ms: int = 8000) -> None:
+    """Best-effort 'networkidle' wait. The Dispatch Dashboard polls/streams continuously,
+    so it often never reaches true network-idle — a plain wait_for_load_state('networkidle')
+    then blows its timeout and raises, which used to crash the scrape and stall the apply.
+    Wait briefly for idle but treat a timeout as fine; the fixed wait_for_timeout() calls
+    that follow each use give the page time to settle."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except Exception:                                # noqa: BLE001 - never idles; that's ok
+        pass
+
+
 def _dialog(page: Page):
     """The open pop-up = the OUTERMOST container holding both UPDATE and CANCEL.
 
@@ -329,13 +341,13 @@ def load_dashboard(page: Page):
     page.goto(DASHBOARD_URL)
     page.wait_for_load_state("domcontentloaded")
     require_logged_in(page, "dispatch dashboard")   # fail fast vs a 30s networkidle hang
-    page.wait_for_load_state("networkidle")
+    _settle(page)
     page.wait_for_timeout(3500)
     # Set the filters every load (a fresh page may reset them): Alerts = all except
     # 'No Action Needed', Status = Tendered / In Transit / At Destination, then search.
     configure_filters(page)
     _click_search(page)
-    page.wait_for_load_state("networkidle")
+    _settle(page)
     _wait_for_shipments(page)                       # page-1 results appear (quick)
     _set_page_size_max(page)                        # put ALL results on one page
     total = _wait_for_full_page(page)               # patient: the big page is slow to fill
@@ -385,7 +397,7 @@ def select_cards_any(page: Page, badge_texts: list[str], limit: int | None = Non
 
 def submit_dialog(page: Page):
     page.get_by_role("button", name="UPDATE", exact=True).last.click()
-    page.wait_for_load_state("networkidle")
+    _settle(page)
     page.wait_for_timeout(3000)
 
 

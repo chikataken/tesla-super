@@ -20,7 +20,7 @@ config.WINDOW_MODE = "ghost"
 config.HEADLESS = False
 
 from playwright.sync_api import sync_playwright
-from auth import ensure_chrome, is_login_page, _surface_window
+from auth import _ensure_and_connect, is_login_page, _surface_window
 
 DASHBOARD_URL = "https://suppliers.teslamotors.com/logistics/dispatchdashboard2"
 NEED_LOGIN = 10
@@ -29,8 +29,7 @@ NEED_LOGIN = 10
 def main() -> int:
     with sync_playwright() as p:
         try:
-            ensure_chrome()                      # launch the dedicated Chrome if needed
-            browser = p.chromium.connect_over_cdp(config.CDP_URL)
+            _, browser = _ensure_and_connect(p)  # launch + connect, self-healing a bad session
         except Exception as e:                   # noqa: BLE001
             print(f"preflight: could not reach Chrome/Tesla: {e}")
             return 1

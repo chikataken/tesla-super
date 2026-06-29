@@ -20,12 +20,13 @@ Chrome and it builds and runs on its own.
 
 There are two clickable apps:
 
-- **Cleaner Portal.app** — runs the cleanup (`--apply`). It **checks your Tesla session
-  first**: if Tesla bounced you to the "sign in again" page, it opens the sign-in window
-  and tells you; otherwise it runs and shows a **result dialog**. Progress shows as macOS
-  notifications; the browser runs off-screen.
-- **Portal Status.app** — a **read-only** test app: a small GUI window showing the live
-  counts (Pickup Today/Late, ETA Today, Driver Needed, loaded/total). Submits nothing.
+- **Cleaner Portal.app** — a **GUI window** showing the live counts with a **Run** button
+  (and a **Dry run** toggle), a **streaming progress log**, a **Stop** button, and a
+  **stall watchdog**. It checks your Tesla session first (surfaces the sign-in page if
+  you're signed out), confirms before applying, then runs the cleanup with live progress
+  so it never looks "stuck."
+- **Portal Status.app** — a **read-only** version: the same counts GUI with no Run button.
+  Submits nothing.
 
 ### Why you must install (not just double-click from the repo)
 
@@ -81,11 +82,13 @@ Chrome.
 | File | Role |
 |------|------|
 | `install.command` | Installs the apps to `~/Applications/Cleaner Portal` (needed for Dock use). |
-| `Cleaner Portal.app` | Dock app — login pre-check → cleanup → result dialog. |
+| `Cleaner Portal.app` | Dock app — GUI: counts + Run (with dry-run) + live progress. |
 | `Portal Status.app` | Dock app — read-only live-counts GUI (the "test" app). |
 | `login-once.command` | One-time Tesla login (double-click first). |
 | `run-cleaner.command` | Terminal launcher — runs the cleanup `--apply` over Chrome/CDP. |
-| `status_app.py` | The read-only counts GUI (Tkinter). |
+| `cleaner_app.py` | The Cleaner Portal GUI (Tkinter; runs cleanup as a subprocess). |
+| `status_app.py` | The read-only counts GUI + shared `scrape()`. |
+| `scrape_counts.py` | Subprocess helper: prints the counts as JSON for the GUI. |
 | `preflight_login.py` | Read-only "are we signed in?" check; surfaces the sign-in page if not. |
 | `_bootstrap.sh` | Shared venv/Chrome/PATH bootstrap, sourced by the launchers. |
 | `tesla_cleanup.py` | The cleanup logic + live-calibrated DOM selectors. |
