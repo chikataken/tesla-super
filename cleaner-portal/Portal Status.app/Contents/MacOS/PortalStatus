@@ -1,0 +1,39 @@
+#!/bin/bash
+# Portal Status.app — READ-ONLY test app. Opens a small GUI window showing the live
+# Tesla Dispatch counts (Pickup Today/Late, ETA Today, Driver Needed, loaded/total).
+# It submits nothing — safe to click anytime.
+set -u
+
+_dlg() { osascript -e "display dialog \"$1\" with title \"Portal Status\" buttons {\"OK\"} default button \"OK\" ${2:-}" >/dev/null 2>&1; }
+
+APP_DIR="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"   # Portal Status.app
+PORTAL="$(cd "$(dirname "$APP_DIR")" 2>/dev/null && pwd)"    # the folder the app lives in
+
+# macOS blocks apps launched from Finder/Dock from reading ~/Documents, ~/Desktop,
+# ~/Downloads. If our files aren't readable (or we're in a blocked folder), we can't run
+# from here — tell the user to install OUTSIDE those folders rather than fail cryptically.
+if [ -z "$PORTAL" ] || [ ! -r "$PORTAL/_bootstrap.sh" ]; then
+  _dlg "Portal Status can't read its files from this location (macOS blocks apps launched from Documents / Desktop / Downloads).\n\nOpen the cleaner-portal folder, double-click install.command, then run this from ~/Applications/Cleaner Portal." "with icon caution"
+  exit 1
+fi
+case "$PORTAL" in
+  "$HOME"/Documents/*|"$HOME"/Desktop/*|"$HOME"/Downloads/*)
+    _dlg "This copy is in a macOS-protected folder, so a Dock/Finder launch can't read its files.\n\nDouble-click install.command (in this folder), then run Portal Status from ~/Applications/Cleaner Portal — and pin THAT one to the Dock." "with icon caution"
+    exit 1 ;;
+esac
+
+cd "$PORTAL"
+mkdir -p "$PORTAL/output"
+# shellcheck disable=SC1091
+. "$PORTAL/_bootstrap.sh"                           # PATH fix + ensure_venv / check_chrome
+
+if ! check_chrome >/dev/null 2>&1; then
+  _dlg "Google Chrome isn't installed. Install Chrome, then try again." "with icon stop"; exit 1
+fi
+if [ ! -d "$PORTAL/.venv" ]; then
+  _dlg "First-time setup needed.\n\nDouble-click login-once.command in this folder once, then use this." "with icon caution"
+  open "$PORTAL" >/dev/null 2>&1 || true; exit 0
+fi
+
+portal_setup_env                                   # AUTH_MODE=cdp, CDP_PROFILE_DIR=<portal>/.auth
+exec "$PORTAL/.venv/bin/python" "$PORTAL/status_app.py" >>"$PORTAL/output/status_app.log" 2>&1

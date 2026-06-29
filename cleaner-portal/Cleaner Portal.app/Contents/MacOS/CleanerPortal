@@ -1,0 +1,106 @@
+#!/bin/bash
+# Cleaner Portal.app — Dock-clickable launcher for the Tesla dashboard cleanup.
+#
+# On click:
+#   1. Pre-checks your Tesla session. If you've been bounced to the "sign in again"
+#      page, it surfaces the sign-in window and tells you to sign in — then stops.
+#   2. Otherwise it runs the cleanup (APPLY) over Chrome/CDP and shows the result.
+#
+# Set CLEANER_DRYRUN=1 to preview (no --apply) and route messages to stdout instead
+# of native dialogs — used for testing.
+set -u
+
+# --- locate the cleaner-portal folder (we live in <portal>/Cleaner Portal.app/Contents/MacOS) ---
+APP_DIR="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)"   # Cleaner Portal.app
+PORTAL="$(cd "$(dirname "$APP_DIR")" 2>/dev/null && pwd)"    # cleaner-portal
+
+# macOS blocks apps launched from Finder/Dock from reading ~/Documents, ~/Desktop,
+# ~/Downloads. If our files aren't readable (or we're in a blocked folder), guide the
+# user to install OUTSIDE those folders rather than fail with a misleading error.
+_guard() { osascript -e "display dialog \"$1\" with title \"Cleaner Portal\" buttons {\"OK\"} default button \"OK\" with icon caution" >/dev/null 2>&1; }
+if [ -z "$PORTAL" ] || [ ! -r "$PORTAL/_bootstrap.sh" ]; then
+  _guard "Cleaner Portal can't read its files from this location (macOS blocks apps launched from Documents / Desktop / Downloads).\n\nOpen the cleaner-portal folder, double-click install.command, then run this from ~/Applications/Cleaner Portal."
+  exit 1
+fi
+case "$PORTAL" in
+  "$HOME"/Documents/*|"$HOME"/Desktop/*|"$HOME"/Downloads/*)
+    _guard "This copy is in a macOS-protected folder, so a Dock/Finder launch can't read its files.\n\nDouble-click install.command (in this folder), then run Cleaner Portal from ~/Applications/Cleaner Portal — and pin THAT one to the Dock."
+    exit 1 ;;
+esac
+
+cd "$PORTAL"
+
+# shellcheck disable=SC1091
+. "$PORTAL/_bootstrap.sh"                           # PATH fix + ensure_venv / check_chrome
+
+LOG="$PORTAL/output/app_last_run.log"
+mkdir -p "$PORTAL/output"
+
+# --- user feedback (native dialogs, or stdout under CLEANER_DRYRUN) ---------
+_san() { printf '%s' "$1" | tr '"' "'" | tr '\\' '/'; }   # keep osascript strings safe
+
+notify() {
+  if [ "${CLEANER_DRYRUN:-0}" = "1" ]; then echo "[notify] $1"; return; fi
+  osascript -e "display notification \"$(_san "$1")\" with title \"Cleaner Portal\"" >/dev/null 2>&1
+}
+
+say() {  # blocking dialog with an OK button; $2 = optional osascript suffix (icon)
+  if [ "${CLEANER_DRYRUN:-0}" = "1" ]; then echo "[dialog] $1"; return; fi
+  osascript -e "display dialog \"$(_san "$1")\" with title \"Cleaner Portal\" buttons {\"OK\"} default button \"OK\" ${2:-}" >/dev/null 2>&1
+}
+
+# --- preconditions ---------------------------------------------------------
+if ! check_chrome >/dev/null 2>&1; then
+  say "Google Chrome isn't installed. Install Chrome, then try again." "with icon stop"
+  exit 1
+fi
+
+if [ ! -d "$PORTAL/.venv" ]; then
+  say "First-time setup needed.\n\nOpen the cleaner-portal folder and double-click login-once.command once (it installs what's needed and signs you into Tesla). Then use this app." "with icon caution"
+  open "$PORTAL" >/dev/null 2>&1 || true
+  exit 0
+fi
+
+portal_setup_env                                   # AUTH_MODE=cdp, CDP_PROFILE_DIR=<portal>/.auth
+
+# --- 1) login pre-check ----------------------------------------------------
+notify "Checking your Tesla session…"
+run_preflight() { "$PORTAL/.venv/bin/python" "$PORTAL/preflight_login.py" >>"$LOG" 2>&1; }
+run_preflight; pf=$?
+if [ "$pf" -eq 1 ]; then
+  # A stale/abandoned Chrome can refuse re-attach ("context management not
+  # supported"). Kill whatever is on the debug port and try once more, fresh.
+  pkill -f "remote-debugging-port=9222" >/dev/null 2>&1 || true
+  sleep 2
+  run_preflight; pf=$?
+fi
+if [ "$pf" -eq 10 ]; then
+  say "You're signed out of Tesla.\n\nI opened the sign-in window — sign in there, then click Cleaner Portal again." "with icon caution"
+  exit 0
+elif [ "$pf" -ne 0 ]; then
+  say "Couldn't reach Tesla (error $pf).\n\nCheck your internet connection and try again." "with icon stop"
+  exit 1
+fi
+
+# --- 2) run the cleanup ----------------------------------------------------
+notify "Signed in. Running cleanup…"
+if [ "${CLEANER_DRYRUN:-0}" = "1" ]; then
+  "$PORTAL/.venv/bin/python" "$PORTAL/tesla_cleanup.py" 2>&1 | tee -a "$LOG"
+  rc=${PIPESTATUS[0]}
+else
+  "$PORTAL/.venv/bin/python" "$PORTAL/tesla_cleanup.py" --apply >>"$LOG" 2>&1
+  rc=$?
+fi
+
+summary="$(grep -E '^(Done\.|\[DRY-RUN\])' "$LOG" | tail -1)"
+[ -z "$summary" ] && summary="$(tail -3 "$LOG")"
+
+if [ "$rc" -eq 0 ]; then
+  say "Finished.\n\n$summary"
+elif grep -q "logged out" "$LOG"; then
+  # Tesla can sign you out mid-run; treat it like the pre-check case.
+  say "Tesla signed you out during the run.\n\nClick Cleaner Portal again to sign in and retry." "with icon caution"
+else
+  say "Finished with errors.\n\n$(tail -4 "$LOG")" "with icon stop"
+fi
+exit "$rc"

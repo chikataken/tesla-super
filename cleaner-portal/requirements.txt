@@ -1,0 +1,3 @@
+# Lean deps for the CLEANUP path only (no vision/OCR/torch — those are reconcile-only).
+playwright>=1.44
+python-dotenv>=1.0
