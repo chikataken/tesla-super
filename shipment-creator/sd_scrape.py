@@ -43,13 +43,17 @@ STATE_ZIP_RE = re.compile(r"\b[A-Z]{2}\s+(\d{5})\b")
 # paginate with ?page=N (a /loadboard route does NOT exist — it redirects to
 # /orders). "Accepted" is the tab the user refers to as "Approved".
 TAB_URL = {
-    "posted":   config.SD_WEB_BASE + "/orders/posted_to_lb",
-    "accepted": config.SD_WEB_BASE + "/orders/accepted",
-    "pending":  config.SD_WEB_BASE + "/orders/pending",
+    "posted":    config.SD_WEB_BASE + "/orders/posted_to_lb",
+    "accepted":  config.SD_WEB_BASE + "/orders/accepted",
+    "pending":   config.SD_WEB_BASE + "/orders/pending",
+    "picked_up": config.SD_WEB_BASE + "/orders/picked_up",
 }
-TAB_LABEL = {"posted": "Posted", "accepted": "Accepted", "pending": "Pending"}
-# The tabs scanned, in order. ("Accepted" is the user's "Approved".)
-SCAN_TABS = ("posted", "accepted", "pending")
+TAB_LABEL = {"posted": "Posted", "accepted": "Accepted", "pending": "Pending",
+             "picked_up": "Picked up"}
+# The tabs scanned, in order. ("Accepted" is the user's "Approved".) "picked_up" cars are
+# off the loadboard but still in transit on their route — included so we don't re-post a VIN
+# whose car has already been picked up (matched by the same origin/dest zip pair).
+SCAN_TABS = ("posted", "accepted", "pending", "picked_up")
 LOADBOARD_URL = config.SD_WEB_BASE + "/orders"               # tab-click fallback base
 ORDER_LINK = "a[href*='/orders/view/']"                      # the per-order row link
 

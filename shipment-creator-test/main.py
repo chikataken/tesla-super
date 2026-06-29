@@ -245,7 +245,7 @@ def main():
         if config.SD_SCAN:
             sd_scan_pairs = {(r.get("pickup_zip"), r.get("delivery_zip")) for r in rows
                              if r.ok and r.get("pickup_zip") and r.get("delivery_zip")}
-            print(f"Will scan Posted + Accepted + Pending for {len(sd_scan_pairs)} route "
+            print(f"Will scan Posted + Accepted + Pending + Picked-up for {len(sd_scan_pairs)} route "
                   f"zip-pair(s), concurrently with the BOL downloads.")
 
         # Incremental SuperDispatch reconcile state. _on_bol calls _reconcile_sd ON THE

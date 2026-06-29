@@ -58,9 +58,9 @@ def _is_all_profile() -> bool:
 
 
 def _is_didi_profile() -> bool:
-    """The didi profile bypasses the pickup-state filter AND posts every VIN: no
-    NeedByDate requirement on upload, and duplicate-removal is skipped so VINs already
-    live on SuperDispatch are NOT dropped from the board. Posting stays ENABLED."""
+    """The didi profile bypasses the pickup-state filter AND posts every VIN regardless
+    of state: no NeedByDate requirement on upload. Posting stays ENABLED. Same-route
+    SuperDispatch duplicate-removal still applies (it is not a state filter)."""
     import profiles
     return _pid() == profiles.DIDI_PROFILE_ID
 
@@ -173,9 +173,11 @@ def api_orders(file: Optional[str] = None):
     # Before showing the latest board, DROP any VIN already live on SuperDispatch so it can't
     # be double-posted (idempotent — see _auto_remove_sd_duplicates). `dups_removed` is the
     # running list for this board (cleared on reset), surfaced as a tally.
-    # didi is exempt: it posts EVERY VIN it receives, so we keep duplicates on the board.
+    # Runs for EVERY profile incl. didi: a VIN already live on SD's own loadboard on the
+    # same route is a true duplicate, never a legitimate re-post (different-route VINs still
+    # pass through — see _auto_remove_sd_duplicates).
     dups_removed = []
-    if not file and not _is_didi_profile():
+    if not file:
         try:
             dups_removed = _auto_remove_sd_duplicates()
         except Exception:
@@ -200,11 +202,16 @@ def _z5(z) -> str:
 
 
 def _sd_live_vin_routes() -> dict:
-    """For each VIN already on a POSTED/ACCEPTED/PENDING SuperDispatch order (all are live on
-    the loadboard, is_posted_to_loadboard=True) — taken from the latest
-    loadboard scan, which is enriched from the API (get_order) so EVERY VIN on a multi-car
-    order is included, not just the one shown in the '+N' card preview — the set of
-    (pickup_zip5, delivery_zip5) routes that order runs.
+    """For each VIN already on a POSTED/ACCEPTED/PENDING/PICKED-UP SuperDispatch order —
+    taken from the latest loadboard scan, which is enriched from the API (get_order) so
+    EVERY VIN on a multi-car order is included, not just the one shown in the '+N' card
+    preview — the set of (pickup_zip5, delivery_zip5) routes that order runs.
+
+    posted/accepted/pending are live on the loadboard (is_posted_to_loadboard=True). A
+    PICKED-UP car is off the loadboard (loadboard_status is null) but still in transit on its
+    route — re-posting it would duplicate a car already being delivered, so it's treated as
+    live too. The scrape stamps loadboard_status='picked_up'; the API-direct path leaves
+    loadboard_status null but carries the lifecycle status='picked_up' — accept either.
 
     A board VIN is a true duplicate ONLY when its route matches one of these. A VIN already
     posted on a DIFFERENT route is a legitimate re-post (chained delivery: it's dropped off,
@@ -212,7 +219,9 @@ def _sd_live_vin_routes() -> dict:
     search = _load_json(_search_path(), {})
     out: dict[str, set] = {}
     for o in (search.get("orders") or []):
-        if (o.get("loadboard_status") or "").strip().lower() not in ("posted", "accepted", "pending"):
+        lb = (o.get("loadboard_status") or "").strip().lower()
+        life = (o.get("status") or "").strip().lower()
+        if lb not in ("posted", "accepted", "pending", "picked_up") and life != "picked_up":
             continue
         route = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                  _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
