@@ -202,6 +202,21 @@ def _z5(z) -> str:
     return m.group(0) if m else ""
 
 
+def _route_endpoint_matches(broute, routes) -> bool:
+    """True when the board route shares an ENDPOINT with one of a VIN's live SD routes:
+    same origin zip OR same destination zip. The match is POSITIONAL — an origin is only
+    compared to an origin and a destination only to a destination (a board origin that
+    happens to equal a live destination does NOT count). Both zips being compared must be
+    non-empty. (Previously BOTH endpoints had to match; now one same-position match is
+    enough — e.g. the same car re-posted from the same origin to a different drop, or to the
+    same drop from a different origin, is caught as a duplicate.)"""
+    bo, bd = broute
+    for ro, rd in routes:
+        if (bo and ro and bo == ro) or (bd and rd and bd == rd):
+            return True
+    return False
+
+
 def _sd_live_vin_routes() -> dict:
     """For each VIN already on a POSTED/ACCEPTED/PENDING/PICKED-UP SuperDispatch order —
     taken from the latest loadboard scan, which is enriched from the API (get_order) so
@@ -214,9 +229,10 @@ def _sd_live_vin_routes() -> dict:
     live too. The scrape stamps loadboard_status='picked_up'; the API-direct path leaves
     loadboard_status null but carries the lifecycle status='picked_up' — accept either.
 
-    A board VIN is a true duplicate ONLY when its route matches one of these. A VIN already
-    posted on a DIFFERENT route is a legitimate re-post (chained delivery: it's dropped off,
-    then immediately shipped again), so it must pass through."""
+    A board VIN is a duplicate when its route shares an endpoint with one of these — same
+    origin OR same destination (see _route_endpoint_matches). A VIN whose board route shares
+    NEITHER endpoint is a legitimate re-post (chained delivery: dropped off, then shipped on
+    from there), so it passes through."""
     search = _load_json(_search_path(), {})
     out: dict[str, set] = {}
     for o in (search.get("orders") or []):
@@ -259,10 +275,11 @@ def _auto_remove_sd_duplicates() -> list:
             for v in (o.get("vehicles") or []):
                 vin = (v.get("vin") or "").strip().upper()
                 routes = live_routes.get(vin)
-                # Drop ONLY when SD already has this VIN posted on the EXACT same route (both
-                # zips known + equal). A different (or unknown) route passes through so a
-                # chained re-delivery can be posted again.
-                if vin and routes and broute[0] and broute[1] and broute in routes:
+                # Drop when SD already has this VIN posted on a route sharing an ENDPOINT with
+                # this one — same origin OR same destination (positional). A route that shares
+                # NEITHER endpoint passes through, so a genuine chained re-delivery (A->B then
+                # B->C: B sits in different positions, so no endpoint matches) can still post.
+                if vin and routes and _route_endpoint_matches(broute, routes):
                     dups.add(vin)
                 else:
                     kept.append(v)
