@@ -1,0 +1,35 @@
+# systemd USER unit for the 24/7 Tesla drop-off service.
+#
+# Install (no sudo — runs as your user so it inherits the graphical session the
+# headed emulator needs):
+#
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf "$PWD/tesla-delivery.service" ~/.config/systemd/user/tesla-delivery.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tesla-delivery.service     # start + run at login
+#   loginctl enable-linger "$USER"                           # keep running while logged out
+#
+# Watch / control:
+#   journalctl --user -u tesla-delivery -f                   # live logs
+#   systemctl --user restart tesla-delivery
+#   systemctl --user stop tesla-delivery
+#
+# NOTE: edit WorkingDirectory/ExecStart below if you cloned to a different path.
+# Starts in DRY-RUN; add --confirm to ExecStart to go live.
+
+[Unit]
+Description=Tesla delivery drop-off automation (emulator)
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/tesla-super/app-delivery
+ExecStart=%h/projects/tesla-super/app-delivery/serve.sh --confirm 60
+Restart=always
+RestartSec=15
+# Give the emulator boot + first poll room before systemd considers it failed.
+TimeoutStartSec=0
+
+[Install]
+WantedBy=default.target

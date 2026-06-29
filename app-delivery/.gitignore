@@ -10,3 +10,33 @@ emulator.log
 
 # emulator screen grabs
 screenshots/
+
+# photo-selector outputs + fetched SD photos (not source)
+picks.json
+picks*.png
+sd_photos/
+out/
+.venv/
+__pycache__/
+.pytest_cache/
+
+# downloaded model weights (re-fetch via the curl in README) — not source
+models/*.pt
+
+# trainer: pulled photo pool + trained head are regenerable; KEEP labels.json (the
+# actual hand-labeled training data — that's the work product worth versioning).
+trainer/pool/
+trainer/model.joblib
+
+# random-pull ledger (regenerable)
+trainer/seen.db
+
+# labeler page cursor (which VINs already shown)
+trainer/served.json
+
+# cached CLIP embeddings (regenerable)
+trainer/emb_cache.joblib
+trainer/reviewed.json
+
+# runtime drop-off ledger (local, regenerable)
+dropoffs.db

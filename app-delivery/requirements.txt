@@ -1,0 +1,32 @@
+# app-delivery — Python deps for the corner-photo selector.
+# The emulator side is shell (scripts/*.sh); this is just the photo classifier.
+#
+# Three selectors; install whichever you use (run.sh uses CLIP by default):
+#   * photo_select_clip.py  — LOCAL CLIP zero-shot, no API (DEFAULT)
+#   * photo_select_yolo.py  — LOCAL car-parts detector, no API
+#   * photo_select.py       — Claude vision (sends photos to the API)
+
+# --- shared ---
+pillow>=10.0            # EXIF-transpose + downscale + contact sheets
+python-dotenv>=1.0      # load ../secrets/.env + app-local .env (Claude option)
+pytest>=8.0             # unit tests (every model mocked — no weights/key/network)
+numpy>=1.24
+# torch is pulled by open_clip / ultralytics. For the RTX 5060 (Blackwell sm_120) use the
+# CUDA build the siblings use: +cu130 (--index-url https://download.pytorch.org/whl/cu130).
+# CPU-only torch is fine for one-off selection (a 20-photo set is seconds on CPU):
+#   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# --- DEFAULT selector: CLIP zero-shot (photo_select_clip.py) — nothing leaves the box ---
+open_clip_torch>=2.24   # CLIP models; weights auto-download from HF on first use (no account)
+
+# --- alt selector: YOLO car-parts (photo_select_yolo.py) ---
+ultralytics>=8.4        # YOLO11 car-parts segmentation runtime
+
+# --- TRAINED selector (trainer/) — train your own head, best accuracy on your data ---
+scikit-learn>=1.3       # logistic-regression head on CLIP features (+ joblib to save it)
+fastapi>=0.110          # the labeling web app (trainer/label_app.py)
+uvicorn[standard]>=0.27 # serves the labeler
+
+# --- alt selector: Claude vision (photo_select.py) ---
+anthropic>=0.40         # only needed if you use the Claude vision option
+requests>=2.31          # (optional) fetch SD photos by URL when not given local files

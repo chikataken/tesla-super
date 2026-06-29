@@ -1,0 +1,25 @@
+# systemd USER unit for the app-delivery status dashboard (app.wastake.com).
+# Serves dashboard.py on 127.0.0.1:8011; the shared cloudflared tunnel routes
+# app.wastake.com -> :8011 (ingress in ~/.cloudflared/config.yml).
+#
+# Install (no sudo):
+#   mkdir -p ~/.config/systemd/user
+#   ln -sf "$PWD/app-delivery-web.service" ~/.config/systemd/user/app-delivery-web.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now app-delivery-web.service
+#   journalctl --user -u app-delivery-web -f        # logs
+
+[Unit]
+Description=app-delivery status dashboard (app.wastake.com)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/tesla-super/app-delivery
+ExecStart=%h/projects/tesla-super/app-delivery/run_web.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
