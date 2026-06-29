@@ -97,7 +97,7 @@
     padding:10px 12px;border-radius:8px;cursor:pointer;transition:background .12s,color .12s}
   .navrail .navitem:hover{background:rgba(255,255,255,.06);color:#fff}
   .navrail .navitem.active{background:rgba(255,255,255,.10);color:#fff}
-  .navrail .profimg{margin-top:auto;width:86%;align-self:center;border-radius:12px;display:block}
+  .navrail .profimg{width:86%;align-self:center;border-radius:12px;display:block;margin:2px 0 6px}
   /* ---- toolbar sort dropdown (SD-style: label + direction toggle) ---- */
   .sortwrap{position:relative;display:flex;align-items:center}
   .sortbtn-dd{display:inline-flex;align-items:center;gap:7px;background:var(--card);
@@ -686,13 +686,13 @@
       </button>
       <div class="profmenu" id="profMenu" hidden></div>
     </div>
+    <img id="profileImg" class="profimg" alt="" hidden onerror="this.hidden=true">
     <button class="tab navitem active" data-tab="orders">Shipments</button>
     <button class="tab navitem" data-tab="recorded">Recorded</button>
     <div id="recNav" class="recnav" hidden></div>
     <button class="tab navitem" data-tab="terminals">Terminals</button>
     <button class="tab navitem" data-tab="app">App</button>
     <button class="tab navitem" data-tab="users">Settings</button>
-    <img id="profileImg" class="profimg" alt="" hidden onerror="this.hidden=true">
   </nav>
   <div class="appmain">
 <header>
