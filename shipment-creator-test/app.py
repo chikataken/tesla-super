@@ -200,7 +200,8 @@ def _z5(z) -> str:
 
 
 def _sd_live_vin_routes() -> dict:
-    """For each VIN already on a POSTED/ACCEPTED SuperDispatch order — taken from the latest
+    """For each VIN already on a POSTED/ACCEPTED/PENDING SuperDispatch order (all are live on
+    the loadboard, is_posted_to_loadboard=True) — taken from the latest
     loadboard scan, which is enriched from the API (get_order) so EVERY VIN on a multi-car
     order is included, not just the one shown in the '+N' card preview — the set of
     (pickup_zip5, delivery_zip5) routes that order runs.
@@ -211,7 +212,7 @@ def _sd_live_vin_routes() -> dict:
     search = _load_json(_search_path(), {})
     out: dict[str, set] = {}
     for o in (search.get("orders") or []):
-        if (o.get("loadboard_status") or "").strip().lower() not in ("posted", "accepted"):
+        if (o.get("loadboard_status") or "").strip().lower() not in ("posted", "accepted", "pending"):
             continue
         route = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                  _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
