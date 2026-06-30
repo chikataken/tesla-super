@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.15.0
+// @version      0.16.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -227,8 +227,6 @@
         .badge.cab{background:rgba(212,170,60,.22);color:#8a6d14;border:2px solid #000;border-radius:3px;padding:1px 6px} /* CAB shading = shipment-creator .vbub.cc */
         /* focused bidding cards */
         .fcard{background:#fff;border:1px solid #e0e3e6;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.06);padding:18px 20px;margin:0 auto 16px;max-width:560px;transition:box-shadow .15s,border-color .15s,transform .15s}
-        .fcard.sample{border:1px dashed #b9bec4;background:#fbfcfe}
-        .samplelabel{font-size:11px;font-weight:800;letter-spacing:.08em;color:#9aa0a6;text-transform:uppercase;margin-bottom:8px}
         .fcard.active{border-color:#3457d5;box-shadow:0 10px 30px rgba(52,87,213,.22);transform:translateY(-1px)}
         .froute{display:flex;align-items:center;gap:8px;font-size:17px;font-weight:700;line-height:1.3;flex-wrap:wrap}.froute .arrow{color:#9a9da1}
         .fmeta{margin:12px 0 10px;color:#5c5e62;font-size:14px}.fneed b{color:#171a20}
@@ -248,7 +246,7 @@
         .pin.filled .cur{opacity:1}
         .pin input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-size:16px;font-weight:700;color:#0a7d33;padding:0}
         .pin input::placeholder{color:#0a7d33;opacity:.45}
-        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
+        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:16px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
       </style>
       <div class="panel">
         <div class="hd" id="hd"><div class="ttl">Bid Board <span class="sub" id="sub"></span></div><span class="livebadge">● LIVE</span><button id="reload">Reload</button><button id="min">–</button></div>
@@ -276,7 +274,7 @@
       if (e.key !== 'Enter' || !(e.target.classList && e.target.classList.contains('price'))) return;
       e.preventDefault();
       const curCard = e.target.closest('.fcard');
-      const inputs = [...body.right.querySelectorAll('.price:not([readonly])')];   // exclude the sample card
+      const inputs = [...body.right.querySelectorAll('.price')];
       let i = inputs.indexOf(e.target) + 1;
       while (i < inputs.length && inputs[i].dataset.priced === '1') i++;   // skip already-priced shipments
       const next = inputs[i];
@@ -334,23 +332,6 @@
       + `<input class="price" type="text" inputmode="decimal" placeholder="${esc(ph)}" value="${esc(local)}" data-key="${esc(k)}" data-priced="${done ? 1 : 0}"></div></div>`;
   }
 
-  // A non-interactive styling preview pinned at the top of the focus pane.
-  function sampleCard() {
-    const demo = (cap, ph) => `<div class="price-col"><div class="pcap">${cap}</div>`
-      + `<div class="pin"><span class="cur">$</span><input class="price" type="text" placeholder="${ph}" readonly></div></div>`;
-    const card = document.createElement('div'); card.className = 'fcard sample';
-    card.innerHTML = `<div class="samplelabel">Sample · card styling preview</div>`
-      + `<div class="froute"><span>Origin</span><span class="arrow">→</span><span>Destination</span></div>`
-      + `<div class="fmeta"><div class="fneed">Need by <b>Jul 07</b></div></div>`
-      + `<div class="datesel"><button class="dbox flank" data-dir="-1">6</button><button class="dbox sel" data-dir="0">7</button><button class="dbox flank" data-dir="1">8</button></div>`
-      + `<div class="price-row">`
-      + demo(`<span class="num">3</span> VINs`, '250')
-      + demo(`<span class="badge ct">CT</span> <span class="num">1</span>`, '400')
-      + demo(`<span class="badge cab">CAB</span> <span class="num">1</span>`, '500')
-      + `</div>`;
-    return card;
-  }
-
   function render() {
     if (!root) return;
     const totalVins = state.groups.reduce((s, g) => s + ((g.bids && g.bids.totalRecords) || 0), 0);
@@ -360,7 +341,17 @@
     if (state.loading && !state.groups.length) { body.left.innerHTML = `<div class="empty">Loading routes…</div>`; body.right.innerHTML = ''; return; }
 
     const gs = currentGroups();
-    if (!gs.length) { body.left.innerHTML = `<div class="empty">No routes${state.filter ? ' match the filter' : ' captured yet'}.</div>`; body.right.innerHTML = ''; return; }
+    if (!gs.length) {
+      if (state.todoOnly) {
+        body.left.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
+        body.right.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
+        showToast('Nothing to Bid');
+      } else {
+        body.left.innerHTML = `<div class="empty">No routes${state.filter ? ' match the filter' : ' captured yet'}.</div>`;
+        body.right.innerHTML = '';
+      }
+      return;
+    }
 
     // LEFT
     const lf = document.createDocumentFragment();
@@ -391,7 +382,6 @@
 
     // RIGHT — one card per route; CT and CAB (Cybercab) each get their own price box
     const rf = document.createDocumentFragment();
-    rf.appendChild(sampleCard());   // styling preview pinned at the very top
     gs.forEach((g, ri) => {
       const key = legKey(g), vins = (g.bids && g.bids.items) || [];
       const cab = vins.filter(isCAB);
@@ -411,12 +401,14 @@
     });
     body.right.innerHTML = ''; body.right.appendChild(rf);
 
+    const firstCard = body.right.querySelector('.fcard');
+    if (firstCard) centerInPane(body.right, firstCard);   // keep cards on screen after a filter/sort/TO-DO change (esp. short lists)
     syncFromRight();
   }
 
   function syncFromRight() {
     if (!body) return;
-    const cards = body.right.querySelectorAll('.fcard:not(.sample)'); if (!cards.length) return;
+    const cards = body.right.querySelectorAll('.fcard'); if (!cards.length) return;
     const pr = body.right.getBoundingClientRect(), cy = pr.top + pr.height / 2;
     let best = null, bd = Infinity;
     cards.forEach((c) => { const r = c.getBoundingClientRect(); const d = Math.abs((r.top + r.height / 2) - cy); if (d < bd) { bd = d; best = c; } });
