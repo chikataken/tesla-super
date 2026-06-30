@@ -38,6 +38,20 @@ APP = "com.tesla.logisticsmobile"          # the only app this emulator runs
 DROPOFF_DB = os.path.join(HERE, "dropoffs.db")   # ledger of every VIN we drop off
 MODEL_BY_CHAR = {"3": "Model 3", "Y": "Model Y", "X": "Model X", "S": "Model S", "C": "Cybertruck"}
 
+# UI dumps dominate the run's wall-clock. The shell `uiautomator dump` cold-starts the
+# instrumentation on EVERY call (~2.1s measured, regardless of screen), so we instead
+# keep a PERSISTENT uiautomator2 server warm — same accessibility tree, ~0.13s/dump
+# (~16x). Set DRIVE_U2=0 to fall back to the shell dump (no agent needed).
+SERIAL = os.environ.get("ANDROID_SERIAL", "emulator-5554")
+USE_U2 = os.environ.get("DRIVE_U2", "1").strip().lower() not in ("0", "false", "no")
+if USE_U2:
+    try:
+        import uiautomator2 as _u2mod
+    except Exception:                          # lib missing -> stay on the shell dump
+        _u2mod = None
+        USE_U2 = False
+_u2 = None                                     # lazily-connected device handle
+
 
 def _ledger():
     con = sqlite3.connect(DROPOFF_DB)
@@ -114,6 +128,15 @@ def shell(cmd, timeout=60):
     return adb("shell", cmd, timeout=timeout).stdout
 
 
+# Pause after a tap whose NEXT step is a wait_until() that polls for a brand-new
+# element/screen. The wait_until does the real settling (and re-polls cheaply now that
+# dumps are ~0.09s), so this only needs to be long enough for RN to START the
+# transition before the first poll — far less than the old fixed 1.5–2.5s waits. NOT
+# used where the pause itself gates real state (sheet-dismiss, picker wheels, or the
+# option→Confirm tap, where Confirm pre-exists greyed).
+NAV_PAUSE = 0.25
+
+
 def tap(x, y, pause=1.2):
     adb("shell", "input", "tap", str(int(x)), str(int(y)))
     time.sleep(pause)
@@ -144,21 +167,11 @@ def shot(tag=""):
     return p
 
 
-def dump():
-    """Return list of nodes: {rid,text,desc,clickable,bounds,cx,cy}, or [] when
-    uiautomator can't produce a FRESH tree.
-
-    Critical wedge case: when the app is stuck on an animating spinner (e.g. the login
-    screen frozen mid-load), the UI never goes idle, so `uiautomator dump` fails with
-    'could not get idle state' and writes NOTHING. We delete the file FIRST so a failed
-    dump can't silently read the stale last-good tree (which would make the wedged app
-    look like a healthy home screen). A [] result is the wedge signal — goto_in_transit_
-    home() then counts it as 'nothing actionable' and force-restarts the app."""
-    shell("rm -f /sdcard/ui.xml")
-    adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", timeout=25)
-    xml = shell("cat /sdcard/ui.xml 2>/dev/null")
-    if "<node" not in xml:                     # dump failed -> app wedged / UI not idle
-        return []
+def _parse_nodes(xml):
+    """uiautomator XML hierarchy -> our node dicts. Skips com.android.systemui nodes
+    (status bar / notification shade) that u2's full-window dump includes — they're
+    never navigation targets, so dropping them keeps the set the same as the old shell
+    dump and avoids any stray text matches."""
     nodes = []
     for m in re.finditer(r"<node[^>]*?>", xml):
         s = m.group(0)
@@ -169,10 +182,53 @@ def dump():
         def g(attr):
             mm = re.search(attr + r'="([^"]*)"', s)
             return mm.group(1) if mm else ""
+        if g("package") == "com.android.systemui":
+            continue
         nodes.append({"rid": g("resource-id"), "text": g("text"), "desc": g("content-desc"),
                       "clickable": g("clickable") == "true", "enabled": g("enabled") == "true",
                       "bounds": (x1, y1, x2, y2), "cx": (x1 + x2) // 2, "cy": (y1 + y2) // 2})
     return nodes
+
+
+def _u2_device():
+    global _u2
+    if _u2 is None:
+        _u2 = _u2mod.connect(SERIAL)           # one-time ~0.8s: starts/attaches the ATX agent
+    return _u2
+
+
+def _dump_shell():
+    """The original shell-based dump (rm; uiautomator dump; cat). ~2.1s/call but needs
+    no agent — used as the DRIVE_U2=0 fallback and the per-call safety net when u2 errors.
+
+    We delete the file FIRST so a failed dump (UI never idle -> 'could not get idle
+    state', writes nothing) can't read the stale last-good tree and make a wedged app
+    look healthy. '<node' absent -> [] (the wedge signal)."""
+    shell("rm -f /sdcard/ui.xml")
+    adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", timeout=25)
+    xml = shell("cat /sdcard/ui.xml 2>/dev/null")
+    if "<node" not in xml:
+        return []
+    return _parse_nodes(xml)
+
+
+def dump():
+    """Return list of nodes: {rid,text,desc,clickable,bounds,cx,cy}, or [] when the UI
+    can't produce a usable tree — the wedge signal goto_in_transit_home() turns into a
+    force-restart (an empty/system-only tree has none of the actionable nodes it looks
+    for, so its 'stuck' counter still trips even though u2 doesn't error on a spinner).
+
+    Fast path: a warm uiautomator2 server (~0.13s) instead of the shell `uiautomator
+    dump` (~2.1s cold-start every call). If u2 errors — e.g. the emulator was rebooted
+    by ensure_emulator() — we drop the handle so the next call reconnects, and fall back
+    to the shell dump for THIS call so a hiccup never stalls the run."""
+    if USE_U2:
+        global _u2
+        try:
+            return _parse_nodes(_u2_device().dump_hierarchy())
+        except Exception:
+            _u2 = None                         # reconnect next call (emulator may have restarted)
+    return _dump_shell()
 
 
 def find_text(nodes, needle, contains=True):
@@ -284,9 +340,13 @@ def handle_dialogs(nodes):
     return False
 
 
-def wait_until(pred, tries=12, interval=1.0):
+def wait_until(pred, tries=12, interval=0.5):
     """Re-dump until pred(nodes) is truthy (RN screens load async). Dismisses permission
-    dialogs along the way. Returns last nodes."""
+    dialogs along the way. Returns last nodes.
+
+    interval was 1.0s when each dump cost ~2.1s; with the warm-u2 dump (~0.13s) the sleep
+    is the dominant per-poll cost, so 0.5s converges roughly twice as fast while still
+    leaving a multi-second budget (tries*interval) for a genuinely slow screen load."""
     nodes = dump()
     for _ in range(tries):
         if handle_dialogs(nodes):
@@ -371,7 +431,7 @@ def picker_select_all(expected, tries=3):
     nodes = dump()
     comp = next((n for n in nodes if n["rid"].endswith("ps_tv_complete")
                  or n["rid"].endswith("ps_complete_select")), None)
-    tap(comp["cx"], comp["cy"], pause=2.0) if comp else tap(619, 1517, pause=2.0)
+    tap(comp["cx"], comp["cy"], pause=NAV_PAUSE) if comp else tap(619, 1517, pause=NAV_PAUSE)
 
 
 def remove_existing():
@@ -419,13 +479,13 @@ def decode(vin):
 def add_photos_for_unit(vin, unit_node):
     sides, vinp, key = decode(vin)
 
-    tap(unit_node["cx"], unit_node["cy"], pause=1.5)   # open unit menu
+    tap(unit_node["cx"], unit_node["cy"], pause=NAV_PAUSE)   # open unit menu
     nodes = wait_until(lambda ns: find_text(ns, "Add Drop Off Photo"), tries=6)
     m = find_text(nodes, "Add Drop Off Photo")
     if not m:
         raise RuntimeError("could not find 'Add Drop Off Photo'")
     shot("unit_menu")
-    tap(m["cx"], m["cy"], pause=2.0)
+    tap(m["cx"], m["cy"], pause=NAV_PAUSE)
     wait_until(lambda ns: find_text(ns, "All Four Sides"), tries=8)
     shot("add_photos")
 
@@ -434,22 +494,34 @@ def add_photos_for_unit(vin, unit_node):
     for section, files in (("All Four Sides", sides[:4]), ("VIN Plate", [vinp]), ("Key", [key])):
         gallery_clear()
         gallery_push(files)
-        swipe(360, 500, 360, 1200, pause=1.0)     # scroll to top
+        # Find this section's empty '+' box. Once the earlier sections are filled (4 sides +
+        # 1 VIN photo) the later ones — especially Key — sit WELL below the fold, so a single
+        # swipe wasn't enough (the "no '+' box for section Key" failure). Snap to the top,
+        # then page DOWN repeatedly until the box appears or the list stops moving.
+        swipe(360, 500, 360, 1200, pause=0.8)          # scroll to top
         plus = first_plus_box(dump())
-        if not plus:                               # maybe below the fold
-            swipe(360, 1200, 360, 500, pause=1.0)
-            plus = first_plus_box(dump())
+        prev_sig = None
+        for _ in range(6):
+            if plus:
+                break
+            swipe(360, 1200, 360, 500, ms=500, pause=0.7)   # page down ~one screen
+            nodes = dump()
+            plus = first_plus_box(nodes)
+            sig = tuple((n["rid"], n["bounds"]) for n in nodes)
+            if sig == prev_sig:                        # nothing new scrolled in -> at the bottom
+                break
+            prev_sig = sig
         if not plus:
             raise RuntimeError(f"no '+' box for section {section}")
         log(f"  section '{section}': pushing {len(files)} photo(s), selecting all")
-        tap(plus["cx"], plus["cy"], pause=2.0)
+        tap(plus["cx"], plus["cy"], pause=NAV_PAUSE)
         wait_until(lambda ns: any(n["rid"].endswith("ivPicture") for n in ns), tries=8)
         picker_select_all(len(files))
         wait_until(lambda ns: find_text(ns, "All Four Sides"), tries=6)   # back on Add Photos
         shot(f"after_{section.replace(' ', '_')}")
 
     add = by(dump(), text="Add", desc="Add")
-    tap(add["cx"] if add else 360, add["cy"] if add else 1498, pause=1.0)
+    tap(add["cx"] if add else 360, add["cy"] if add else 1498, pause=NAV_PAUSE)
     log("  tapped Add; waiting for upload…")
     wait_until(_drop_off_btn, tries=14, interval=1.5)     # upload done -> back on detail
     shot("after_add")
@@ -477,6 +549,17 @@ def _api_error(nodes):
             ("after hours", "dropped off", "location permission", "enable location")))
 
 
+def _api_error_shown(nodes) -> bool:
+    """STRICT: the screen actually shows an error that says "API" (e.g. an 'API error' dialog).
+    Used to decide whether a failed departure is a genuine API error worth PARKING the shipment
+    (never retry) — as opposed to a generic stuck/slow/reverted departure, which should just be
+    retried, not parked. Only the literal word 'API' alongside an error counts."""
+    import re as _re
+    blob = " ".join(((n.get("text") or "") + " " + (n.get("desc") or "")).lower() for n in nodes)
+    return ("api error" in blob
+            or (bool(_re.search(r"\bapi\b", blob)) and ("error" in blob or "failed" in blob)))
+
+
 def drop_off(confirm):
     # Open the options sheet if it isn't already (an attached unit may auto-open it).
     nodes = dump()
@@ -488,7 +571,7 @@ def drop_off(confirm):
             d = _drop_off_btn(nodes)
             if not d:
                 raise RuntimeError("no 'Drop Off' button and no options sheet")
-            tap(d["cx"], d["cy"], pause=2.5)
+            tap(d["cx"], d["cy"], pause=NAV_PAUSE)
             nodes = wait_until(_options_open, tries=8)
     shot("dropoff_options")
     if not by(nodes, id_suffix="cardSubjectToInspection", desc_has="Subject to Inspection"):
@@ -504,7 +587,7 @@ def drop_off(confirm):
         if not _options_open(nodes):                  # after an error/back we land on the detail
             d = _drop_off_btn(nodes)
             if d:
-                tap(d["cx"], d["cy"], pause=2.5)
+                tap(d["cx"], d["cy"], pause=NAV_PAUSE)
             nodes = wait_until(_options_open, tries=8)
         opt = by(nodes, id_suffix="cardSubjectToInspection", desc_has="Subject to Inspection")
         if not opt:
@@ -515,7 +598,7 @@ def drop_off(confirm):
         if not conf:
             raise RuntimeError("no 'Confirm' button")
         log("  CONFIRMING drop off (Subject to Inspection)…" + (f" [retry {attempt}]" if attempt else ""))
-        tap(conf["cx"], conf["cy"], pause=2.5)
+        tap(conf["cx"], conf["cy"], pause=NAV_PAUSE)
         # Outcome: success (home / Dropped Off; After-Hours is auto-confirmed by
         # wait_until's handle_dialogs), or a transient API-error dialog -> retry.
         nodes = wait_until(lambda ns: _home_now(ns) or find_text(ns, "Dropped Off")
@@ -524,7 +607,7 @@ def drop_off(confirm):
             log("  API error on drop off — dismissing (OK) and retrying…")
             ok = next((n for n in nodes if n["text"] == "OK" or n["desc"] == "OK"), None)
             if ok:
-                tap(ok["cx"], ok["cy"], pause=2.0)
+                tap(ok["cx"], ok["cy"], pause=NAV_PAUSE)
             wait_until(lambda ns: _drop_off_btn(ns) or _options_open(ns), tries=8)
             continue
         shot("after_confirm")
@@ -634,7 +717,7 @@ def goto_in_transit_home():
             tap(65, 734); time.sleep(1.5); stuck = 0; continue   # dismiss a stuck Drop Off Options sheet
         tab = find_text(nodes, "In Transit (")
         if tab:
-            tap(tab["cx"], tab["cy"], pause=1.5)
+            tap(tab["cx"], tab["cy"], pause=NAV_PAUSE)
             wait_until(lambda ns: find_text(ns, "View Details") or find_text(ns, "In Transit ("), tries=6)
             return True
         bb = by(nodes, id_suffix="Header.buttonGoBack")   # in-app back (detail -> home)
@@ -677,13 +760,13 @@ def _intransit_count(nodes):
 
 def _open_detail(vd):
     """Tap a View Details card and wait for the shipment detail to load (one retry)."""
-    tap(vd["cx"], vd["cy"], pause=2.0)
+    tap(vd["cx"], vd["cy"], pause=NAV_PAUSE)
     ok = lambda ns: units_from(ns) or _drop_off_btn(ns) or _options_open(ns)
     nodes = wait_until(ok, tries=8)
     if not ok(nodes):
         vd2 = find_text(dump(), "View Details")
         if vd2:
-            tap(vd2["cx"], vd2["cy"], pause=2.0)
+            tap(vd2["cx"], vd2["cy"], pause=NAV_PAUSE)
             nodes = wait_until(ok, tries=8)
     return nodes
 
@@ -874,17 +957,17 @@ def verify_unit(unit_node):
     Generous wait retries: this software-rendered AVD often takes >6s to paint the scan /
     question screens, and a premature timeout here silently abandons the unit (Start
     Loading then stays disabled forever)."""
-    tap(unit_node["cx"], unit_node["cy"], pause=1.5)                 # open the Verify sheet
+    tap(unit_node["cx"], unit_node["cy"], pause=NAV_PAUSE)           # open the Verify sheet
     nodes = wait_until(lambda ns: by(ns, desc="Verify") or find_text(ns, "Verify Method"), tries=12)
     v = by(nodes, desc="Verify")
     if v:
-        tap(v["cx"], v["cy"], pause=1.5)
+        tap(v["cx"], v["cy"], pause=NAV_PAUSE)
     # Manual entry (the emulator has no scanner): tap "Can't Scan QR Code" — NOT "Scan QR",
     # which opens the camera and a permission dialog that dead-ends back to the list.
     nodes = wait_until(lambda ns: find_text(ns, "Can't Scan QR"), tries=12)
     cs = _click(nodes, contains="Can't Scan QR")
     if cs:
-        tap(cs["cx"], cs["cy"], pause=2.0)
+        tap(cs["cx"], cs["cy"], pause=NAV_PAUSE)
     wait_until(lambda ns: find_text(ns, "fully inspect"), tries=12)
     _select_then_next("Yes")                                        # able to fully inspect
     wait_until(lambda ns: find_text(ns, "any damages"), tries=12)
@@ -892,7 +975,7 @@ def verify_unit(unit_node):
     nodes = wait_until(lambda ns: by(ns, desc="Confirm") or find_text(ns, "finish the ver"), tries=12)
     cf = by(nodes, desc="Confirm")
     if cf:
-        tap(cf["cx"], cf["cy"], pause=2.5)
+        tap(cf["cx"], cf["cy"], pause=NAV_PAUSE)
     wait_until(lambda ns: find_text(ns, "Verified") or find_text(ns, "Start Loading"), tries=12)
 
 
@@ -1077,13 +1160,13 @@ def do_pickup(confirm):
     if not (sl and sl["enabled"]):
         log("  Start Loading not enabled (a unit didn't verify) — skipping this shipment.")
         return (False, ship_units, None)
-    tap(sl["cx"], sl["cy"], pause=2.5)
+    tap(sl["cx"], sl["cy"], pause=NAV_PAUSE)
     log("  loading — waiting out the ~2-min timer…")
     nodes = wait_until(_finish_enabled, tries=80, interval=2.0)     # timer is 2:00
     fl = _click(nodes, contains="Finish Loading", min_w=300)
     if not (fl and fl["enabled"]):
         raise RuntimeError("loading timer never enabled Finish Loading")
-    tap(fl["cx"], fl["cy"], pause=2.5)
+    tap(fl["cx"], fl["cy"], pause=NAV_PAUSE)
     wait_until(lambda ns: find_text(ns, "Update ETA") or by(ns, desc="Arrival Date"), tries=8)
     eta = set_eta()                      # sets the ETA, taps its Confirm, waits out the spinner
     # If a separate 'Ready to Depart?' step is shown, confirm it. set_eta already waited for
@@ -1093,24 +1176,31 @@ def do_pickup(confirm):
         cf = by(nodes, desc="Confirm")
         if cf:
             log("  CONFIRMING departure (Ready to Depart)…")
-            tap(cf["cx"], cf["cy"], pause=2.5)
+            tap(cf["cx"], cf["cy"], pause=NAV_PAUSE)
     # VERIFY the departure actually committed: the app returns to the home tabs (In Transit).
-    # If it instead falls back to the pickup detail ('Start Loading'), or just spins, the
-    # departure FAILED (server reject / timeout) — report it so the caller skips this
-    # shipment instead of writing a false 'picked up' ledger and looping.
-    nodes = wait_until(lambda ns: _home_now(ns) or find_text(ns, "Start Loading"),
-                       tries=20, interval=1.5)
+    # Wait ONLY for home — do NOT treat a visible "Start Loading" as failure on sight. That
+    # button belongs to the underlying pickup detail and stays on screen WHILE the departure
+    # spinner runs, so matching it mid-commit declared a false 'reverted' API error on a
+    # departure that was actually still processing (e.g. A56L187: the saved shot showed the
+    # spinner still going). A genuine revert/timeout simply never reaches home and falls
+    # through after the budget below. Generous budget so a slow server commit isn't cut off.
+    # Wait for home (success) OR an actual API-error dialog. We park a shipment ONLY when a real
+    # "API" error is shown — a generic stuck/slow/reverted departure that never reaches home is
+    # NOT parked (it just fails this attempt and is retried next cycle), so we don't wrongly
+    # blacklist shipments that were merely slow to commit.
+    nodes = wait_until(lambda ns: _home_now(ns) or _api_error_shown(ns), tries=30, interval=2.0)
     shot("pickup_departed")
     if _home_now(nodes):
         return (True, ship_units, eta)
-    # Departure never committed (reverted to Start Loading / stuck spinner) = an API error on
-    # this shipment. Park it as 'API ERROR' so it's never retried and surfaces on the
-    # dashboard; do NOT write a pickup ledger.
     shp = ship_units[0][1] if ship_units else ""
     vin = ship_units[0][0] if ship_units else ""
-    log("  departure did NOT complete (reverted to Start Loading / still spinning)")
-    _record_api_error(shp, vin, "pickup_departure",
-                      "departure reverted to Start Loading after ETA confirm")
+    if _api_error_shown(nodes):
+        log("  departure hit an API error — parking the shipment (won't retry)")
+        _record_api_error(shp, vin, "pickup_departure", "API error shown after ETA confirm")
+        return (False, ship_units, None)
+    # No API error on screen — departure just didn't reach home (stuck/slow/reverted). Leave it
+    # for retry next cycle; don't park and don't write a pickup ledger.
+    log("  departure did NOT reach home (no API error shown) — leaving for retry, not parking")
     return (False, ship_units, None)
 
 
@@ -1158,7 +1248,7 @@ def pickup_queue(confirm, max_shipments):
                 log("Pick Up (0) — nothing to pick up.")
             break
         log(f"Pick Up ({cnt}) — shipment {done + 1}")
-        tap(btns[0]["cx"], btns[0]["cy"], pause=2.5)                 # open the pickup detail
+        tap(btns[0]["cx"], btns[0]["cy"], pause=NAV_PAUSE)           # open the pickup detail
         wait_until(lambda ns: pickup_units(ns) or find_text(ns, "Start Loading"), tries=8)
         try:
             committed, ship_units, eta = do_pickup(confirm)
@@ -1254,12 +1344,16 @@ def _api_error_shipments():
         return set()
 
 
+_all_skipped_logged = False   # so "all pickups skipped" prints once, not every idle cycle
+
+
 def process_cycle(confirm, max_shipments):
     """Interleave the two queues: pick up ONE shipment, then immediately drop off that
     SAME shipment in In Transit, then go back to Pick Up and repeat. When no pickups
     remain, drain whatever is left in In Transit (pre-existing deliveries, or a pickup
     whose In-Transit entry wasn't found above). ONE pull-to-refresh per cycle.
     Returns (n_pickup, n_dropoff)."""
+    global _all_skipped_logged
     if not goto_pickup_tab():
         log("couldn't reach the home tabs.")
         return (0, 0)
@@ -1279,8 +1373,13 @@ def process_cycle(confirm, max_shipments):
             break                  # no more pickups -> fall through to drain In Transit
         opened = _open_unskipped_pickup(tried)
         if opened is None:
-            log("  remaining pickups are all skipped (skip-list or already tried this cycle)")
+            # Log this ONCE; stay quiet on consecutive idle cycles where nothing changed.
+            # Re-armed below as soon as a real pickup is opened, so it shows again later.
+            if not _all_skipped_logged:
+                log("  remaining pickups are all skipped (skip-list or already tried this cycle)")
+                _all_skipped_logged = True
             break
+        _all_skipped_logged = False   # a real pickup opened -> allow the notice again later
         tried.add(opened)          # never reopen the same shipment within this cycle
         log(f"Pick Up — picking up {opened}")
         wait_until(lambda ns: pickup_units(ns) or find_text(ns, "Start Loading"), tries=8)
