@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.17.0
+// @version      0.18.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -181,8 +181,12 @@
     if (host || !document.documentElement) return;
     host = document.createElement('div');
     host.id = 'bidpanel-host';
-    // Centered via transform — the portal's CSS overrides `right`, so left:50%+translateX is the reliable anchor.
-    host.style.cssText = 'position:fixed;top:56px;left:50%;transform:translateX(-50%);width:min(1280px,96vw);height:86vh;z-index:2147483647;';
+    // Default position: centered in the window but shifted RIGHT of the portal's left nav column,
+    // clamped on-screen. Explicit px `left` (not a transform) so clicking the header never makes it jump.
+    const navW = 210, pw = Math.min(1280, window.innerWidth * 0.96);
+    let left = navW + (window.innerWidth - navW - pw) / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    host.style.cssText = `position:fixed;top:56px;left:${Math.round(left)}px;width:${Math.round(pw)}px;height:86vh;z-index:2147483647;`;
     root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `
       <style>
@@ -300,7 +304,7 @@
 
   function makeDraggable(handle, target) {
     let sx, sy, ox, oy, drag = false;
-    handle.addEventListener('mousedown', (e) => { drag = true; sx = e.clientX; sy = e.clientY; const r = target.getBoundingClientRect(); ox = r.left; oy = r.top; target.style.right = 'auto'; target.style.transform = 'none'; e.preventDefault(); });
+    handle.addEventListener('mousedown', (e) => { drag = true; sx = e.clientX; sy = e.clientY; const r = target.getBoundingClientRect(); ox = r.left; oy = r.top; target.style.left = ox + 'px'; target.style.top = oy + 'px'; target.style.right = 'auto'; target.style.transform = 'none'; e.preventDefault(); });
     window.addEventListener('mousemove', (e) => { if (!drag) return; target.style.left = (ox + e.clientX - sx) + 'px'; target.style.top = (oy + e.clientY - sy) + 'px'; });
     window.addEventListener('mouseup', () => { drag = false; });
   }
