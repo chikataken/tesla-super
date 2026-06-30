@@ -192,7 +192,8 @@ def api_orders(file: Optional[str] = None):
     for o in orders:
         _annotate_dates(o)
     return {"file": os.path.basename(path), "count": len(orders), "orders": orders,
-            "unpostable": _unpostable_vins(), "duplicates_removed": dups_removed}
+            "unpostable": _unpostable_vins(), "duplicates_removed": dups_removed,
+            "duplicates_removed_detail": _load_json(_dups_removed_detail_path(), {})}
 
 
 def _z5(z) -> str:
@@ -345,6 +346,12 @@ def _dups_removed_path() -> str:
     return os.path.join(_pdir(), "duplicates_removed.json")
 
 
+def _dups_removed_detail_path() -> str:
+    # vin -> {number, pickup_city/state, delivery_city/state}; feeds the focused 'duplicates
+    # removed' view so removed VINs can be grouped by route. Cumulative; cleared on /api/reset.
+    return os.path.join(_pdir(), "duplicates_removed_detail.json")
+
+
 def _auto_remove_sd_duplicates() -> list:
     """DROP any board VIN that's already posted/accepted on SuperDispatch entirely (not to
     spares) so a re-post can't create a duplicate. Tracks the cumulative removed VINs for
@@ -359,6 +366,7 @@ def _auto_remove_sd_duplicates() -> list:
         with open(path, encoding="utf-8") as f:
             batch = json.load(f)
         dups: set = set()
+        detail: dict = {}        # vin -> route info, for the focused 'duplicates removed' view
         changed = False
         for o in batch:
             # this board order's route (origin zip5, dest zip5) + its shipment number
@@ -382,6 +390,11 @@ def _auto_remove_sd_duplicates() -> list:
                 dup_name = bool(vin and numbers and _shipment_name_matches(bnum, numbers))
                 if dup_route or dup_name:
                     dups.add(vin)
+                    pv = (o.get("pickup") or {}).get("venue") or {}
+                    dv = (o.get("delivery") or {}).get("venue") or {}
+                    detail[vin] = {"vin": vin, "number": o.get("number"),
+                                   "pickup_city": pv.get("city"), "pickup_state": pv.get("state"),
+                                   "delivery_city": dv.get("city"), "delivery_state": dv.get("state")}
                 else:
                     kept.append(v)
             if len(kept) != len(o.get("vehicles") or []):
@@ -398,6 +411,11 @@ def _auto_remove_sd_duplicates() -> list:
                     removed.append(d)
                     seen.add(d)
             _save_json(_dups_removed_path(), removed)
+            det = _load_json(_dups_removed_detail_path(), {})
+            if not isinstance(det, dict):
+                det = {}
+            det.update(detail)
+            _save_json(_dups_removed_detail_path(), det)
     return removed
 
 
@@ -976,7 +994,7 @@ def api_reset():
         except OSError:
             pass
     for p in (_active_excel_path(), _spares_path(), _search_path(), _consol_path(),
-              _dups_removed_path()):
+              _dups_removed_path(), _dups_removed_detail_path()):
         try:
             if os.path.exists(p):
                 os.remove(p)
