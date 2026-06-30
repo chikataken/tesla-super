@@ -955,7 +955,18 @@ function renderRecNav(counts, total){
   for(const s of order) html += item(s, s.replace('_',' '), counts[s]);
   $('#recNav').innerHTML = html;
 }
-function recSetStatus(s){ REC.status = s; loadRecorded(); }
+function recSetStatus(s){
+  REC.status = s;
+  // The status buttons sit in the top bar and are reachable from any tab; clicking one
+  // should JUMP to the Recorded tab with that filter applied — not silently filter in the
+  // background. Switch tabs if needed (the tab handler then loads with REC.status set).
+  const rec = document.getElementById('recorded');
+  if(rec && !rec.classList.contains('active')){
+    const b = document.querySelector('.navitem[data-tab="recorded"]');
+    if(b){ b.click(); return; }
+  }
+  loadRecorded();
+}
 
 function money(p){ return p==null?'—':'$'+Number(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtDate(iso){ const d=new Date(iso+'T00:00:00'); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
