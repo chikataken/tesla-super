@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.14.0
+// @version      0.15.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -102,6 +102,10 @@
   const hasCounter = (bids) => bids.some((b) => b.carrierCounter && b.carrierCounter.bidAmount != null);
   function centerInPane(pane, el, smooth) { if (!pane || !el) return; const pr = pane.getBoundingClientRect(), er = el.getBoundingClientRect(); const top = pane.scrollTop + (er.top - pr.top) - (pane.clientHeight / 2 - el.clientHeight / 2); pane.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' }); }
   const existingCounter = (subset) => { const b = subset.find((x) => x.carrierCounter && x.carrierCounter.bidAmount != null); return b ? b.carrierCounter.bidAmount : null; };
+  // Most common existing counter price across the subset's VINs (for the faded placeholder).
+  function existingMajority(subset) { const c = {}; let best = null, bn = 0; for (const b of subset) { const a = b.carrierCounter && b.carrierCounter.bidAmount; if (a == null) continue; c[a] = (c[a] || 0) + 1; if (c[a] > bn) { bn = c[a]; best = a; } } return best; }
+  // A box is "done" (skipped by Enter) only when EVERY VIN already has a counter; partials are not skipped.
+  const fullyPriced = (subset) => subset.length > 0 && subset.every((b) => b.carrierCounter && b.carrierCounter.bidAmount != null);
 
   // --- Pickup + recommended ETA ---------------------------------------------
   // Pickup is always 16:00Z (4 PM), USD. Pickup DATE = today if local clock < 2:45 PM, else tomorrow.
@@ -165,7 +169,14 @@
   }
 
   // ---- 3) Panel -------------------------------------------------------------
-  let host, root, body, rafPending = 0;
+  let host, root, body, rafPending = 0, toastTimer = 0;
+  function showToast(msg) {
+    if (!root) return;
+    let t = root.querySelector('.toast');
+    if (!t) { t = document.createElement('div'); t.className = 'toast'; root.querySelector('.panel').appendChild(t); }
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+  }
   function ensurePanel() {
     if (host || !document.documentElement) return;
     host = document.createElement('div');
@@ -176,7 +187,9 @@
     root.innerHTML = `
       <style>
         *{box-sizing:border-box;font-family:Inter,system-ui,Arial,sans-serif}
-        .panel{display:flex;flex-direction:column;height:100%;background:#fff;color:#171a20;border:1px solid #d0d3d6;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);overflow:hidden}
+        .panel{position:relative;display:flex;flex-direction:column;height:100%;background:#fff;color:#171a20;border:1px solid #d0d3d6;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);overflow:hidden}
+        .toast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%) translateY(8px);background:#171a20;color:#fff;padding:9px 18px;border-radius:9px;font-size:13px;font-weight:800;letter-spacing:.02em;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:6}
+        .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
         .hd{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#171a20;color:#fff;cursor:move;user-select:none}
         .hd .ttl{font-weight:700;font-size:14px;flex:1}.hd .sub{font-size:12px;opacity:.7;font-weight:500}
         .hd button{background:#2b2f37;color:#fff;border:0;border-radius:6px;padding:4px 8px;font-size:13px;cursor:pointer}.hd button:hover{background:#3a3f49}
@@ -271,6 +284,7 @@
       // Finishing a card (Enter moves to a different card, or the end) sends that card's bids — always live.
       if (curCard && nextCard !== curCard) submitCard(curCard);
       if (next) { if (nextCard) centerInPane(body.right, nextCard, true); next.focus({ preventScroll: true }); if (next.select) next.select(); }
+      else { e.target.blur(); showToast('Bids Finished'); }   // reached the end of the list
     });
     makeDraggable(root.getElementById('hd'), host);
     setupNav();
@@ -307,8 +321,9 @@
   function priceBox(key, variant, subset) {
     const k = key + '|' + variant;
     const local = state.prices[k] != null ? state.prices[k] : '';
-    const existing = existingCounter(subset);             // existing counter price for this subset, or null
-    const ph = existing != null ? String(existing) : '';  // placeholder shows the existing price after the "$"
+    const maj = existingMajority(subset);                 // majority existing price -> faded placeholder
+    const ph = maj != null ? String(maj) : '';
+    const done = fullyPriced(subset);                     // skip on Enter only when ALL VINs are already priced
     const cap = variant === 'ct'
       ? `<span class="badge ct">CT</span> <span class="num">${subset.length}</span>`
       : variant === 'cab'
@@ -316,7 +331,7 @@
       : `<span class="num">${subset.length}</span> VIN${subset.length === 1 ? '' : 's'}`;
     return `<div class="price-col"><div class="pcap">${cap}</div>`
       + `<div class="pin${local !== '' ? ' filled' : ''}"><span class="cur">$</span>`
-      + `<input class="price" type="text" inputmode="decimal" placeholder="${esc(ph)}" value="${esc(local)}" data-key="${esc(k)}" data-priced="${existing != null ? 1 : 0}"></div></div>`;
+      + `<input class="price" type="text" inputmode="decimal" placeholder="${esc(ph)}" value="${esc(local)}" data-key="${esc(k)}" data-priced="${done ? 1 : 0}"></div></div>`;
   }
 
   // A non-interactive styling preview pinned at the top of the focus pane.
