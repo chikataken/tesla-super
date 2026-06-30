@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.16.0
+// @version      0.17.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -249,17 +249,15 @@
         .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:16px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
       </style>
       <div class="panel">
-        <div class="hd" id="hd"><div class="ttl">Bid Board <span class="sub" id="sub"></span></div><span class="livebadge">● LIVE</span><button id="reload">Reload</button><button id="min">–</button></div>
-        <div class="tools"><div class="trow"><input id="filter" placeholder="Filter…" /><label><input type="checkbox" id="sortcb" /> by VINs</label></div><div class="trow"><button id="todo" class="todobtn">ALL</button></div></div>
+        <div class="hd" id="hd"><div class="ttl">Bid Board <span class="sub" id="sub"></span></div><span class="livebadge">● LIVE</span><button id="min">–</button></div>
+        <div class="tools"><div class="trow"><button id="todo" class="todobtn">ALL</button><input id="filter" placeholder="Filter…" /></div></div>
         <div class="bodywrap"><div class="left" id="left"></div><div class="right" id="right"></div></div>
       </div>`;
     document.documentElement.appendChild(host);
 
-    body = { sub: root.getElementById('sub'), left: root.getElementById('left'), right: root.getElementById('right'), filter: root.getElementById('filter'), sortcb: root.getElementById('sortcb') };
-    root.getElementById('reload').addEventListener('click', () => loadAll());
+    body = { sub: root.getElementById('sub'), left: root.getElementById('left'), right: root.getElementById('right'), filter: root.getElementById('filter') };
     root.getElementById('min').addEventListener('click', (e) => { const w = root.querySelector('.bodywrap'), t = root.querySelector('.tools'); const h = w.classList.toggle('hidden'); t.classList.toggle('hidden', h); e.target.textContent = h ? '+' : '–'; });
     body.filter.addEventListener('input', () => { state.filter = body.filter.value.trim().toLowerCase(); render(); });
-    body.sortcb.addEventListener('change', () => { state.sortByCount = body.sortcb.checked; render(); });
     root.getElementById('todo').addEventListener('click', (e) => { state.todoOnly = !state.todoOnly; e.target.textContent = state.todoOnly ? 'TO-DO' : 'ALL'; e.target.classList.toggle('on', state.todoOnly); render(); });
     body.right.addEventListener('scroll', () => { if (rafPending) return; rafPending = requestAnimationFrame(() => { rafPending = 0; syncFromRight(); }); });
     body.right.addEventListener('input', (e) => { const t = e.target; if (t.classList && t.classList.contains('price')) { state.prices[t.dataset.key] = t.value; const pin = t.closest('.pin'); if (pin) pin.classList.toggle('filled', t.value.trim() !== ''); } });
