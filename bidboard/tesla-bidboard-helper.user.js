@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.11.0
+// @version      0.12.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
+// @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
 // @match        https://suppliers.teslamotors.com/logistics/bidboard2*
 // @run-at       document-start
 // @grant        none
@@ -268,6 +270,19 @@
       if (next) { if (nextCard) centerInPane(body.right, nextCard, true); next.focus({ preventScroll: true }); if (next.select) next.select(); }
     });
     makeDraggable(root.getElementById('hd'), host);
+    setupNav();
+  }
+
+  // Show the panel only on the bid board; hide it the instant the SPA routes elsewhere.
+  function setupNav() {
+    const onBidBoard = () => /\/logistics\/bidboard2/i.test(location.pathname);
+    const apply = () => { if (host) host.style.display = onBidBoard() ? '' : 'none'; };
+    ['pushState', 'replaceState'].forEach((m) => { const o = history[m]; history[m] = function () { const r = o.apply(this, arguments); apply(); return r; }; });
+    window.addEventListener('popstate', apply);
+    window.addEventListener('hashchange', apply);
+    let last = location.href;
+    setInterval(() => { if (location.href !== last) { last = location.href; apply(); } }, 300);   // fallback for routers that bypass pushState
+    apply();
   }
 
   function makeDraggable(handle, target) {
