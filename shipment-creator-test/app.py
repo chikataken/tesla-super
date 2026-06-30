@@ -24,7 +24,8 @@ import time
 from typing import Optional
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
+                               RedirectResponse, Response, StreamingResponse)
 
 import paths
 
@@ -1885,6 +1886,33 @@ async def webhook_forward(request: Request):
 def index():
     with open(paths.resource_path("static", "index.html"), encoding="utf-8") as fh:
         return fh.read()
+
+
+# ---- "App" tab: embed the app-delivery dashboard ----------------------------
+# The Tesla drop-off/pickup dashboard runs as its own local service on :8011
+# (app-delivery-web). We reverse-proxy it under /app/ so it appears as an "App" tab
+# inside shipments.wastake.com instead of a separate subdomain. The dashboard uses
+# relative URLs (api, photos, img), so they resolve under /app/ here.
+_APP_DASH = os.getenv("APP_DASH_URL", "http://127.0.0.1:8011")
+
+
+@app.get("/app")
+def _app_index():
+    return RedirectResponse("/app/")
+
+
+@app.get("/app/{path:path}")
+def _app_proxy(path: str, request: Request):
+    import requests as _requests
+    url = f"{_APP_DASH}/{path}"
+    if request.url.query:
+        url += "?" + request.url.query
+    try:
+        r = _requests.get(url, timeout=20)
+    except Exception as e:                       # the dashboard service is down
+        return PlainTextResponse(f"App dashboard unreachable: {e}", status_code=502)
+    return Response(content=r.content, status_code=r.status_code,
+                    media_type=r.headers.get("Content-Type", "application/octet-stream"))
 
 
 def _redirect_output_to_logfile():
