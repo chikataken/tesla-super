@@ -45,8 +45,11 @@ Clicking the pencil opens a **"Counter Offer for VIN: <vin>"** popover (`cdk-ove
   - Auth: same bearer + `x-selectedCarrierId`, `credentials:'omit'`; → 200, response `{ data, success }`.
   - Observed values: pickup = today 16:00Z, ETA = chosen date 16:00Z. So a bid is fully built from
     (price box) + (date-selector value) + today.
-  - **Open:** captured on an already-offered VIN. Never-offered VINs all have bidIds, so UpdateOffer likely
-    upserts — but the "Make Offer" button may hit a different endpoint; capture one to confirm before bidding new VINs.
+  - **Create vs update (confirmed):** UpdateOffer only *edits an existing* offer. A VIN with no offer needs
+    `POST {base}/BidBoard/{bidId}/MakeOffer` — **same id (bidId), identical payload**, → 200 `{data,success:true}`.
+    So the tool picks the verb per VIN: `carrierCounter` present → UpdateOffer, else → MakeOffer.
+    (Bug that hid this: old code counted any HTTP 200 as "sent"; UpdateOffer on a new VIN returns 200 success:false,
+    so TO-DO bids silently no-op'd. v0.13 checks the success flag; v0.14 sends MakeOffer for new VINs.)
 
 ## Implications for the tool
 - "Multiply across a route" = drive the per-VIN modal (or POST the offer) for every VIN in the group.

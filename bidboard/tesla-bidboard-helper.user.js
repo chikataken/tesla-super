@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.13.0
+// @version      0.14.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -132,7 +132,8 @@
 
   // --- Bid submission (the captured UpdateOffer write) -----------------------
   // POST {base}/BidBoard/{bidId}/UpdateOffer  {CurrencyCode, BidAmount, EstimatedShipDate, NeededByDate, OfferExpiryDate}
-  const writeUrl = (bidId) => state.endpoint.replace(/groups(\?.*)?$/i, '') + bidId + '/UpdateOffer';
+  // verb: MakeOffer for a VIN with no offer yet, UpdateOffer to change an existing one (same id + payload).
+  const writeUrl = (bidId, verb) => state.endpoint.replace(/groups(\?.*)?$/i, '') + bidId + '/' + verb;
   function bidsForKey(key) {
     const sep = key.lastIndexOf('|'), leg = key.slice(0, sep), variant = key.slice(sep + 1);
     const g = state.groups.find((x) => legKey(x) === leg); if (!g) return { g: null, vins: [] };
@@ -140,8 +141,8 @@
     const vins = variant === 'cab' ? all.filter(isCAB) : variant === 'ct' ? all.filter((b) => !isCAB(b) && isCT(b)) : all.filter((b) => !isCAB(b) && !isCT(b));
     return { g, vins };
   }
-  async function postOffer(bidId, body) {
-    const resp = await fetch(writeUrl(bidId), { method: 'POST', headers: Object.assign(replayHeaders(), { 'Content-Type': 'application/json' }), body: JSON.stringify(body), credentials: 'omit' });
+  async function postOffer(bidId, verb, body) {
+    const resp = await fetch(writeUrl(bidId, verb), { method: 'POST', headers: Object.assign(replayHeaders(), { 'Content-Type': 'application/json' }), body: JSON.stringify(body), credentials: 'omit' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const j = await resp.json().catch(() => ({}));
     if (j && j.success === false) throw new Error('Tesla returned success:false'); // 200 but logically rejected
@@ -156,7 +157,7 @@
     for (const inp of inputs) {
       const { g, vins } = bidsForKey(inp.dataset.key); if (!g) continue;
       const body = { CurrencyCode: 'USD', BidAmount: String(inp.value.trim()), EstimatedShipDate: iso16(pickupDate()), NeededByDate: iso16(selectedEta(g)), OfferExpiryDate: null };
-      for (const b of vins) { try { await postOffer(b.bidId, body); sent++; } catch (e) { failed++; console.warn('[bidpanel] bid FAILED for', b.vin, '—', e && e.message); } }
+      for (const b of vins) { const verb = (b.carrierCounter && b.carrierCounter.bidAmount != null) ? 'UpdateOffer' : 'MakeOffer'; try { await postOffer(b.bidId, verb, body); sent++; } catch (e) { failed++; console.warn('[bidpanel] bid FAILED for', b.vin, '—', e && e.message); } }
     }
     cardEl.classList.remove('sending'); cardEl.classList.add(failed ? 'submit-err' : 'submitted');
     let tag = cardEl.querySelector('.subtag'); if (!tag) { tag = document.createElement('div'); tag.className = 'subtag'; cardEl.appendChild(tag); }
