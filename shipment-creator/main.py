@@ -332,6 +332,33 @@ def main():
         is_all = (_pid == profiles.ALL_PROFILE_ID)
         row_by_vin = {r.vin: r for r in rows if r.ok}
 
+        def _api_dedup_scan(board):
+            """Per-VIN dedup source that REPLACES the loadboard scrape: send every board VIN
+            through find_by_vin, resolve its existing SD orders (any status, incl. delivered)
+            and write them to consolidation_search.json for the board-open duplicate check
+            (_auto_remove_sd_duplicates). No per-VIN throttle; a 1.5s pause every 100 VINs
+            keeps it polite — the HTTP layer also backs off on 429."""
+            import consolidation
+            vins = sorted({v.get("vin") for o in board for v in (o.get("vehicles") or [])
+                           if v.get("vin")})
+            if not vins:
+                return 0
+            print(f"Checking {len(vins)} board VIN(s) against SuperDispatch via find_by_vin "
+                  f"(no scrape; 1.5s pause every 100)…")
+            res = consolidation.find_orders_for_vins(
+                vins, throttle_s=0, batch_size=100, batch_pause_s=1.5)
+            if res.auth_error:
+                print(f"  ⚠ SuperDispatch auth error ({res.auth_error}); dedup data may be incomplete.")
+            annotated = consolidation.match_against_routes(res.orders, board, my_vins=vins)
+            with open(os.path.join(_pbase, "consolidation_search.json"), "w") as f:
+                json.dump({"orders": annotated, "route_hits": [],
+                           "checked_vins": res.checked_vins, "found_vins": res.found_vins,
+                           "not_found_vins": res.not_found_vins, "errors": res.errors,
+                           "auth_error": res.auth_error}, f, indent=2, default=str)
+            print(f"  {len(res.found_vins)} VIN(s) sit on an existing SD order; "
+                  f"{len(res.not_found_vins)} have none -> output/consolidation_search.json")
+            return len(res.orders)
+
         if not is_all:
             # NON-ALL dispatchers NEVER touch Tesla (auth problems). Build every shipment
             # from the Excel row; the posting overlay upgrades any stop whose terminal name
@@ -342,11 +369,11 @@ def main():
                     rec_by_vin[vin] = terminals_lookup.build_record_from_excel(vin, r.fields)
             print(f"Built {len(rec_by_vin)} shipment(s) from the terminal DB + Excel — "
                   f"no Tesla portal.")
-            _restage()
+            payloads = _restage()                      # final board
             if config.SD_SCAN:
-                import sd_scrape
-                sd_hits = sd_scrape.scan_loadboard(sd_scan_pairs)
-            payloads = _restage()                      # final
+                # Dedup source: per-VIN find_by_vin over the whole board (NOT the loadboard
+                # scrape). Writes consolidation_search.json for the board-open dup check.
+                _api_dedup_scan(base + payloads)
         else:
             # ALL: the terminal-feeding profile. GATE: skip the Tesla portal for any shipment
             # whose BOTH terminals are already cached (synthesize from cache); the rest hit
@@ -396,10 +423,10 @@ def main():
               f"{skipped} VIN(s) skipped; {len(base) + len(payloads)} order(s) total "
               f"on the board (SD_ENV={config.SD_ENV}) -> {stage} ===")
 
-        # Final SD reconcile sweep — the per-BOL pass (in _on_bol) already matched on the
-        # spot; this catches any scan candidate whose BOL landed before the concurrent
-        # scan finished populating sd_hits. Best-effort: logs and is skipped on error.
-        if config.SD_SCAN:
+        # Final SD reconcile sweep — ONLY the scrape path (ALL profile / BOL flow) needs it;
+        # the non-ALL dispatcher flow already wrote consolidation_search.json via the per-VIN
+        # _api_dedup_scan above, so running this would overwrite it with empty scrape hits.
+        if config.SD_SCAN and is_all:
             try:
                 total = _reconcile_sd(base + payloads, None)
                 print(f"  SD matches: {total} order(s) match a board route exactly "

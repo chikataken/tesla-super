@@ -217,6 +217,43 @@ def _route_endpoint_matches(broute, routes) -> bool:
     return False
 
 
+COMPLETED_WINDOW_DAYS = 31    # "within a month": a recently-completed car re-appearing = dup
+# Post-delivery statuses — a car here was delivered (and possibly billed). Recently-completed
+# = duplicate; older than the window = a legitimate later re-ship, so it passes through.
+COMPLETED_STATUSES = ("delivered", "invoiced", "paid")
+
+
+def _parse_sd_ts(ts):
+    """Parse an SD timestamp ('2026-06-28T11:10:49.000+0000', '+00:00', or 'Z') to an aware
+    datetime, or None."""
+    import datetime as _dt
+    import re as _re
+    s = str(ts or "").strip()
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    s = _re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", s)        # +0000 -> +00:00
+    try:
+        return _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _completed_within_month(o) -> bool:
+    """True if the order is DELIVERED / INVOICED / PAID and its delivered_at is within
+    COMPLETED_WINDOW_DAYS of now. Recently-completed cars count as live for the dup check;
+    older ones pass through (a genuine later re-ship of the same car isn't blocked)."""
+    import datetime as _dt
+    if (o.get("status") or "").strip().lower() not in COMPLETED_STATUSES:
+        return False
+    d = _parse_sd_ts(o.get("delivered_at"))
+    if not d:
+        return False
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return (_dt.datetime.now(_dt.timezone.utc) - d).days <= COMPLETED_WINDOW_DAYS
+
+
 def _sd_live_vin_routes() -> dict:
     """For each VIN already on a POSTED/ACCEPTED/PENDING/PICKED-UP SuperDispatch order —
     taken from the latest loadboard scan, which is enriched from the API (get_order) so
@@ -224,25 +261,30 @@ def _sd_live_vin_routes() -> dict:
     preview — the set of (pickup_zip5, delivery_zip5) routes that order runs.
 
     An order counts as live if EITHER its loadboard_status OR its lifecycle status is one of
-    posted/accepted/pending/picked_up. This matters because once a carrier ACCEPTS an order
-    (or the car is PICKED UP) SuperDispatch clears loadboard_status to null — the live state
-    then lives ONLY in the lifecycle `status`. The scrape stamps loadboard_status from the
-    tab it was found on; the API-direct path leaves loadboard_status null but carries the
-    real `status`. Checking only loadboard_status (as we used to) let an already-ACCEPTED VIN
-    re-post as a duplicate. delivered/invoiced/paid/canceled are NOT live → a legitimate
-    re-post passes through.
+    new/posted/accepted/pending/picked_up. 'new' = created but not yet posted to the
+    loadboard (a draft order already on SD) — re-creating the same VIN+route is a duplicate,
+    so it's included. This matters because once a carrier ACCEPTS an order (or the car is
+    PICKED UP) SuperDispatch clears loadboard_status to null — the live state then lives ONLY
+    in the lifecycle `status`. An order is ALSO live if is_posted_to_loadboard is True — the
+    most reliable signal: SD marks 'new' orders that are posted-but-not-yet-accepted this way
+    (status='new' + is_posted_to_loadboard=True), which the website shows as posted. Checking
+    only loadboard_status (as we used to) let an already-ACCEPTED or posted-'new' VIN re-post
+    as a duplicate.
+
+    Recently-COMPLETED orders also count as live: status delivered/invoiced/paid whose
+    delivered_at is within ~a month. A car delivered (or delivered+billed) weeks ago that
+    re-appears on the board is almost certainly a duplicate; an OLD completed order (>1mo)
+    passes through so a legitimate later re-ship of the same car isn't blocked. canceled is
+    never live.
 
     A board VIN is a duplicate when its route shares an endpoint with one of these — same
     origin OR same destination (see _route_endpoint_matches). A VIN whose board route shares
     NEITHER endpoint is a legitimate re-post (chained delivery: dropped off, then shipped on
     from there), so it passes through."""
-    LIVE = ("posted", "accepted", "pending", "picked_up")
     search = _load_json(_search_path(), {})
     out: dict[str, set] = {}
     for o in (search.get("orders") or []):
-        lb = (o.get("loadboard_status") or "").strip().lower()
-        life = (o.get("status") or "").strip().lower()
-        if lb not in LIVE and life not in LIVE:
+        if not _order_is_live(o):
             continue
         route = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                  _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
@@ -251,6 +293,52 @@ def _sd_live_vin_routes() -> dict:
             if vin:
                 out.setdefault(vin, set()).add(route)
     return out
+
+
+_LIVE_STATUSES = ("new", "posted", "accepted", "pending", "picked_up")
+
+
+def _order_is_live(o) -> bool:
+    """Whether an SD order should block a re-post: it's actually on the loadboard right now
+    (is_posted_to_loadboard — true even for 'new' orders posted-but-not-yet-accepted), OR its
+    lifecycle status is active (new/posted/accepted/pending/picked_up), OR it was completed
+    (delivered/invoiced/paid) within the last month. canceled / old-completed are NOT live."""
+    lb = (o.get("loadboard_status") or "").strip().lower()
+    life = (o.get("status") or "").strip().lower()
+    return (lb in _LIVE_STATUSES or life in _LIVE_STATUSES
+            or bool(o.get("is_posted_to_loadboard")) or _completed_within_month(o))
+
+
+def _sd_live_vin_numbers() -> dict:
+    """Per VIN, the set of order NUMBERS (shipment names) it sits on among live SD orders. A
+    board VIN whose order number matches one of these is the SAME shipment already on SD — a
+    duplicate even if the route zips differ slightly (e.g. the terminal resolved to a nearby
+    address, so the endpoint match misses it). Order-number match is route-independent."""
+    search = _load_json(_search_path(), {})
+    out: dict[str, set] = {}
+    for o in (search.get("orders") or []):
+        if not _order_is_live(o):
+            continue
+        num = str(o.get("number") or "").strip().upper()
+        if not num:
+            continue
+        for v in (o.get("vehicles") or []):
+            vin = (v.get("vin") or "").strip().upper()
+            if vin:
+                out.setdefault(vin, set()).add(num)
+    return out
+
+
+def _shipment_name_matches(board_num: str, sd_numbers) -> bool:
+    """True if any of the VIN's live SD order numbers STARTS WITH the board's Excel shipment
+    string — so a hand-edited SD name keeps matching whether the appended suffix has a
+    separator ('A56G063-2', 'A56G063 direct', 'A56G063-1 sac') or not ('A56G0631'). A
+    genuinely different id that diverges (e.g. 'A56G064') is not a prefix, so it doesn't
+    match; nor does a string that merely contains it later ('XA56G063')."""
+    bn = (board_num or "").strip().upper()
+    if not bn:
+        return False
+    return any((n or "").strip().upper().startswith(bn) for n in (sd_numbers or ()))
 
 
 def _dups_removed_path() -> str:
@@ -264,26 +352,35 @@ def _auto_remove_sd_duplicates() -> list:
     Idempotent: once removed, a VIN is off the board, so a second call adds nothing."""
     removed = list(_load_json(_dups_removed_path(), []))
     live_routes = _sd_live_vin_routes()
+    live_numbers = _sd_live_vin_numbers()
     files = _staged_files()
-    if live_routes and files:
+    if (live_routes or live_numbers) and files:
         path = files[0]
         with open(path, encoding="utf-8") as f:
             batch = json.load(f)
         dups: set = set()
         changed = False
         for o in batch:
-            # this board order's route (origin zip5, dest zip5)
+            # this board order's route (origin zip5, dest zip5) + its shipment number
             broute = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                       _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
+            bnum = str(o.get("number") or "").strip().upper()
             kept = []
             for v in (o.get("vehicles") or []):
                 vin = (v.get("vin") or "").strip().upper()
                 routes = live_routes.get(vin)
-                # Drop when SD already has this VIN posted on a route sharing an ENDPOINT with
-                # this one — same origin OR same destination (positional). A route that shares
-                # NEITHER endpoint passes through, so a genuine chained re-delivery (A->B then
-                # B->C: B sits in different positions, so no endpoint matches) can still post.
-                if vin and routes and _route_endpoint_matches(broute, routes):
+                numbers = live_numbers.get(vin)
+                # Drop when SD already has this VIN live on a matching shipment, by EITHER:
+                #  (a) ROUTE — same origin OR same destination zip (positional). A route that
+                #      shares NEITHER endpoint passes (a genuine chained re-delivery A->B->C).
+                #  (b) SHIPMENT NAME — the board's Excel shipment string appears UNBROKEN in a
+                #      live SD order number the VIN sits on (so a hand-edited 'A56G063-2' /
+                #      'A56G063 direct' still matches 'A56G063'). Catches same-shipment dups
+                #      whose zips drifted slightly (terminal resolved to a nearby address),
+                #      which the route check misses.
+                dup_route = bool(vin and routes and _route_endpoint_matches(broute, routes))
+                dup_name = bool(vin and numbers and _shipment_name_matches(bnum, numbers))
+                if dup_route or dup_name:
                     dups.add(vin)
                 else:
                     kept.append(v)
