@@ -222,22 +222,26 @@ def _sd_live_vin_routes() -> dict:
     EVERY VIN on a multi-car order is included, not just the one shown in the '+N' card
     preview — the set of (pickup_zip5, delivery_zip5) routes that order runs.
 
-    posted/accepted/pending are live on the loadboard (is_posted_to_loadboard=True). A
-    PICKED-UP car is off the loadboard (loadboard_status is null) but still in transit on its
-    route — re-posting it would duplicate a car already being delivered, so it's treated as
-    live too. The scrape stamps loadboard_status='picked_up'; the API-direct path leaves
-    loadboard_status null but carries the lifecycle status='picked_up' — accept either.
+    An order counts as live if EITHER its loadboard_status OR its lifecycle status is one of
+    posted/accepted/pending/picked_up. This matters because once a carrier ACCEPTS an order
+    (or the car is PICKED UP) SuperDispatch clears loadboard_status to null — the live state
+    then lives ONLY in the lifecycle `status`. The scrape stamps loadboard_status from the
+    tab it was found on; the API-direct path leaves loadboard_status null but carries the
+    real `status`. Checking only loadboard_status (as we used to) let an already-ACCEPTED VIN
+    re-post as a duplicate. delivered/invoiced/paid/canceled are NOT live → a legitimate
+    re-post passes through.
 
     A board VIN is a duplicate when its route shares an endpoint with one of these — same
     origin OR same destination (see _route_endpoint_matches). A VIN whose board route shares
     NEITHER endpoint is a legitimate re-post (chained delivery: dropped off, then shipped on
     from there), so it passes through."""
+    LIVE = ("posted", "accepted", "pending", "picked_up")
     search = _load_json(_search_path(), {})
     out: dict[str, set] = {}
     for o in (search.get("orders") or []):
         lb = (o.get("loadboard_status") or "").strip().lower()
         life = (o.get("status") or "").strip().lower()
-        if lb not in ("posted", "accepted", "pending", "picked_up") and life != "picked_up":
+        if lb not in LIVE and life not in LIVE:
             continue
         route = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                  _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
@@ -1726,13 +1730,19 @@ def api_recorded(status: Optional[str] = None, q: Optional[str] = None,
         con = rdb.connect()
     except Exception as e:                                   # noqa: BLE001
         return {"orders": [], "total": 0, "counts": {}, "error": str(e)}
+    # Restrict to the active dispatcher's pickup states so a user only sees their own
+    # shipments — same filter the board uses, resolved per-request via _pid() (X-Profile
+    # header) so each browser sees its own selection. Empty (Didi/bypass, or no states
+    # set) = all.
+    import profiles
+    states = profiles.allowed_states(profiles.get_profile(_pid()))
     try:
         return {
             "orders": rdb.list_orders(con, status=status, q=q,
                                       limit=min(limit, 2000), offset=offset,
-                                      sort=sort, direction=dir),
-            "total": rdb.total(con),
-            "counts": rdb.counts_by_status(con),
+                                      sort=sort, direction=dir, states=states),
+            "total": rdb.total(con, states=states),
+            "counts": rdb.counts_by_status(con, states=states),
             "meta": _recorded_meta(con),
         }
     finally:

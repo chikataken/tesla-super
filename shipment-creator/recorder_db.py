@@ -254,15 +254,34 @@ def set_meta(con: sqlite3.Connection, key: str, value) -> None:
 
 
 # --- reads (for the test page) ---------------------------------------------
-def counts_by_status(con: sqlite3.Connection) -> dict:
-    rows = con.execute(
-        "SELECT status, COUNT(*) n FROM orders GROUP BY status ORDER BY n DESC"
-    ).fetchall()
+def _state_clause(states) -> tuple[str, list]:
+    """WHERE fragment + args restricting to a set of pickup-state codes, so the Recorded
+    views honour the active dispatcher's pickup-state filter (same partition as the board).
+    None/empty -> ('', []): no restriction (bypass profiles like Didi, or a profile with no
+    states yet, see everything). Codes match case-insensitively against pickup_state."""
+    codes = sorted({str(s).strip().upper() for s in (states or []) if str(s).strip()})
+    if not codes:
+        return "", []
+    placeholders = ",".join("?" * len(codes))
+    return f"UPPER(pickup_state) IN ({placeholders})", list(codes)
+
+
+def counts_by_status(con: sqlite3.Connection, states=None) -> dict:
+    clause, args = _state_clause(states)
+    sql = "SELECT status, COUNT(*) n FROM orders"
+    if clause:
+        sql += " WHERE " + clause
+    sql += " GROUP BY status ORDER BY n DESC"
+    rows = con.execute(sql, args).fetchall()
     return {(r["status"] or "unknown"): r["n"] for r in rows}
 
 
-def total(con: sqlite3.Connection) -> int:
-    return con.execute("SELECT COUNT(*) n FROM orders").fetchone()["n"]
+def total(con: sqlite3.Connection, states=None) -> int:
+    clause, args = _state_clause(states)
+    sql = "SELECT COUNT(*) n FROM orders"
+    if clause:
+        sql += " WHERE " + clause
+    return con.execute(sql, args).fetchone()["n"]
 
 
 # sort key -> column. updated = when WE last touched the record (always present);
@@ -273,13 +292,17 @@ _SORT_COLS = {"updated": "updated_at", "created": "created_at",
 
 def list_orders(con: sqlite3.Connection, status: Optional[str] = None,
                 q: Optional[str] = None, limit: int = 500, offset: int = 0,
-                sort: str = "updated", direction: str = "desc") -> list[dict]:
+                sort: str = "updated", direction: str = "desc",
+                states=None) -> list[dict]:
     where, args = [], []
     if status and status != "all":
         where.append("status = ?"); args.append(status)
     if q:
         where.append("(number LIKE ? OR vins LIKE ? OR card_text LIKE ?)")
         like = f"%{q}%"; args += [like, like, like]
+    sclause, sargs = _state_clause(states)
+    if sclause:
+        where.append(sclause); args += sargs
     sql = "SELECT * FROM orders"
     if where:
         sql += " WHERE " + " AND ".join(where)
