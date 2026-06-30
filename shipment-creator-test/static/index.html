@@ -535,8 +535,27 @@
   .reviewhdr{font-size:12px;font-weight:700;color:var(--warn);padding:8px 12px;
     border-bottom:1px solid rgba(224,163,65,.3)}
   .reviewsec .lrow:hover{background:rgba(224,163,65,.10)}
-  .dupcount{color:var(--bad);font-weight:600}
+  /* duplicate-VINs-removed: clickable red bubble + popup anchored on it */
+  .dupwrap{position:relative;display:inline-block}
+  .dupcount{color:#fff;background:var(--bad);font-weight:600;border:0;border-radius:13px;
+    padding:5px 12px;font-size:13px;line-height:1;cursor:pointer;white-space:nowrap}
+  .dupcount:hover{filter:brightness(1.08)}
   .dupcount:empty{display:none}
+  .duppop{position:absolute;top:calc(100% + 6px);left:0;z-index:60;min-width:280px;
+    max-height:340px;overflow:auto;padding:8px;border-radius:10px;
+    background:var(--card,#fff);border:1px solid var(--bd,rgba(0,0,0,.15));
+    box-shadow:0 10px 28px rgba(0,0,0,.22)}
+  .duppop[hidden]{display:none}
+  .dupvin{display:flex;align-items:stretch;margin:5px 0;border-radius:8px;overflow:hidden;
+    border:1px solid var(--bd,rgba(0,0,0,.14))}
+  .dupvin .v{flex:0 0 80%;display:flex;align-items:center;padding:8px 10px;
+    font-family:ui-monospace,Menlo,monospace;font-size:12.5px;letter-spacing:.2px;
+    background:var(--card2,#f6f8fa);color:var(--text,#1f2328)}
+  .dupvin .cp{flex:0 0 20%;border:0;border-left:1px solid var(--bd,rgba(0,0,0,.14));
+    background:var(--acc,#0969da);color:#fff;font-weight:700;font-size:11px;cursor:pointer;
+    white-space:nowrap;padding:0 4px}
+  .dupvin .cp:hover{filter:brightness(1.1)}
+  .dupvin .cp.ok{background:var(--ok,#1a7f37)}
   .srcbadge.bol{color:#fff;background:var(--bad);border-color:var(--bad)}
   /* Terminals tab */
   .term-main{padding:16px 20px;max-width:980px;margin:0 auto;width:100%}
@@ -712,7 +731,7 @@
         <input id="q" type="search" placeholder="Filter by city, state, or VIN…">
         <button class="btn ghost" onclick="clearBoard()">Clear shipments</button>
         <span class="count" id="count"></span>
-        <span class="count dupcount" id="dupcount"></span>
+        <span class="dupwrap" id="dupwrap"><button class="count dupcount" id="dupcount" type="button" onclick="toggleDupPop(event)"></button><div class="duppop" id="duppop" hidden></div></span>
       </div>
     </div>
     <div id="ht-recorded" class="ht-group" hidden>
@@ -988,6 +1007,27 @@ function sdLegWindow(leg){ if(!leg) return '—';
 function venue(v){ return v||{}; }
 function esc(s){ return String(s).replace(/'/g,"\\'"); }
 function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// ---- Duplicate-VINs-removed bubble + popup ----------------------------------
+function renderDupBubble(){
+  const dc=$('#dupcount'), pop=$('#duppop');
+  if(!dc) return;
+  if(!DUP_REMOVED.length){ dc.textContent=''; if(pop){ pop.hidden=true; pop.innerHTML=''; } return; }
+  dc.textContent=`${DUP_REMOVED.length} duplicate VIN${DUP_REMOVED.length===1?'':'s'} removed`;
+  if(pop) pop.innerHTML=DUP_REMOVED.map(v=>
+    `<div class="dupvin"><span class="v">${escHtml(v)}</span>`+
+    `<button class="cp" type="button" onclick="copyVin('${esc(v)}',this)">Copy</button></div>`).join('');
+}
+function toggleDupPop(e){ if(e) e.stopPropagation(); const p=$('#duppop'); if(p) p.hidden=!p.hidden; }
+async function copyVin(vin, btn){
+  try{ await navigator.clipboard.writeText(vin); }
+  catch(_){ const t=document.createElement('textarea'); t.value=vin; document.body.appendChild(t);
+    t.select(); try{ document.execCommand('copy'); }catch(__){} t.remove(); }
+  if(btn){ btn.textContent='✓'; btn.classList.add('ok');
+    setTimeout(()=>{ btn.textContent='Copy'; btn.classList.remove('ok'); }, 900); }
+}
+// close the popup when clicking anywhere outside the bubble/popup
+document.addEventListener('click', e=>{ const w=$('#dupwrap'), p=$('#duppop');
+  if(p && !p.hidden && w && !w.contains(e.target)) p.hidden=true; });
 function addr(v){
   const cs=[v.city, [v.state,v.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   return [v.address, cs].filter(Boolean).join(', ') || '—';
@@ -1560,8 +1600,7 @@ function renderList(){
   const review=sorted.filter(hasExcelStop), rest=sorted.filter(o=>!hasExcelStop(o));
   const total=sorted.length+ghosts.length;
   $('#count').textContent=total+' shipment'+(total===1?'':'s');
-  const dc=$('#dupcount'); if(dc) dc.textContent = DUP_REMOVED.length
-    ? `${DUP_REMOVED.length} duplicate VIN${DUP_REMOVED.length===1?'':'s'} removed` : '';
+  renderDupBubble();
   const reviewHtml = review.length
     ? `<div class="reviewsec"><div class="reviewhdr">⚠ Review — ${review.length} shipment${review.length===1?'':'s'} with `
       +`Excel-only terminal info (no DB match — open to verify)</div>${review.map(listRow).join('')}</div>`
