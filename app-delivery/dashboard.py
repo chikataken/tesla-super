@@ -90,6 +90,14 @@ def _history(limit: int = 300) -> list[dict]:
                          "exterior": None, "vin_found": None, "key_found": None, "at": t})
     except sqlite3.Error:
         pass
+    try:
+        for s, v, stage, detail, t in con.execute(
+                "SELECT shipment, vin, stage, detail, seen_at FROM api_errors"):
+            rows.append({"action": "API ERROR", "vin": v or "", "model": detail or stage,
+                         "shipment": s, "exterior": None, "vin_found": None,
+                         "key_found": None, "at": t})
+    except sqlite3.Error:
+        pass
     con.close()
     rows.sort(key=lambda r: r["at"] or "", reverse=True)
     return rows[:limit]
@@ -168,7 +176,8 @@ def snapshot() -> dict:
         "stats": {"total": len(history),
                   "today": sum(1 for h in history if (h["at"] or "").startswith(today)),
                   "pickups": sum(1 for h in history if h["action"] == "Pick Up"),
-                  "dropoffs": sum(1 for h in history if h["action"] == "Drop Off")},
+                  "dropoffs": sum(1 for h in history if h["action"] == "Drop Off"),
+                  "api_errors": sum(1 for h in history if h["action"] == "API ERROR")},
         "history": history,
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
@@ -202,6 +211,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .pill.y{background:#dafbe1;color:var(--ok)}.pill.n{background:#ffebe9;color:var(--bad)}
  .pill.p{background:#ddf4ff;color:var(--acc)}.pill.d{background:#fbefff;color:#8250df}
  .pill.w{background:#fff8c5;color:#9a6700;font-weight:600}
+ .pill.e{background:#ffebe9;color:var(--bad);font-weight:600}
  .mut{color:var(--mut)}
  tbody tr{cursor:pointer}tbody tr:hover{background:#f6f8fa}
  .modal{display:none;position:fixed;inset:0;background:rgba(31,35,40,.5);z-index:10;
@@ -224,6 +234,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
    <div class=card><div class=k>Status</div><div class=v id=status>…</div></div>
    <div class=card><div class=k>Picked up</div><div class=v id=pickups>…</div></div>
    <div class=card><div class=k>Dropped off</div><div class=v id=dropoffs>…</div></div>
+   <div class=card><div class=k>API errors</div><div class=v id=apierrors>…</div></div>
    <div class=card><div class=k>Last activity</div><div class=v id=last style=font-size:15px>…</div></div>
  </div>
  <div class="card now"><div class=k>Currently marking</div><div class=v id=current>—</div></div>
@@ -269,16 +280,18 @@ async function tick(){
    `<span class="dot ${up?'on':'off'}"></span>${up?'Running':'Stopped'}`;
  document.getElementById('pickups').textContent = d.stats.pickups;
  document.getElementById('dropoffs').textContent = d.stats.dropoffs;
+ document.getElementById('apierrors').textContent = d.stats.api_errors ?? 0;
  document.getElementById('last').textContent = d.last_seen
    ? (d.last_seen_age_s<60?`${d.last_seen_age_s}s ago`:d.last_seen.replace('T',' ')) : '—';
  document.getElementById('current').textContent = d.current_vin || (up?'idle - add "Andrew Enkh 3106925984" as driver to auto mark':'—');
  document.getElementById('gen').textContent = 'updated '+(d.generated_at||'').replace('T',' ');
  document.getElementById('log').textContent = (d.log||[]).join('\\n') || '(no shipment marked yet)';
  const lg=document.getElementById('log'); lg.scrollTop=lg.scrollHeight;
+ const pillCls=a=>a==='Pick Up'?'p':(a==='API ERROR'?'e':'d');
  document.getElementById('hist').innerHTML = (d.history||[]).map(h=>`<tr
    onclick="showPhotos('${esc(h.vin)}','${esc(h.action)}')" title="click to see the photos used">
    <td class=mut>${esc((h.at||'').replace('T',' '))}</td>
-   <td><span class="pill ${h.action==='Pick Up'?'p':'d'}">${esc(h.action)}</span></td>
+   <td><span class="pill ${pillCls(h.action)}">${esc(h.action)}</span></td>
    <td class=vin>${esc(h.vin)}</td><td>${esc(h.model||'')}</td>
    <td class=mut>${esc(h.shipment||'')}</td>
    <td>${yn(h.exterior)}</td><td>${vinCell(h.vin_found)}</td><td>${keyCell(h.key_found,h.vin_found)}</td></tr>`).join('');

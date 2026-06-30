@@ -482,6 +482,8 @@ def drop_off(confirm):
     nodes = dump()
     if not _options_open(nodes):
         nodes = wait_until(lambda ns: _drop_off_btn(ns) or _options_open(ns), tries=8)
+        if not (_options_open(nodes) or _drop_off_btn(nodes)):
+            nodes = _scroll_until(lambda ns: _drop_off_btn(ns) or _options_open(ns))  # below the fold on multi-unit
         if not _options_open(nodes):
             d = _drop_off_btn(nodes)
             if not d:
@@ -695,18 +697,40 @@ def _dropoff_open_detail(confirm):
     log(f" detail loaded; {len(units_from(nodes))} unit(s) "
         f"({sum(u['attached'] for u in units_from(nodes))} already attached)")
     processed = set()
+    seen = {}                                     # vin -> shipment across the WHOLE (scrolled) list
+    stagnant = 0
     while True:
         nd = dump()
         if _options_open(nd):                     # attached unit auto-opens the sheet; dismiss
             tap(65, 734, pause=1.5)
             nd = dump()
+        for u in units_from(nd):
+            seen.setdefault(u["vin"], _shp_of(u["node"]["desc"]))
         todo = [u for u in units_from(nd) if u["vin"] not in processed and not u["attached"]]
         if not todo:
-            break
+            # Nothing to photograph on screen — page down in case units are below the fold
+            # (RN only mounts what's near the viewport). Bottom = the VISIBLE window no
+            # longer moving; don't gate on the global seen-set (it saturates after one pass
+            # and would stop us before reaching deep units).
+            vis_before = {u["vin"] for u in units_from(nd)}
+            _scroll_list_down()
+            after = units_from(dump())
+            for u in after:
+                seen.setdefault(u["vin"], _shp_of(u["node"]["desc"]))
+            vis_after = {u["vin"] for u in after}
+            if vis_after and vis_after != vis_before:
+                stagnant = 0
+            else:
+                stagnant += 1
+                if stagnant >= 2:
+                    break
+            continue
+        stagnant = 0
         u = todo[0]
         log(f" unit VIN {u['vin']}")
+        node = _unit_in_clean_view(u["vin"], units_from) or u["node"]   # avoid a mis-tap on a clipped card
         try:
-            add_photos_for_unit(u["vin"], u["node"])
+            add_photos_for_unit(u["vin"], node)
         except Exception as e:                    # don't let one unit stall the rest
             log(f"  ! unit {u['vin']} failed: {e}")
         processed.add(u["vin"])
@@ -717,7 +741,7 @@ def _dropoff_open_detail(confirm):
     nd = dump()
     if _options_open(nd):
         tap(65, 734, pause=1.5); nd = dump()
-    ship_units = [(u["vin"], _shp_of(u["node"]["desc"])) for u in units_from(nd)]
+    ship_units = list(seen.items())
     log(f" {len(processed)} photographed; dropping off shipment ({len(ship_units)} unit(s))…")
     try:
         committed = drop_off(confirm)
@@ -845,26 +869,31 @@ def _select_then_next(choice):
 
 
 def verify_unit(unit_node):
-    """Drive one unit through verification: Verify -> Can't Scan QR -> Yes (fully
-    inspect) -> No (no damages) -> Confirm (liability). Leaves it showing Verified."""
+    """Drive one unit through verification: Verify -> Can't Scan QR Code -> Yes (fully
+    inspect) -> No (no damages) -> Confirm (liability). Leaves it showing Verified.
+    Generous wait retries: this software-rendered AVD often takes >6s to paint the scan /
+    question screens, and a premature timeout here silently abandons the unit (Start
+    Loading then stays disabled forever)."""
     tap(unit_node["cx"], unit_node["cy"], pause=1.5)                 # open the Verify sheet
-    nodes = wait_until(lambda ns: by(ns, desc="Verify") or find_text(ns, "Verify Method"), tries=6)
+    nodes = wait_until(lambda ns: by(ns, desc="Verify") or find_text(ns, "Verify Method"), tries=12)
     v = by(nodes, desc="Verify")
     if v:
         tap(v["cx"], v["cy"], pause=1.5)
-    nodes = wait_until(lambda ns: find_text(ns, "Can't Scan QR"), tries=6)   # manual (no scanner)
+    # Manual entry (the emulator has no scanner): tap "Can't Scan QR Code" — NOT "Scan QR",
+    # which opens the camera and a permission dialog that dead-ends back to the list.
+    nodes = wait_until(lambda ns: find_text(ns, "Can't Scan QR"), tries=12)
     cs = _click(nodes, contains="Can't Scan QR")
     if cs:
         tap(cs["cx"], cs["cy"], pause=2.0)
-    wait_until(lambda ns: find_text(ns, "fully inspect"), tries=6)
+    wait_until(lambda ns: find_text(ns, "fully inspect"), tries=12)
     _select_then_next("Yes")                                        # able to fully inspect
-    wait_until(lambda ns: find_text(ns, "any damages"), tries=6)
+    wait_until(lambda ns: find_text(ns, "any damages"), tries=12)
     _select_then_next("No")                                         # no damages
-    nodes = wait_until(lambda ns: by(ns, desc="Confirm") or find_text(ns, "finish the ver"), tries=6)
+    nodes = wait_until(lambda ns: by(ns, desc="Confirm") or find_text(ns, "finish the ver"), tries=12)
     cf = by(nodes, desc="Confirm")
     if cf:
         tap(cf["cx"], cf["cy"], pause=2.5)
-    wait_until(lambda ns: find_text(ns, "Verified") or find_text(ns, "Start Loading"), tries=10)
+    wait_until(lambda ns: find_text(ns, "Verified") or find_text(ns, "Start Loading"), tries=12)
 
 
 # --- ETA date/time spinner helpers (native Android pickers) ---
@@ -918,8 +947,14 @@ def set_eta():
     for _ in range(2):
         cf = by(dump(), desc="Confirm")
         if cf:
-            tap(cf["cx"], cf["cy"], pause=2.5)
-        nd = dump()
+            tap(cf["cx"], cf["cy"], pause=1.5)
+        # Wait OUT the post-Confirm spinner: the ETA submit settles to the Ready-to-Depart
+        # step, an 'in the past' error, or straight back to the home tabs. The old code
+        # dumped once after 2.5s and returned even while the spinner was still up — that
+        # raced the next step, which then tapped/navigated on a half-rendered screen and
+        # tripped the false 'app wedged' relaunch that reverted the departure.
+        nd = wait_until(lambda ns: find_text(ns, "Ready to Depart") or find_text(ns, "in the past")
+                        or _home_now(ns), tries=15, interval=1.0)
         if not find_text(nd, "in the past"):
             return eta
         log("  ETA was in the past for the destination tz — advancing arrival a day")
@@ -938,26 +973,107 @@ def _finish_enabled(nodes):
                for n in nodes)
 
 
-def do_pickup(confirm):
-    """On a Pick Up detail: verify all units, Start Loading, wait out the ~2-min timer,
-    Finish Loading, set the ETA, then Ready-to-Depart -> Confirm. Returns
-    (committed, [(vin, shipment)], eta). Without confirm, stops after verifying."""
-    shot("pickup_detail")
-    for u in pickup_units(dump()):
-        if u["verified"]:
+def _scroll_list_down(pause=1.0):
+    """Page the current scrollable list down ~one screen (this AVD's 720x1600 layout).
+    React Native only mounts rows near the viewport, so a multi-unit detail must be
+    scrolled to reach every unit — and the action button that sits below them."""
+    swipe(360, 1200, 360, 560, ms=500, pause=pause)
+
+
+def _scroll_until(pred, max_scrolls=12):
+    """Scroll down until pred(nodes) is truthy (e.g. a 'Start Loading' / 'Drop Off' button
+    below the fold) or we've scrolled max_scrolls times. Returns the last dump."""
+    nodes = dump()
+    for _ in range(max_scrolls + 1):
+        if pred(nodes):
+            return nodes
+        _scroll_list_down()
+        nodes = dump()
+    return nodes
+
+
+def _unit_in_clean_view(vin, getter=None, tries=8):
+    """Scroll until `vin`'s unit card is FULLY on-screen with sane bounds, and return that
+    fresh node. RN renders cards at the list edges with inverted (top>bottom) or sliver
+    bounds; tapping their computed centre misses the card, so the tap-through opens nothing
+    and the unit is silently skipped — the exact bug that wedged multi-unit pickups (and the
+    same risk for multi-unit drop-offs). A clean card is non-inverted, a full row tall, and
+    clear of the very top/bottom. `getter` maps a dump to unit dicts (pickup_units for the
+    pickup flow, units_from for drop-off)."""
+    getter = getter or pickup_units
+    def clean(n):
+        t, b = n["bounds"][1], n["bounds"][3]
+        return t < b and (b - t) >= 120 and t >= 150 and b <= 1380
+    for _ in range(tries):
+        node = next((u["node"] for u in getter(dump()) if u["vin"] == vin), None)
+        if node and clean(node):
+            return node
+        _scroll_list_down(pause=0.8)
+    return next((u["node"] for u in getter(dump()) if u["vin"] == vin), None)
+
+
+def _collect_and_verify_units(max_passes=80):
+    """Verify EVERY unit on the open Pick Up detail, scrolling through the WHOLE list so
+    units below the fold aren't missed (the bug that left 'Start Loading' disabled on
+    multi-unit shipments — only the on-screen units got verified). Returns the full,
+    in-order [(vin, shipment)] list (for the ledger). Each pass: verify the first
+    not-yet-attempted unverified visible unit and re-dump; when nothing visible is left to
+    do, scroll down for more; stop once two scrolls in a row reveal no new VIN (bottom)."""
+    ship = {}                 # vin -> shipment, insertion-ordered → the ledger list
+    attempted = set()         # VINs already driven through verify (don't retry a bad one forever)
+    stagnant = 0
+    for _ in range(max_passes):
+        units = pickup_units(dump())
+        for u in units:
+            ship.setdefault(u["vin"], _shp_of(u["node"]["desc"]))
+        todo = [u for u in units if not u["verified"] and u["vin"] not in attempted]
+        if todo:
+            u = todo[0]
+            attempted.add(u["vin"])
+            log(f"  verifying {u['vin']}…")
+            node = _unit_in_clean_view(u["vin"]) or u["node"]   # avoid a mis-tap on a clipped card
+            try:
+                verify_unit(node)
+            except Exception as e:                    # one bad unit shouldn't stall the rest
+                log(f"  ! verify {u['vin']} failed: {e}")
+            stagnant = 0
             continue
-        log(f"  verifying {u['vin']}…")
-        try:
-            verify_unit(u["node"])
-        except Exception as e:
-            log(f"  ! verify {u['vin']} failed: {e}")
-    units = pickup_units(dump())
-    ship_units = [(u["vin"], _shp_of(u["node"]["desc"])) for u in units]
+        # Nothing actionable in the CURRENT window — page down for more units. Bottom is
+        # detected by the VISIBLE window no longer moving; we must NOT gate on the global
+        # seen-set (it saturates after one pass, and verify_unit snaps the list back to the
+        # top, so a single page-down keeps re-revealing the same near-top units → we'd quit
+        # before deep units ever scroll into view as actionable).
+        vis_before = {u["vin"] for u in units}
+        _scroll_list_down()
+        after = pickup_units(dump())
+        for u in after:                               # fold in any newly-revealed units
+            ship.setdefault(u["vin"], _shp_of(u["node"]["desc"]))
+        vis_after = {u["vin"] for u in after}
+        if vis_after and vis_after != vis_before:     # window advanced → keep going
+            stagnant = 0
+        else:
+            stagnant += 1
+            if stagnant >= 2:                         # window stopped moving → bottom
+                break
+    log(f"  verify pass complete — {len(ship)} unit(s) seen, {len(attempted)} attempted")
+    return list(ship.items())
+
+
+def do_pickup(confirm):
+    """On a Pick Up detail: verify EVERY unit (scrolling the whole list), Start Loading,
+    wait out the ~2-min timer, Finish Loading, set the ETA, then Ready-to-Depart ->
+    Confirm. Returns (committed, [(vin, shipment)], eta). Without confirm, stops after
+    verifying."""
+    shot("pickup_detail")
+    ship_units = _collect_and_verify_units()
     if not confirm:
         log("  (dry run) units verified — not loading/departing.")
         return (False, ship_units, None)
 
-    sl = _click(dump(), desc="Start Loading", min_w=300) or _click(dump(), text="Start Loading", min_w=300)
+    # Start Loading sits below the unit list — scroll to it (no-op if already in view).
+    nodes = _scroll_until(lambda ns: _click(ns, desc="Start Loading", min_w=300)
+                                     or _click(ns, text="Start Loading", min_w=300))
+    sl = _click(nodes, desc="Start Loading", min_w=300) or _click(nodes, text="Start Loading", min_w=300)
     if not (sl and sl["enabled"]):
         log("  Start Loading not enabled (a unit didn't verify) — skipping this shipment.")
         return (False, ship_units, None)
@@ -969,15 +1085,33 @@ def do_pickup(confirm):
         raise RuntimeError("loading timer never enabled Finish Loading")
     tap(fl["cx"], fl["cy"], pause=2.5)
     wait_until(lambda ns: find_text(ns, "Update ETA") or by(ns, desc="Arrival Date"), tries=8)
-    eta = set_eta()
-    nodes = wait_until(lambda ns: find_text(ns, "Ready to Depart") or by(ns, desc="Confirm"), tries=8)
+    eta = set_eta()                      # sets the ETA, taps its Confirm, waits out the spinner
+    # If a separate 'Ready to Depart?' step is shown, confirm it. set_eta already waited for
+    # the ETA submit to settle, so this Confirm lands on a stable screen (no revert race).
+    nodes = wait_until(lambda ns: find_text(ns, "Ready to Depart") or _home_now(ns), tries=8)
     if find_text(nodes, "Ready to Depart"):
         cf = by(nodes, desc="Confirm")
         if cf:
             log("  CONFIRMING departure (Ready to Depart)…")
-            tap(cf["cx"], cf["cy"], pause=4.0)
+            tap(cf["cx"], cf["cy"], pause=2.5)
+    # VERIFY the departure actually committed: the app returns to the home tabs (In Transit).
+    # If it instead falls back to the pickup detail ('Start Loading'), or just spins, the
+    # departure FAILED (server reject / timeout) — report it so the caller skips this
+    # shipment instead of writing a false 'picked up' ledger and looping.
+    nodes = wait_until(lambda ns: _home_now(ns) or find_text(ns, "Start Loading"),
+                       tries=20, interval=1.5)
     shot("pickup_departed")
-    return (True, ship_units, eta)
+    if _home_now(nodes):
+        return (True, ship_units, eta)
+    # Departure never committed (reverted to Start Loading / stuck spinner) = an API error on
+    # this shipment. Park it as 'API ERROR' so it's never retried and surfaces on the
+    # dashboard; do NOT write a pickup ledger.
+    shp = ship_units[0][1] if ship_units else ""
+    vin = ship_units[0][0] if ship_units else ""
+    log("  departure did NOT complete (reverted to Start Loading / still spinning)")
+    _record_api_error(shp, vin, "pickup_departure",
+                      "departure reverted to Start Loading after ETA confirm")
+    return (False, ship_units, None)
 
 
 def record_pickups(units, eta):
@@ -1042,6 +1176,84 @@ def pickup_queue(confirm, max_shipments):
     return done
 
 
+def _skip_pickups_path():
+    return os.path.join(HERE, "skip_pickups.json")
+
+
+def _load_skip_pickups():
+    """Shipment numbers (SHP…) to NEVER open in the Pick Up queue — shipments wedged
+    server-side (e.g. the departure confirm spins forever and reverts) that would otherwise
+    loop the queue endlessly. User-managed: edit skip_pickups.json (a JSON list of SHP
+    numbers). Missing/invalid file -> no skips."""
+    try:
+        with open(_skip_pickups_path(), encoding="utf-8") as f:
+            return {str(s).strip().upper() for s in json.load(f) if str(s).strip()}
+    except (OSError, ValueError):
+        return set()
+
+
+def _shipment_for_button(nodes, btn):
+    """The SHP shipment number on the same card as a Pick Up `btn`: the nearest SHP text
+    rendered just ABOVE the button (each card is …SHP<num>… then its [Pick Up] button)."""
+    cands = []
+    for n in nodes:
+        m = re.search(r"SHP[\w-]+", (n.get("text") or "") + " " + (n.get("desc") or ""))
+        if m and n["bounds"][3] <= btn["cy"] + 20:
+            cands.append((btn["cy"] - n["bounds"][3], m.group(0).upper()))
+    return min(cands)[1] if cands else None
+
+
+def _open_unskipped_pickup(skip, max_scrolls=8):
+    """Open the first Pick Up card whose shipment isn't in `skip`, scrolling the queue as
+    needed. Returns the opened SHP (or '?' if unreadable), or None when every remaining
+    pickup is skipped. Skipping by shipment lets the OTHER pickups proceed instead of the
+    queue wedging on one bad shipment."""
+    for _ in range(max_scrolls + 1):
+        ns = dump()
+        btns = pickup_buttons(ns)
+        before = {_shipment_for_button(ns, b) for b in btns}
+        for b in btns:
+            shp = _shipment_for_button(ns, b)
+            if shp and shp in skip:
+                continue
+            tap(b["cx"], b["cy"], pause=2.5)
+            return shp or "?"
+        _scroll_list_down()
+        if {_shipment_for_button(dump(), b) for b in pickup_buttons(dump())} == before:
+            break                      # nothing new scrolled in → all remaining are skipped
+    return None
+
+
+def _record_api_error(shipment, vin="", stage="pickup_departure", detail=""):
+    """Park a shipment that failed with an API error so it is NEVER retried and shows on the
+    dashboard as 'API ERROR'. INSERT OR IGNORE: recorded once, never re-marked (no pickup /
+    drop-off ledger is ever written for it)."""
+    if not shipment:
+        return
+    try:
+        con = sqlite3.connect(DROPOFF_DB)
+        con.execute("""CREATE TABLE IF NOT EXISTS api_errors(
+            shipment TEXT PRIMARY KEY, vin TEXT, stage TEXT, detail TEXT, seen_at TEXT)""")
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        con.execute("INSERT OR IGNORE INTO api_errors VALUES(?,?,?,?,?)",
+                    (shipment, vin or "", stage, detail or "", now))
+        con.commit(); con.close()
+    except sqlite3.Error as e:
+        log(f"  (could not record API error for {shipment}: {e})")
+    log(f"  API ERROR — {shipment} recorded; it will NOT be attempted again.")
+
+
+def _api_error_shipments():
+    """Set of shipment numbers permanently parked as API errors (never retry)."""
+    try:
+        con = sqlite3.connect(DROPOFF_DB)
+        rows = con.execute("SELECT shipment FROM api_errors").fetchall()
+        con.close()
+        return {(r[0] or "").strip().upper() for r in rows if r[0]}
+    except sqlite3.Error:
+        return set()
+
+
 def process_cycle(confirm, max_shipments):
     """Interleave the two queues: pick up ONE shipment, then immediately drop off that
     SAME shipment in In Transit, then go back to Pick Up and repeat. When no pickups
@@ -1054,14 +1266,23 @@ def process_cycle(confirm, max_shipments):
     refresh_list()                 # the ONE refresh/cycle (updates both tabs' data)
     shot("home")
     n_pick = n_drop = 0
+    # `tried` starts with the persistent skip-list + every shipment already parked as an API
+    # ERROR (never retried), and grows as we open each shipment, so a shipment is opened AT
+    # MOST ONCE per cycle. That stops the infinite re-pick of a shipment that never leaves
+    # the queue (e.g. a departure that spins/reverts server-side) and lets the OTHER pickups
+    # get processed instead of starving behind it.
+    tried = set(_load_skip_pickups()) | _api_error_shipments()
     while n_pick < max_shipments:
         if not goto_pickup_tab():
             break
-        btns = pickup_buttons(dump())
-        if not btns:
+        if not pickup_buttons(dump()):
             break                  # no more pickups -> fall through to drain In Transit
-        log("Pick Up — picking up a shipment")
-        tap(btns[0]["cx"], btns[0]["cy"], pause=2.5)                 # open the pickup detail
+        opened = _open_unskipped_pickup(tried)
+        if opened is None:
+            log("  remaining pickups are all skipped (skip-list or already tried this cycle)")
+            break
+        tried.add(opened)          # never reopen the same shipment within this cycle
+        log(f"Pick Up — picking up {opened}")
         wait_until(lambda ns: pickup_units(ns) or find_text(ns, "Start Loading"), tries=8)
         try:
             committed, ship_units, eta = do_pickup(confirm)
@@ -1069,7 +1290,9 @@ def process_cycle(confirm, max_shipments):
             log(f" ! pickup failed: {e}")
             goto_pickup_tab(); continue
         if not committed:
-            break                  # dry run / couldn't load -> stop the interleave
+            if not confirm:
+                break              # dry run -> stop after one
+            goto_pickup_tab(); continue   # couldn't load/depart -> skip it, try the next pickup
         record_pickups(ship_units, eta)
         n_pick += 1
         log(f"  picked up {len(ship_units)} unit(s); ETA {eta} — now dropping off that same shipment")
