@@ -136,7 +136,7 @@
   .rec-table td{padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
   .rec-table tr:hover td{background:var(--card2)}
   .rec-table .rnum{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
-  .rec-table .rroute{color:var(--text)}
+  .rec-table .rroute{color:var(--text);min-width:240px;white-space:nowrap}
   .rec-table .rroute .arr{color:var(--muted);padding:0 4px}
   .rec-table .rdate{color:var(--muted);white-space:nowrap}
   .rec-table .vin{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
@@ -921,9 +921,11 @@ async function loadRecorded(silent){
   $('#rstats').textContent = orders.length + ' shown' + (data.total? (' of '+data.total+' recorded'):'');
   if(!orders.length){ $('#rlist').innerHTML = '<div class="rec-empty">No recorded shipments yet. Run: <code>python recorder_backfill.py</code></div>'; return; }
   const rows = orders.map(o=>{
-    const route = recEsc((o.pickup_city||'')+', '+(o.pickup_state||'')+' '+(o.pickup_zip||'')) +
+    // Route shows just "City, ST → City, ST" (no zip); ST is already a 2-letter code.
+    const loc = (c,st)=>[(c||'').trim(),(st||'').trim()].filter(Boolean).join(', ');
+    const route = recEsc(loc(o.pickup_city,o.pickup_state)) +
                   ' <span class="arr">→</span> ' +
-                  recEsc((o.delivery_city||'')+', '+(o.delivery_state||'')+' '+(o.delivery_zip||''));
+                  recEsc(loc(o.delivery_city,o.delivery_state));
     const vins = (o.vins||[]).map(v=>'<span class="vin">'+recEsc(v)+'</span>').join(' ');
     const dates = recEsc((o.pickup_date||'')+(o.delivery_date?(' → '+o.delivery_date):''));
     return `<tr>
