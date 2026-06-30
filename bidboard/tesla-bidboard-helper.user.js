@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.12.0
+// @version      0.13.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -142,8 +142,10 @@
   }
   async function postOffer(bidId, body) {
     const resp = await fetch(writeUrl(bidId), { method: 'POST', headers: Object.assign(replayHeaders(), { 'Content-Type': 'application/json' }), body: JSON.stringify(body), credentials: 'omit' });
-    if (!resp.ok) throw new Error('UpdateOffer ' + resp.status);
-    return resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const j = await resp.json().catch(() => ({}));
+    if (j && j.success === false) throw new Error('Tesla returned success:false'); // 200 but logically rejected
+    return j;
   }
   // Send every TYPED box in a card; each box's price -> every VIN in its subset. Pickup/ETA per the rules.
   async function submitCard(cardEl) {
@@ -154,7 +156,7 @@
     for (const inp of inputs) {
       const { g, vins } = bidsForKey(inp.dataset.key); if (!g) continue;
       const body = { CurrencyCode: 'USD', BidAmount: String(inp.value.trim()), EstimatedShipDate: iso16(pickupDate()), NeededByDate: iso16(selectedEta(g)), OfferExpiryDate: null };
-      for (const b of vins) { try { await postOffer(b.bidId, body); sent++; } catch (e) { failed++; } }
+      for (const b of vins) { try { await postOffer(b.bidId, body); sent++; } catch (e) { failed++; console.warn('[bidpanel] bid FAILED for', b.vin, '—', e && e.message); } }
     }
     cardEl.classList.remove('sending'); cardEl.classList.add(failed ? 'submit-err' : 'submitted');
     let tag = cardEl.querySelector('.subtag'); if (!tag) { tag = document.createElement('div'); tag.className = 'subtag'; cardEl.appendChild(tag); }
