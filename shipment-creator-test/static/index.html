@@ -33,6 +33,11 @@
   .board-detail{flex:0 0 0;min-width:0;min-height:0;overflow:hidden;overscroll-behavior:contain;
     transition:flex-basis 440ms var(--ease)}
   .board.split .board-detail{flex-basis:var(--detail-w);overflow-y:auto;overflow-x:hidden}
+  /* While the post-upload SD dedup scan is running, gray + lock the board cards so you can't
+     interact with already-posted units before the scan removes them (scroll still works). */
+  .board.scanning #list{opacity:.55;filter:grayscale(45%)}
+  .board.scanning #list > *{pointer-events:none}
+  .board.scanning #detail{opacity:.55;filter:grayscale(45%);pointer-events:none}
   .detail-inner{width:calc(var(--detail-w) - 24px);margin-left:24px;padding-bottom:24px}
   /* hide all scrollbars (scrolling still works) */
   #list,.board-detail,.navrail,#terminals.panel.active,#users.panel.active{scrollbar-width:none;-ms-overflow-style:none}
@@ -2229,6 +2234,9 @@ async function syncTally(){
   try{ s=await fetch('/api/run/status').then(r=>r.json()); }catch(e){ s={running:false}; }
   const hasBoard = !!(t && t.total);
   const running = !!(s && s.running);
+  // While the run/SD scan is in progress, gray out + lock the board cards (see CSS .scanning)
+  // so already-posted units can't be touched before the dedup scan removes them.
+  const _bd=$('#board'); if(_bd) _bd.classList.toggle('scanning', running);
 
   // Excel+ is ALWAYS shown. Once a board is loaded it grays out (but stays clickable) —
   // loading a different Excel clears the current board.
