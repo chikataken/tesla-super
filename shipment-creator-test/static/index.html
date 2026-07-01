@@ -1942,7 +1942,7 @@ async function saveSettings(){
   try{
     const r=await api('/api/settings', body);
     $('#setMsg').textContent='Saved.'; $('#set_secret').value='';
-    $('#env').textContent='SD_ENV: prod v2.1';
+    $('#env').textContent='SD_ENV: prod v2.2';
     await loadSettings();
     toast('Settings saved');
   }catch(e){ $('#setMsg').textContent='Save failed.'; }
@@ -2496,7 +2496,7 @@ fetch('/api/env').then(r=>r.json()).then(d=>{
     document.body.classList.add('testmode');
     const e=$('#env'); if(e){ e.textContent='TEST SITE — SD disabled'; e.classList.add('testpill'); }
   } else {
-    $('#env').textContent='SD_ENV: prod v2.1';
+    $('#env').textContent='SD_ENV: prod v2.2';
   }
 }).catch(()=>{});
 // restore the active dispatcher FIRST, then open the live stream for its board (so the
