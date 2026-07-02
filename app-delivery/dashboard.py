@@ -98,12 +98,19 @@ def _history(limit: int = 300) -> list[dict]:
     con = sqlite3.connect(DB)
     rows = []
     try:
-        for v, m, s, o, p, t, ext, vf, kf in con.execute(
+        have = {r[1] for r in con.execute("PRAGMA table_info(dropoffs)")}
+        sd = ", sd_number, sd_delivered_at" if {"sd_number", "sd_delivered_at"} <= have else ""
+        for row in con.execute(
                 "SELECT vin, model, shipment, option, photographed, dropped_at, "
-                "exterior, vin_found, key_found FROM dropoffs"):
+                "exterior, vin_found, key_found" + sd + " FROM dropoffs"):
+            if sd:
+                v, m, s, o, p, t, ext, vf, kf, sdn, sdd = row
+            else:
+                v, m, s, o, p, t, ext, vf, kf = row
+                sdn = sdd = None
             rows.append({"action": "Drop Off", "vin": v, "model": m, "shipment": s,
                          "exterior": ext, "vin_found": vf, "key_found": kf,
-                         "at": t, "when": _fmt_when(t)})
+                         "at": t, "when": _fmt_when(t), "check": _validate_link(s, sdn, sdd)})
     except sqlite3.Error:
         pass
     try:
@@ -127,21 +134,62 @@ def _history(limit: int = 300) -> list[dict]:
     return rows[:limit]
 
 
-def _app_marked_pairs() -> set:
-    """(order_guid, vin) pairs our automation dropped off (from dropoffs.db) — the exact
-    key for badging a delivered row 'APP'. The GUID pins the specific SD order (immune to
-    a VIN riding multiple orders over time) and the VIN pins the vehicle (per-VIN precision
-    on multi-VIN orders)."""
+def _app_marked() -> dict:
+    """{(order_guid, vin): tesla_shipment} for every drop-off our automation recorded.
+    Keyed on the (GUID, VIN) pair (GUID pins the SD order, VIN pins the vehicle); the value
+    is the Tesla driver-app shipment id (e.g. 'SHP2606-A56J733'), whose order-name we use to
+    validate that the SD order we linked is actually the right one (see _delivered)."""
     if not os.path.exists(DB):
-        return set()
+        return {}
     con = sqlite3.connect(DB)
     try:
-        return {(g, v) for g, v in con.execute(
-            "SELECT order_guid, vin FROM dropoffs WHERE order_guid IS NOT NULL AND order_guid != ''")}
+        return {(g, v): (s or "") for g, v, s in con.execute(
+            "SELECT order_guid, vin, shipment FROM dropoffs "
+            "WHERE order_guid IS NOT NULL AND order_guid != ''")}
     except sqlite3.Error:
-        return set()
+        return {}
     finally:
         con.close()
+
+
+def order_base(s: str) -> str:
+    """The 7-char Tesla order base from a shipment/order string: drop a leading 'SHPxxxx-'
+    batch prefix and any leading junk, then take the first 7 chars of the first alphanumeric
+    token. Normalizes 'SHP2606-A56J733', '-AU49200', 'AU49200 direct', 'A56J733-3',
+    'A54Q241vip' all to their 7-char core so they compare equal."""
+    if not s:
+        return ""
+    s = re.sub(r'^SHP\w*-', '', s.strip(), flags=re.I)
+    m = re.search(r'[A-Za-z0-9]+', s)
+    return m.group(0)[:7].upper() if m else ""
+
+
+def _within_days(ts: str, days: int) -> bool:
+    """True if the SD delivery date is within `days` CALENDAR days of the current day (local) —
+    'within 1 week of the current day'. ts is SD's delivery date (tz-aware, e.g. +0000)."""
+    if not ts:
+        return False
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            d = datetime.datetime.strptime(ts, fmt).astimezone().date()
+            return abs((datetime.date.today() - d).days) <= days
+        except ValueError:
+            continue
+    return False
+
+
+def _validate_link(shipment: str, sd_number: str, sd_delivered_at: str):
+    """Validate that the SD order a drop-off linked is the right one for the shipment the
+    driver app actually marked (stored on the drop-off at marking time). Returns 'error'
+    when the order-name doesn't match AND that order's delivery is >7 days old; None when
+    the name matches, the delivery is recent, or there's nothing to check (old row)."""
+    if not sd_number:
+        return None                                   # nothing fetched to compare (pre-migration row)
+    if order_base(shipment) and order_base(shipment) == order_base(sd_number):
+        return None                                   # order-name matches (primary check)
+    if _within_days(sd_delivered_at, 7):
+        return None                                   # last resort: delivered within a week
+    return "error"                                    # name mismatch AND stale -> wrong SD order linked
 
 
 def _fmt_when(ts: str) -> str:
@@ -172,7 +220,7 @@ def _delivered(limit: int = 800) -> list[dict]:
         return _delivered_cache["data"]
     rows = []
     if os.path.exists(_REC_DB):
-        marked = _app_marked_pairs()
+        marked = _app_marked()
         try:
             con = sqlite3.connect(f"file:{_REC_DB}?mode=ro", uri=True)
             for number, api_guid, dcity, dstate, vins_json, details in con.execute(
@@ -193,9 +241,18 @@ def _delivered(limit: int = 800) -> list[dict]:
                     vins = []
                 dest = ", ".join(p for p in (dcity, dstate) if p)
                 for vin in vins:
+                    ship = marked.get((api_guid, vin))          # Tesla shipment id if we marked it
+                    if ship is None:
+                        status = "delivered"                    # not one of ours
+                    elif order_base(ship) and order_base(ship) == order_base(number):
+                        status = "app"                          # order-name matches (primary check)
+                    elif _within_days(cat, 7):
+                        status = "app"                          # last resort: delivered within a week
+                    else:
+                        status = "error"                        # name mismatch AND stale -> wrong SD order linked
                     rows.append({"when": _fmt_when(cat), "sort": cat, "vin": vin,
                                  "model": models.get(vin, ""), "dest": dest,
-                                 "number": number, "app": (api_guid, vin) in marked})
+                                 "number": number, "status": status})
             con.close()
         except sqlite3.Error:
             pass
@@ -394,6 +451,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .pill.w{background:#fff8c5;color:#9a6700;font-weight:600}
  .pill.e{background:#ffebe9;color:var(--bad);font-weight:600}
  .pill.dl{background:#dafbe1;color:var(--ok)}
+ .pill.err{background:var(--bad);color:#fff;font-weight:700}
  .histhead{display:flex;align-items:center;gap:8px;margin:22px 0 8px}
  .htab{background:#fff;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer}
  .htab.on{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -499,10 +557,14 @@ function renderNow(now,up,curVin){
 async function loadDelivered(){
  let d; try{ d=await (await fetch('delivered',{cache:'no-store'})).json(); }catch(e){ return; }
  const rows=d.delivered||[];
- document.getElementById('histsub').textContent = rows.length+' delivered';
+ const nErr=rows.filter(r=>r.status==='error').length;
+ document.getElementById('histsub').textContent = rows.length+' delivered'+(nErr?` · ${nErr} error`:'');
  document.getElementById('deliv').innerHTML = rows.length ? rows.map(r=>{
-   const badge = r.app ? '<span class="pill e">APP</span>' : '<span class="pill dl">delivered</span>';
-   const click = r.app ? `onclick="showPhotos('${esc(r.vin)}','Drop Off')" title="click to see the photos used" style=cursor:pointer` : '';
+   const badge = r.status==='app'   ? '<span class="pill e">APP</span>'
+               : r.status==='error' ? '<span class="pill err">⚠ ERROR</span>'
+               :                       '<span class="pill dl">delivered</span>';
+   const clickable = r.status==='app' || r.status==='error';
+   const click = clickable ? `onclick="showPhotos('${esc(r.vin)}','Drop Off')" title="click to see the photos used" style=cursor:pointer` : '';
    return `<tr ${click}><td class=mut>${esc(r.when)}</td><td class=vin>${esc(r.vin)}</td>`
      +`<td>${esc(r.model||'')}</td><td class=mut>${esc(r.dest||'')}</td><td>${badge}</td></tr>`;
  }).join('') : '<tr><td colspan=5 class=mut style=padding:14px>No delivered shipments yet.</td></tr>';
@@ -534,10 +596,14 @@ async function tick(){
  document.getElementById('hist').innerHTML = (d.history||[]).map(h=>`<tr
    onclick="showPhotos('${esc(h.vin)}','${esc(h.action)}')" title="click to see the photos used">
    <td class=mut>${esc(h.when||'')}</td>
-   <td><span class="pill ${pillCls(h.action)}">${esc(h.action)}</span></td>
+   <td><span class="pill ${pillCls(h.action)}">${esc(h.action)}</span>${h.check==='error'?' <span class="pill err">⚠ ERROR</span>':''}</td>
    <td class=vin>${esc(h.vin)}</td><td>${esc(h.model||'')}</td>
    <td class=mut>${esc(h.shipment||'')}</td>
    <td>${yn(h.exterior)}</td><td>${vinCell(h.vin_found)}</td><td>${keyCell(h.key_found,h.vin_found)}</td></tr>`).join('');
+ if(histTab==='marks'){
+   const n=(d.history||[]).filter(h=>h.check==='error').length;
+   document.getElementById('histsub').textContent = n?`${n} link error${n>1?'s':''}`:'';
+ }
 }
 loadDelivered(); tick(); setInterval(tick, 4000);
 setInterval(()=>{ if(histTab==='delivered') loadDelivered(); }, 30000);

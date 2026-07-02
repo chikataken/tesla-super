@@ -59,12 +59,35 @@ def _ledger():
         vin TEXT, shipment TEXT, model TEXT, order_guid TEXT,
         photographed INTEGER, option TEXT, dropped_at TEXT,
         exterior INTEGER, vin_found INTEGER, key_found INTEGER,
+        sd_number TEXT, sd_delivered_at TEXT,
         UNIQUE(vin, shipment))""")
-    # migrate older DBs that predate the per-section found columns
+    # migrate older DBs that predate later columns
     have = {r[1] for r in con.execute("PRAGMA table_info(dropoffs)")}
-    for col in ("exterior", "vin_found", "key_found"):
+    for col, typ in (("exterior", "INTEGER"), ("vin_found", "INTEGER"), ("key_found", "INTEGER"),
+                     ("sd_number", "TEXT"), ("sd_delivered_at", "TEXT")):
         if col not in have:
-            con.execute(f"ALTER TABLE dropoffs ADD COLUMN {col} INTEGER")
+            con.execute(f"ALTER TABLE dropoffs ADD COLUMN {col} {typ}")
+    # driver_marked events pushed by the Tesla-portal Chrome extension (a SEPARATE source
+    # from our own drop-offs — can include shipments the automation never touched). Kept
+    # here so it lives in the same DB the dashboard reads and can be correlated to dropoffs
+    # by order_guid / order_base+delivery-time. mark_id = client-supplied idempotency key.
+    con.execute("""CREATE TABLE IF NOT EXISTS driver_marks(
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        mark_id      TEXT UNIQUE,     -- stable id from the extension (dedupes re-sends); nullable
+        vin          TEXT,
+        order_name   TEXT,            -- raw portal shipment/order name (e.g. 'SHP2606-A56J733' or 'A56J733')
+        order_base   TEXT,            -- normalized 7-char base (server-filled) for matching
+        order_guid   TEXT,            -- SD/Tesla order GUID if the portal exposes it; nullable
+        marked_at    TEXT,            -- portal mark time, tz-aware/UTC; nullable
+        status       TEXT,            -- e.g. 'driver_marked'
+        source       TEXT,            -- e.g. 'tesla-portal-ext'
+        raw          TEXT,            -- full JSON payload (fidelity / re-parse)
+        received_at  TEXT,            -- server receive time (UTC ISO)
+        matched_guid TEXT,            -- resolved dropoff/SD guid after correlation; nullable
+        matched_ok   INTEGER          -- 1/0/NULL: did it map to one of our dropoffs?
+    )""")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_driver_marks_vin ON driver_marks(vin)")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_driver_marks_base ON driver_marks(order_base)")
     return con
 
 
@@ -80,11 +103,15 @@ def record_dropoffs(units, option, photographed_vins):
     for vin, shp in units:
         model = MODEL_BY_CHAR.get(vin[3].upper() if len(vin) >= 4 else "", "")
         guid = ext = vin_found = key_found = None
+        sd_number = sd_delivered_at = None
         mp = os.path.join(HERE, "out", vin, "manifest.json")
         if os.path.exists(mp):
             try:
                 man = json.load(open(mp))
-                guid = (man.get("shipment") or {}).get("guid")
+                sh = man.get("shipment") or {}
+                guid = sh.get("guid")
+                sd_number = sh.get("number")            # SD order name the photos were pulled from
+                sd_delivered_at = sh.get("date")        # that order's delivery/photo date (for the link check)
                 ext = int(man.get("n_sides", 0) >= 4)
                 vin_found = int(bool(man.get("vin_plate_found")))
                 ks = man.get("key_source") or ""
@@ -93,10 +120,11 @@ def record_dropoffs(units, option, photographed_vins):
                 pass
         con.execute(
             "INSERT OR IGNORE INTO dropoffs"
-            "(vin,shipment,model,order_guid,photographed,option,dropped_at,exterior,vin_found,key_found)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "(vin,shipment,model,order_guid,photographed,option,dropped_at,exterior,vin_found,key_found,"
+            "sd_number,sd_delivered_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (vin, shp, model, guid, int(vin in photographed_vins), option, now,
-             ext, vin_found, key_found))
+             ext, vin_found, key_found, sd_number, sd_delivered_at))
         log(f"  ledger: {vin} ({model}) {shp} [ext={ext} vin={vin_found} key={key_found}]")
     con.commit()
     con.close()
