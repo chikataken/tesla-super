@@ -974,9 +974,9 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
     with open(dest, "wb") as f:
         f.write(data)
 
-    # Reject (and delete) any sheet without a NeedByDate column — every shipment needs a
-    # need-by for transit windows, and cache-resolved ones can't fall back to the dashboard.
-    # The ALL profile is exempt: it's just feeding terminals, so any sheet is fine.
+    # NeedByDate is OPTIONAL — a sheet without it still runs; need_by is used when present
+    # (it drives transit windows) and skipped when absent. We still read the sheet to reject
+    # non-spreadsheets and to learn its header row.
     import excel_ingest
     try:
         _, report = excel_ingest.read_rows(dest)
@@ -984,11 +984,6 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read that spreadsheet: {e}")
-    if not _skip_needby_requirement() and "need_by" not in report.column_mapping:
-        try: os.remove(dest)
-        except OSError: pass
-        raise HTTPException(400, "This Excel has no NeedByDate column. Add a "
-                                 "'NeedByDate' column and re-upload.")
     # Remember this sheet's header row so DATA-only pasted rows can reuse it later.
     try:
         _save_json(_last_headers_path(), excel_ingest.read_headers(dest))
@@ -1043,11 +1038,6 @@ def api_upload_paste(body: dict = Body(...)):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read those rows: {e}")
-    if not _skip_needby_requirement() and "need_by" not in report.column_mapping:
-        try: os.remove(dest)
-        except OSError: pass
-        raise HTTPException(400, "These rows have no NeedByDate column. Include a "
-                                 "'NeedByDate' column (paste the header row once to teach it).")
     return {"path": dest, "name": "pasted.xlsx", "rows": len(data)}
 
 
