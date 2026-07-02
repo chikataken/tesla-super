@@ -150,6 +150,44 @@ def api_driver_marks(body: dict = Body(...)):
     return {"ok": True}
 
 
+@app.post("/api/tesla-status")
+def api_tesla_status(body: dict = Body(...)):
+    """OPEN (no-auth) intake for the dispatch-dashboard extension's 'Pull 2 weeks' button.
+    Upserts the CURRENT Tesla dispatch status per (vin, order_base) into
+    app-delivery/dropoffs.db, so the App-tab delivered list can overlay it (delivered->marked,
+    tendered/transit pass through, at_destination ignored). Body:
+    {"records":[{"vin","order_name","status","eta"}, ...]}; status in
+    tendered|transit|at_destination|delivered."""
+    import sqlite3 as _sq
+    import datetime as _dt
+    recs = body.get("records") or []
+    con = _sq.connect(_DROPOFFS_DB, timeout=10)
+    stored = 0
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS tesla_dispatch_status(
+            vin TEXT, order_base TEXT, shipment TEXT, status TEXT, eta TEXT, updated_at TEXT,
+            PRIMARY KEY(vin, order_base))""")
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        for r in recs:
+            vin = (r.get("vin") or "").upper().strip()
+            if not vin:
+                continue
+            shipment = r.get("order_name") or ""
+            con.execute(
+                "INSERT INTO tesla_dispatch_status(vin,order_base,shipment,status,eta,updated_at)"
+                " VALUES(?,?,?,?,?,?)"
+                " ON CONFLICT(vin,order_base) DO UPDATE SET"
+                "   shipment=excluded.shipment, status=excluded.status,"
+                "   eta=excluded.eta, updated_at=excluded.updated_at",
+                (vin, _order_base(shipment), shipment,
+                 (r.get("status") or "").lower().strip(), r.get("eta"), now))
+            stored += 1
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "stored": stored}
+
+
 def _staged_files() -> list[str]:
     return sorted(glob.glob(os.path.join(_orders_dir(), "*.json")),
                   key=os.path.getmtime, reverse=True)

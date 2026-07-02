@@ -209,6 +209,41 @@ def _fmt_when(ts: str) -> str:
     return ts[:16]
 
 
+def _tesla_status_map() -> dict:
+    """{vin: [ {order_base, status, eta} ]} from the dispatch-dashboard extension's uploads
+    (tesla_dispatch_status in dropoffs.db). The CURRENT Tesla dispatch status per (vin,
+    order_base). Empty if the table doesn't exist yet (nothing uploaded)."""
+    if not os.path.exists(DB):
+        return {}
+    con = sqlite3.connect(DB)
+    out: dict = {}
+    try:
+        for vin, ob, status, eta in con.execute(
+                "SELECT vin, order_base, status, eta FROM tesla_dispatch_status"):
+            out.setdefault(vin, []).append({"order_base": ob or "", "status": status or "", "eta": eta or ""})
+    except sqlite3.Error:
+        return {}
+    finally:
+        con.close()
+    return out
+
+
+def _tesla_status_for(vin: str, number: str, cat: str, tmap: dict):
+    """The Tesla dispatch status for a delivered row, matched the same way _validate_link does:
+    primary = last-segment order_base match; last resort = delivered within 7 days of today
+    (_within_days). None when the VIN isn't in the dispatch data."""
+    recs = tmap.get(vin)
+    if not recs:
+        return None
+    ob = order_base(number)
+    for r in recs:
+        if ob and ob == r.get("order_base"):
+            return r.get("status")                        # primary: order-name (7-char) match
+    if _within_days(cat, 7):
+        return max(recs, key=lambda r: r.get("eta") or "").get("status")   # last resort: recent
+    return None
+
+
 def _delivered(limit: int = 800) -> list[dict]:
     """The 'Didi delivered list': every delivered vehicle from the SD recorder mirror —
     delivered/invoiced/paid orders (those with a real delivery.completed_at), UNSCOPED
@@ -221,6 +256,7 @@ def _delivered(limit: int = 800) -> list[dict]:
     rows = []
     if os.path.exists(_REC_DB):
         marked = _app_marked()
+        tesla_map = _tesla_status_map()
         try:
             con = sqlite3.connect(f"file:{_REC_DB}?mode=ro", uri=True)
             for number, api_guid, dcity, dstate, vins_json, details in con.execute(
@@ -250,6 +286,15 @@ def _delivered(limit: int = 800) -> list[dict]:
                         status = "app"                          # last resort: delivered within a week
                     else:
                         status = "error"                        # name mismatch AND stale -> wrong SD order linked
+                    if status == "delivered":                   # not ours -> overlay Tesla dispatch status
+                        t = _tesla_status_for(vin, number, cat, tesla_map)
+                        if t == "delivered":
+                            status = "marked"                   # Tesla dispatch also shows delivered
+                        elif t == "tendered":
+                            status = "tendered"
+                        elif t == "transit":
+                            status = "transit"
+                        # at_destination / not-found in Tesla -> leave "delivered"
                     rows.append({"when": _fmt_when(cat), "sort": cat, "vin": vin,
                                  "model": models.get(vin, ""), "dest": dest,
                                  "number": number, "status": status})
@@ -452,6 +497,9 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .pill.e{background:#ffebe9;color:var(--bad);font-weight:600}
  .pill.dl{background:#dafbe1;color:var(--ok)}
  .pill.err{background:var(--bad);color:#fff;font-weight:700}
+ .pill.mk{background:#e6f7f4;color:#0a6b5e;font-weight:700}
+ .pill.td{background:#fff8c5;color:#9a6700;font-weight:600}
+ .pill.tr{background:#ddf4ff;color:var(--acc)}
  .histhead{display:flex;align-items:center;gap:8px;margin:22px 0 8px}
  .htab{background:#fff;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer}
  .htab.on{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -560,9 +608,12 @@ async function loadDelivered(){
  const nErr=rows.filter(r=>r.status==='error').length;
  document.getElementById('histsub').textContent = rows.length+' delivered'+(nErr?` · ${nErr} error`:'');
  document.getElementById('deliv').innerHTML = rows.length ? rows.map(r=>{
-   const badge = r.status==='app'   ? '<span class="pill e">APP</span>'
-               : r.status==='error' ? '<span class="pill err">⚠ ERROR</span>'
-               :                       '<span class="pill dl">delivered</span>';
+   const badge = r.status==='app'      ? '<span class="pill e">APP</span>'
+               : r.status==='error'    ? '<span class="pill err">⚠ ERROR</span>'
+               : r.status==='marked'   ? '<span class="pill mk">marked</span>'
+               : r.status==='tendered' ? '<span class="pill td">tendered</span>'
+               : r.status==='transit'  ? '<span class="pill tr">transit</span>'
+               :                          '<span class="pill dl">delivered</span>';
    const clickable = r.status==='app' || r.status==='error';
    const click = clickable ? `onclick="showPhotos('${esc(r.vin)}','Drop Off')" title="click to see the photos used" style=cursor:pointer` : '';
    return `<tr ${click}><td class=mut>${esc(r.when)}</td><td class=vin>${esc(r.vin)}</td>`
