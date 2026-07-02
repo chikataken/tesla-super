@@ -28,6 +28,12 @@ LOGFILE = os.environ.get("DRIVE_LOG_FILE", os.path.join(HERE, "out", "service.lo
 LOG_TAIL = 60               # log lines to surface
 ALIVE_SECONDS = 180         # "running" if a worker process exists OR the log moved this recently
 
+# The SD recorder mirror (shipment-creator's DB) — source of the "Didi delivered list".
+_REC_DB = os.environ.get("RECORDER_DB",
+                         os.path.join(HERE, "..", "shipment-creator", "data", "recorder.db"))
+_DELIVERED_TTL = 60                        # recompute the delivered list at most this often
+_delivered_cache = {"at": 0.0, "data": []}
+
 _DONE_RE = re.compile(r"ledger:|ledger\(pickup\):|queue empty|queues empty|nothing to do|nothing to pick")
 _VIN_RE = re.compile(r"(?:unit VIN|verifying)\s+([A-HJ-NPR-Z0-9]{17})")
 # Idle / heartbeat lines NOT shown in the dashboard log — only show actual marking work.
@@ -117,6 +123,74 @@ def _history(limit: int = 300) -> list[dict]:
     con.close()
     rows.sort(key=lambda r: r["at"] or "", reverse=True)
     return rows[:limit]
+
+
+def _app_marked_vins() -> set:
+    """VINs our automation dropped off (from dropoffs.db) — used to badge delivered rows 'APP'."""
+    if not os.path.exists(DB):
+        return set()
+    con = sqlite3.connect(DB)
+    try:
+        return {r[0] for r in con.execute("SELECT vin FROM dropoffs")}
+    except sqlite3.Error:
+        return set()
+    finally:
+        con.close()
+
+
+def _fmt_delivered(cat: str) -> str:
+    """'2026-06-29T16:50:29.000+0000' -> 'JUN-29 9:50AM' in local time."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.datetime.strptime(cat, fmt).astimezone().strftime("%b-%d %-I:%M%p").upper()
+        except ValueError:
+            continue
+    return cat[:16]
+
+
+def _delivered(limit: int = 800) -> list[dict]:
+    """The 'Didi delivered list': every delivered vehicle from the SD recorder mirror —
+    delivered/invoiced/paid orders (those with a real delivery.completed_at), UNSCOPED
+    (Didi = all users, no per-dispatcher state filter). Newest delivery first; each VIN
+    flagged app=True when our automation dropped it off. Cached (_DELIVERED_TTL) since the
+    delivered history changes slowly and parsing every order's details JSON is not cheap."""
+    now = datetime.datetime.now().timestamp()
+    if _delivered_cache["data"] and now - _delivered_cache["at"] < _DELIVERED_TTL:
+        return _delivered_cache["data"]
+    rows = []
+    if os.path.exists(_REC_DB):
+        marked = _app_marked_vins()
+        try:
+            con = sqlite3.connect(f"file:{_REC_DB}?mode=ro", uri=True)
+            for number, dcity, dstate, vins_json, details in con.execute(
+                    "SELECT number, delivery_city, delivery_state, vins, details FROM orders "
+                    "WHERE status IN ('delivered','invoiced','paid') "
+                    "AND details IS NOT NULL AND details != ''"):
+                try:
+                    det = json.loads(details)
+                except (ValueError, TypeError):
+                    continue
+                cat = (det.get("delivery") or {}).get("completed_at")
+                if not cat:
+                    continue
+                models = {v.get("vin"): (v.get("model") or "") for v in (det.get("vehicles") or [])}
+                try:
+                    vins = json.loads(vins_json or "[]")
+                except (ValueError, TypeError):
+                    vins = []
+                dest = ", ".join(p for p in (dcity, dstate) if p)
+                for vin in vins:
+                    rows.append({"when": _fmt_delivered(cat), "sort": cat, "vin": vin,
+                                 "model": models.get(vin, ""), "dest": dest,
+                                 "number": number, "app": vin in marked})
+            con.close()
+        except sqlite3.Error:
+            pass
+        rows.sort(key=lambda r: r["sort"], reverse=True)
+        rows = rows[:limit]
+    _delivered_cache["at"] = now
+    _delivered_cache["data"] = rows
+    return rows
 
 
 def _current(log_lines: list[str]) -> str | None:
@@ -306,6 +380,10 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .pill.p{background:#ddf4ff;color:var(--acc)}.pill.d{background:#fbefff;color:#8250df}
  .pill.w{background:#fff8c5;color:#9a6700;font-weight:600}
  .pill.e{background:#ffebe9;color:var(--bad);font-weight:600}
+ .pill.dl{background:#dafbe1;color:var(--ok)}
+ .histhead{display:flex;align-items:center;gap:8px;margin:22px 0 8px}
+ .htab{background:#fff;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer}
+ .htab.on{background:var(--acc);color:#fff;border-color:var(--acc)}
  .mut{color:var(--mut)}
  tbody tr{cursor:pointer}tbody tr:hover{background:#f6f8fa}
  .modal{display:none;position:fixed;inset:0;background:rgba(31,35,40,.5);z-index:10;
@@ -329,15 +407,25 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
    <div class=card><div class=k>Picked up</div><div class=v id=pickups>…</div></div>
    <div class=card><div class=k>Dropped off</div><div class=v id=dropoffs>…</div></div>
    <div class=card><div class=k>API errors</div><div class=v id=apierrors>…</div></div>
-   <div class=card><div class=k>Last activity</div><div class=v id=last style=font-size:15px>…</div></div>
  </div>
  <div class="card hero idle" id=hero>loading…</div>
  <h2 id=liveact>Live activity</h2>
  <details id=logwrap open><summary>Show raw log</summary><pre id=log>loading…</pre></details>
- <h2>History — past marks <span class=mut style=text-transform:none>(Exterior / VIN / Key = photo found?)</span></h2>
- <table><thead><tr><th>When</th><th>Action</th><th>VIN</th><th>Model</th><th>Shipment</th>
-   <th>Exterior</th><th>VIN</th><th>Key</th></tr></thead>
- <tbody id=hist></tbody></table>
+ <div class=histhead>
+   <button id=tabDelivered class="htab on">Delivered</button>
+   <button id=tabMarks class="htab">Marks</button>
+   <span class=mut id=histsub style="margin-left:auto;font-size:12px"></span>
+ </div>
+ <div id=viewDelivered>
+   <table><thead><tr><th>When</th><th>VIN</th><th>Model</th><th>Destination</th><th>Status</th></tr></thead>
+   <tbody id=deliv><tr><td colspan=5 class=mut style=padding:14px>loading…</td></tr></tbody></table>
+ </div>
+ <div id=viewMarks hidden>
+   <div class=mut style="font-size:12px;margin:0 0 8px">Exterior / VIN / Key = photo found?</div>
+   <table><thead><tr><th>When</th><th>Action</th><th>VIN</th><th>Model</th><th>Shipment</th>
+     <th>Exterior</th><th>VIN</th><th>Key</th></tr></thead>
+   <tbody id=hist></tbody></table>
+ </div>
 </div>
 <div id=modal class=modal onclick="if(event.target===this)closeModal()">
  <div class=mcard>
@@ -347,6 +435,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 </div>
 <script>
 const esc=s=>(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+let histTab='delivered', lastDeliv=0;
 const yn=v=>v==null?'<span class=mut>—</span>'
    :(v?'<span class="pill y">yes</span>':'<span class="pill n">no</span>');
 // VIN: real OCR plate = yes; pulled from rear/front fallback = yellow "!"
@@ -395,6 +484,28 @@ function renderNow(now,up,curVin){
  el.innerHTML=`<div class=htop><span class="fbadge ${now.flow}">${esc(now.flow_label)}</span>${id}${badge}</div>`
    +`<div class=track>${track}</div>`;
 }
+async function loadDelivered(){
+ let d; try{ d=await (await fetch('delivered',{cache:'no-store'})).json(); }catch(e){ return; }
+ const rows=d.delivered||[];
+ document.getElementById('histsub').textContent = rows.length+' delivered';
+ document.getElementById('deliv').innerHTML = rows.length ? rows.map(r=>{
+   const badge = r.app ? '<span class="pill e">APP</span>' : '<span class="pill dl">delivered</span>';
+   const click = r.app ? `onclick="showPhotos('${esc(r.vin)}','Drop Off')" title="click to see the photos used" style=cursor:pointer` : '';
+   return `<tr ${click}><td class=mut>${esc(r.when)}</td><td class=vin>${esc(r.vin)}</td>`
+     +`<td>${esc(r.model||'')}</td><td class=mut>${esc(r.dest||'')}</td><td>${badge}</td></tr>`;
+ }).join('') : '<tr><td colspan=5 class=mut style=padding:14px>No delivered shipments yet.</td></tr>';
+}
+function setHistTab(t){
+ histTab=t;
+ document.getElementById('tabDelivered').classList.toggle('on', t==='delivered');
+ document.getElementById('tabMarks').classList.toggle('on', t==='marks');
+ document.getElementById('viewDelivered').hidden = t!=='delivered';
+ document.getElementById('viewMarks').hidden = t!=='marks';
+ document.getElementById('histsub').textContent = t==='delivered' ? '' : '';
+ if(t==='delivered'){ lastDeliv=Date.now(); loadDelivered(); }
+}
+document.getElementById('tabDelivered').addEventListener('click',()=>setHistTab('delivered'));
+document.getElementById('tabMarks').addEventListener('click',()=>setHistTab('marks'));
 async function tick(){
  let d; try{ d=await (await fetch('api',{cache:'no-store'})).json(); }catch(e){ return; }
  const up = d.running || d.log_fresh;
@@ -403,8 +514,6 @@ async function tick(){
  document.getElementById('pickups').textContent = d.stats.pickups;
  document.getElementById('dropoffs').textContent = d.stats.dropoffs;
  document.getElementById('apierrors').textContent = d.stats.api_errors ?? 0;
- document.getElementById('last').textContent = d.last_seen
-   ? (d.last_seen_age_s<60?`${d.last_seen_age_s}s ago`:d.last_seen.replace('T',' ')) : '—';
  renderNow(d.now, up, d.current_vin);
  document.getElementById('gen').textContent = 'updated '+(d.generated_at||'').replace('T',' ');
  document.getElementById('log').textContent = (d.log||[]).join('\\n') || '(no shipment marked yet)';
@@ -418,7 +527,8 @@ async function tick(){
    <td class=mut>${esc(h.shipment||'')}</td>
    <td>${yn(h.exterior)}</td><td>${vinCell(h.vin_found)}</td><td>${keyCell(h.key_found,h.vin_found)}</td></tr>`).join('');
 }
-tick(); setInterval(tick, 4000);
+loadDelivered(); tick(); setInterval(tick, 4000);
+setInterval(()=>{ if(histTab==='delivered') loadDelivered(); }, 30000);
 </script></body></html>"""
 
 
@@ -435,6 +545,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/api"):
             self._send(200, json.dumps(snapshot()), "application/json")
+        elif self.path.startswith("/delivered"):
+            self._send(200, json.dumps({"delivered": _delivered()}), "application/json")
         elif self.path.startswith("/photos"):
             self._photos()
         elif self.path.startswith("/img"):
