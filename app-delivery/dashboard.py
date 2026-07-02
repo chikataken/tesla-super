@@ -143,8 +143,9 @@ def _app_marked() -> dict:
         return {}
     con = sqlite3.connect(DB)
     try:
-        return {(g, v): (s or "") for g, v, s in con.execute(
-            "SELECT order_guid, vin, shipment FROM dropoffs "
+        return {(g, v): {"shp": s or "", "ext": ext, "vin_found": vf, "key_found": kf}
+                for g, v, s, ext, vf, kf in con.execute(
+            "SELECT order_guid, vin, shipment, exterior, vin_found, key_found FROM dropoffs "
             "WHERE order_guid IS NOT NULL AND order_guid != ''")}
     except sqlite3.Error:
         return {}
@@ -277,15 +278,18 @@ def _delivered(limit: int = 800) -> list[dict]:
                     vins = []
                 dest = ", ".join(p for p in (dcity, dstate) if p)
                 for vin in vins:
-                    ship = marked.get((api_guid, vin))          # Tesla shipment id if we marked it
-                    if ship is None:
+                    m = marked.get((api_guid, vin))             # our drop-off (dict) if we marked it
+                    ext = vf = kf = None
+                    if m is None:
                         status = "delivered"                    # not one of ours
-                    elif order_base(ship) and order_base(ship) == order_base(number):
-                        status = "app"                          # order-name matches (primary check)
-                    elif _within_days(cat, 7):
-                        status = "app"                          # last resort: delivered within a week
                     else:
-                        status = "error"                        # name mismatch AND stale -> wrong SD order linked
+                        ext, vf, kf = m["ext"], m["vin_found"], m["key_found"]
+                        if order_base(m["shp"]) and order_base(m["shp"]) == order_base(number):
+                            status = "app"                      # order-name matches (primary check)
+                        elif _within_days(cat, 7):
+                            status = "app"                      # last resort: delivered within a week
+                        else:
+                            status = "error"                    # name mismatch AND stale -> wrong SD order linked
                     if status == "delivered":                   # not ours -> overlay Tesla dispatch status
                         t = _tesla_status_for(vin, number, cat, tesla_map)
                         if t == "delivered":
@@ -297,7 +301,8 @@ def _delivered(limit: int = 800) -> list[dict]:
                         # at_destination / not-found in Tesla -> leave "delivered"
                     rows.append({"when": _fmt_when(cat), "sort": cat, "vin": vin,
                                  "model": models.get(vin, ""), "dest": dest,
-                                 "number": number, "status": status})
+                                 "number": number, "status": status,
+                                 "exterior": ext, "vin_found": vf, "key_found": kf})
             con.close()
         except sqlite3.Error:
             pass
@@ -500,6 +505,13 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .pill.mk{background:#e6f7f4;color:#0a6b5e;font-weight:700}
  .pill.td{background:#fff8c5;color:#9a6700;font-weight:600}
  .pill.tr{background:#ddf4ff;color:var(--acc)}
+ .pill.g{background:#dafbe1;color:var(--ok)}    /* status column: green = driver + APP */
+ .pill.r{background:#ffebe9;color:var(--bad)}   /* status column: red = everything else */
+ .prov{white-space:nowrap}
+ .pb{display:inline-block;padding:1px 7px;margin-left:4px;border-radius:20px;font-size:10px}
+ .pb.g{background:#dafbe1;color:var(--ok)}     /* photo found */
+ .pb.y{background:#fff8c5;color:#9a6700}        /* not found, pulled from elsewhere */
+ .pb.r{background:#ffebe9;color:var(--bad)}     /* completely not found */
  .histhead{display:flex;align-items:center;gap:8px;margin:22px 0 8px}
  .htab{background:#fff;border:1px solid var(--bd);color:var(--mut);border-radius:8px;padding:5px 14px;font-size:13px;font-weight:600;cursor:pointer}
  .htab.on{background:var(--acc);color:#fff;border-color:var(--acc)}
@@ -531,12 +543,13 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  <details id=logwrap open><summary>Show raw log</summary><pre id=log>loading…</pre></details>
  <div class=histhead>
    <button id=tabDelivered class="htab on">Delivered</button>
+   <button id=tabUnmarked class="htab">Unmarked</button>
    <button id=tabMarks class="htab">Marks</button>
    <span class=mut id=histsub style="margin-left:auto;font-size:12px"></span>
  </div>
  <div id=viewDelivered>
-   <table><thead><tr><th>When</th><th>VIN</th><th>Model</th><th>Destination</th><th>Status</th></tr></thead>
-   <tbody id=deliv><tr><td colspan=5 class=mut style=padding:14px>loading…</td></tr></tbody></table>
+   <table><thead><tr><th>When</th><th>Status</th><th>VIN</th><th>Model</th><th>Shipment</th><th>Photos</th></tr></thead>
+   <tbody id=deliv><tr><td colspan=6 class=mut style=padding:14px>loading…</td></tr></tbody></table>
  </div>
  <div id=viewMarks hidden>
    <div class=mut style="font-size:12px;margin:0 0 8px">Exterior / VIN / Key = photo found?</div>
@@ -602,34 +615,43 @@ function renderNow(now,up,curVin){
  el.innerHTML=`<div class=htop><span class="fbadge ${now.flow}">${esc(now.flow_label)}</span>${id}${badge}</div>`
    +`<div class=track>${track}</div>`;
 }
+const isGreen = s => s==='app' || s==='marked';   // green = APP + driver; red = everything else
+function pbub(label,val,redWhenZero){ const c=val==null?'':val?'g':(redWhenZero?'r':'y');
+  return c?`<span class="pb ${c}">${label}</span>`:''; }
+function provCell(r){ if(r.exterior==null&&r.vin_found==null&&r.key_found==null) return '';
+  return pbub('Exterior',r.exterior,true)+pbub('VIN',r.vin_found,false)+pbub('KEY',r.key_found,false); }
 async function loadDelivered(){
  let d; try{ d=await (await fetch('delivered',{cache:'no-store'})).json(); }catch(e){ return; }
- const rows=d.delivered||[];
- const nErr=rows.filter(r=>r.status==='error').length;
- document.getElementById('histsub').textContent = rows.length+' delivered'+(nErr?` · ${nErr} error`:'');
+ const all=d.delivered||[];
+ const rows = histTab==='unmarked' ? all.filter(r=>!isGreen(r.status)) : all;  // Unmarked = red only
+ const nErr=all.filter(r=>r.status==='error').length;
+ document.getElementById('histsub').textContent = histTab==='unmarked'
+   ? rows.length+' unmarked'
+   : all.length+' delivered'+(nErr?` · ${nErr} error`:'');
  document.getElementById('deliv').innerHTML = rows.length ? rows.map(r=>{
-   const badge = r.status==='app'      ? '<span class="pill e">APP</span>'
-               : r.status==='error'    ? '<span class="pill err">⚠ ERROR</span>'
-               : r.status==='marked'   ? '<span class="pill mk">marked</span>'
-               : r.status==='tendered' ? '<span class="pill td">tendered</span>'
-               : r.status==='transit'  ? '<span class="pill tr">transit</span>'
-               :                          '<span class="pill dl">delivered</span>';
+   const green = r.status==='app' || r.status==='marked';    // green = driver + APP; red = everything else
+   const label = r.status==='app' ? 'APP' : r.status==='marked' ? 'driver' : r.status;
+   const badge = `<span class="pill ${green?'g':'r'}">${label}</span>`;
    const clickable = r.status==='app' || r.status==='error';
    const click = clickable ? `onclick="showPhotos('${esc(r.vin)}','Drop Off')" title="click to see the photos used" style=cursor:pointer` : '';
-   return `<tr ${click}><td class=mut>${esc(r.when)}</td><td class=vin>${esc(r.vin)}</td>`
-     +`<td>${esc(r.model||'')}</td><td class=mut>${esc(r.dest||'')}</td><td>${badge}</td></tr>`;
- }).join('') : '<tr><td colspan=5 class=mut style=padding:14px>No delivered shipments yet.</td></tr>';
+   return `<tr ${click}><td class=mut>${esc(r.when)}</td><td>${badge}</td>`
+     +`<td class=vin>${esc(r.vin)}</td><td>${esc(r.model||'')}</td>`
+     +`<td class=mut>${esc(r.number||'')}</td><td class=prov>${provCell(r)}</td></tr>`;
+ }).join('') : `<tr><td colspan=6 class=mut style=padding:14px>${histTab==='unmarked'?'No unmarked shipments.':'No delivered shipments yet.'}</td></tr>`;
 }
 function setHistTab(t){
  histTab=t;
+ const deliv = (t==='delivered' || t==='unmarked');           // both use the delivered table
  document.getElementById('tabDelivered').classList.toggle('on', t==='delivered');
+ document.getElementById('tabUnmarked').classList.toggle('on', t==='unmarked');
  document.getElementById('tabMarks').classList.toggle('on', t==='marks');
- document.getElementById('viewDelivered').hidden = t!=='delivered';
+ document.getElementById('viewDelivered').hidden = !deliv;
  document.getElementById('viewMarks').hidden = t!=='marks';
- document.getElementById('histsub').textContent = t==='delivered' ? '' : '';
- if(t==='delivered'){ lastDeliv=Date.now(); loadDelivered(); }
+ document.getElementById('histsub').textContent = '';
+ if(deliv){ lastDeliv=Date.now(); loadDelivered(); }
 }
 document.getElementById('tabDelivered').addEventListener('click',()=>setHistTab('delivered'));
+document.getElementById('tabUnmarked').addEventListener('click',()=>setHistTab('unmarked'));
 document.getElementById('tabMarks').addEventListener('click',()=>setHistTab('marks'));
 async function tick(){
  let d; try{ d=await (await fetch('api',{cache:'no-store'})).json(); }catch(e){ return; }
@@ -657,7 +679,7 @@ async function tick(){
  }
 }
 loadDelivered(); tick(); setInterval(tick, 4000);
-setInterval(()=>{ if(histTab==='delivered') loadDelivered(); }, 30000);
+setInterval(()=>{ if(histTab==='delivered' || histTab==='unmarked') loadDelivered(); }, 30000);
 </script></body></html>"""
 
 
