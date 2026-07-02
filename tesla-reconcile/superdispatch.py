@@ -9,14 +9,21 @@ import re
 from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
+import requests
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 import config
 import locators as S
+import sd_api
 from models import OrderRow, OrderDetail, Vehicle
 
 VIN_RE = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")          # 17-char VIN (no I/O/Q)
 ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+
+# Order delivery photos oldest-first so the batched VIN scan (scan_for_vin_lazy) reads
+# the door-jamb VIN sticker — shot first, so it's among the OLDEST photos — in its first
+# batch and can skip the rest of a huge section. Set False to try newest-first instead.
+PHOTOS_OLDEST_FIRST = True
 
 
 def invoiced_url(start: date, end: date, page: int = 1, ascending: bool = True) -> str:
@@ -305,6 +312,90 @@ def get_bol_photos(page: Page, detail_url: str) -> tuple[list[dict], str | None]
     for sec in sections:
         sec["urls"] = _unique(sec.get("urls", []))
     return sections, delivered_zip
+
+
+def get_delivery_photos_api(vins: list[str], order_guid: str | None = None) -> list[dict]:
+    """Delivery-inspection photos for an order's VINs via the OFFICIAL Shipper API —
+    the replacement for the get_bol_photos online-BOL web-scrape.
+
+    Returns [{'vin': <vin>, 'urls': [photo urls]}] — one section per requested VIN,
+    each holding that vehicle's DELIVERY photo URLs (public storage.googleapis JPGs,
+    the same images the BOL showed). The API already groups photos per vehicle, so
+    each VIN is matched only against its OWN car's photos — no cross-vehicle bleed,
+    no carousel clicking, and nothing loaded into a browser tab (so the SD renderer
+    can't balloon). A VIN with no order/photos comes back with urls=[] -> the caller
+    treats it as 'No VIN photo', exactly as the scrape's empty section did.
+
+    `order_guid` (the order's own guid, e.g. from /orders/view/<guid>) is used FIRST so
+    we fetch exactly the order under reconciliation. We fall back to a VIN lookup only
+    if that guid doesn't resolve — a VIN can sit on more than one order, so find_by_vin
+    alone could grab the wrong (e.g. older/cancelled) one.
+
+    The VIN-on-vehicle sticker lives in the Delivery photos; Pickup shots are exterior
+    condition images with no clear VIN, so we never request them."""
+    sections = [{"vin": v, "urls": []} for v in vins]
+    if not vins:
+        return sections
+
+    # 1) Exact order by its own guid. 2) Fallback: look it up from the first VIN that
+    # resolves. Either way one get_order returns every vehicle on the order.
+    order = None
+    if order_guid:
+        try:
+            order = sd_api.get_order(order_guid) or None
+        except sd_api.SDError as e:
+            print(f"    SD API get_order({order_guid}) failed, will try VIN lookup: {e}")
+    if not order:
+        for v in vins:
+            try:
+                orders = sd_api.find_by_vin(v) or []
+                guid = (orders[0] or {}).get("guid") if orders else None
+                if guid:
+                    order = sd_api.get_order(guid)
+                    break
+            except sd_api.SDError as e:
+                print(f"    SD API lookup failed for {v}: {e}")
+    if not order:
+        return sections
+
+    by_vin: dict[str, list[str]] = {}
+    for veh in order.get("vehicles") or []:
+        photos = []
+        for p in veh.get("photos") or []:
+            if (p.get("photo_type") or "").lower() != "delivery":
+                continue
+            u = p.get("photo_url") or p.get("rendered_photo_url")
+            if u:
+                photos.append((p.get("created_at") or "", u))
+        # Order so the photos MOST LIKELY to show the VIN come first — the lazy batched
+        # scan reads the first batch and stops there, so this is what makes it skip the
+        # rest of a huge section. Observed on real orders: the driver photographs the
+        # door-jamb VIN sticker FIRST, so the oldest delivery photos hold it -> sort
+        # oldest-first (created_at is ISO-ish; a plain ascending string sort works,
+        # stable, a no-op when created_at is blank). Flip PHOTOS_OLDEST_FIRST if a
+        # future check shows the VIN landing in the newest shots instead.
+        photos.sort(key=lambda cu: cu[0], reverse=not PHOTOS_OLDEST_FIRST)
+        by_vin[(veh.get("vin") or "").upper()] = _unique([u for _, u in photos])
+
+    for sec in sections:
+        sec["urls"] = by_vin.get((sec["vin"] or "").upper(), [])
+    return sections
+
+
+def fetch_images_http(urls: list[str]) -> list[bytes]:
+    """Download photo bytes straight from the public GCS URLs over plain HTTP — no
+    browser tab needed (the API photo path has no bol_page to fetch through). Mirrors
+    the old fetch_images() contract: returns the bytes for each URL that downloaded
+    OK, silently skipping any that fail."""
+    out = []
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=60)
+            if r.ok:
+                out.append(r.content)
+        except Exception:
+            pass
+    return out
 
 
 def fetch_images(page: Page, urls: list[str]) -> list[bytes]:

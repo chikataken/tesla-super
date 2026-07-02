@@ -86,10 +86,18 @@ def _section_for_vin(sections, vin, idx, n):
     return None
 
 
-def collect_qualifying(page, count, max_pages):
+# Recycle the SD tab this often DURING the scan. count=0 (the bare ./run.sh default)
+# scans up to max_pages invoiced-list pages into one renderer; dropping it periodically
+# keeps that renderer well under the OOM/freeze ceiling. Uses the safe close/reopen
+# _recycle_sd_page — NOT a CDP memory purge, which crashes the SuperDispatch renderer.
+SCAN_RECYCLE_EVERY = 30
+
+
+def collect_qualifying(pages, count, max_pages):
     found = []
     seen = set()                       # detail_urls already collected (dedupe across pages)
     for pageno in range(1, max_pages + 1):
+        page = pages[0]                # current SD tab (may be recycled mid-scan below)
         # OLDEST delivery first (ascending). The window can hold ~1,600 invoiced
         # orders (~80 pages of 20), so --max-pages must be high enough to reach the
         # recent, still-markable deliveries at the end — the default is 80. Earlier
@@ -109,14 +117,17 @@ def collect_qualifying(page, count, max_pages):
                 if count and len(found) >= count:   # count=0 -> no limit (all)
                     print(f"  page {pageno}: {len(rows)} rows, +{qualifying_new} "
                           f"qualifying -> reached count={count}")
-                    return found
+                    return found, pages
         print(f"  page {pageno}: {len(rows)} rows, {len(new)} new, "
               f"+{qualifying_new} qualifying (running total {len(found)})")
         if not new:
             print(f"  page {pageno}: no NEW orders — the list isn't paginating on "
                   f"the page param (virtualized list). Stopping.")
             break
-    return found
+        if pageno % SCAN_RECYCLE_EVERY == 0:
+            print(f"  [mem] recycling SuperDispatch tab mid-scan after {pageno} pages")
+            pages = _recycle_sd_page(pages)
+    return found, pages
 
 
 def apply_tags(sd_page, row, edit_url, tags):
@@ -134,27 +145,33 @@ def apply_tags(sd_page, row, edit_url, tags):
 
 
 def _photo_check(ctx_pages, row, detail, vins, dry_run, skip_vision=False):
-    """The BOL delivery-photo / VIN-on-vehicle step. Tags Delivery confirmed
-    (+ No VIN photo if a VIN isn't found on the car) + CLAUDE. Shared by the
-    normal clean-pass path and --photos-only."""
-    sd_page, tesla_page, claims_page, bol_page = ctx_pages
+    """The delivery-photo / VIN-on-vehicle step (photos pulled from the Shipper API).
+    Tags Delivery confirmed (+ No VIN photo if a VIN isn't found on the car) + CLAUDE.
+    Shared by the normal clean-pass path and --photos-only."""
+    sd_page, tesla_page, claims_page = ctx_pages
     tags = [config.TAG_DELIVERY_CONFIRMED]
     if skip_vision:
         print("  decision: clean (vision skipped) -> Delivery confirmed")
     else:
-        sections, bol_zip = sd.get_bol_photos(bol_page, detail.detail_url)
+        # Delivery photos via the OFFICIAL Shipper API (grouped per vehicle), instead
+        # of opening the online BOL in a browser tab. Same storage.googleapis images,
+        # but nothing is loaded into a renderer — so the SD tab can't OOM-crash. Pass
+        # the order's own guid (the /orders/view/<guid> segment) so we fetch exactly
+        # this order, not another order the VIN might also sit on.
+        order_guid = detail.detail_url.rstrip("/").split("/")[-1]
+        sections = sd.get_delivery_photos_api(vins, order_guid)
 
-        # ACTUAL delivered ZIP: read from the Super Dispatch footer stamp burned
-        # into every delivery-inspection photo ("Delivery Condition: 5/23/2026,
-        # Santa Clarita, CA 91355") — the carrier app generates it at the drop
-        # location, so it reflects where the photos were really taken. The BOL
-        # timeline ZIP is only the fallback when no footer is readable.
+        # ACTUAL delivered ZIP: read from the Super Dispatch footer stamp burned into
+        # every delivery-inspection photo ("Delivery Condition: 5/23/2026, Santa
+        # Clarita, CA 91355") — the carrier app generates it at the drop location, so
+        # it reflects where the photos were really taken. (The online-BOL timeline was
+        # the old fallback; with the BOL gone, the footer stamp is the only source —
+        # if it can't be read, the ZIP check is simply skipped, never mis-flagged.)
         all_urls = [u for s in sections for u in s["urls"]]
-        footer_imgs = sd.fetch_images(bol_page, all_urls[:5])
+        footer_imgs = sd.fetch_images_http(all_urls[:5])
         fz = ocr.footer_zip(footer_imgs)
-        delivered_zip = fz or bol_zip
-        zsrc = ("photo footer" if fz
-                else "BOL timeline (no readable footer)" if bol_zip else "?")
+        delivered_zip = fz
+        zsrc = "photo footer" if fz else "no readable footer"
 
         # ZIP check: scheduled delivery ZIP (order page) vs ACTUAL delivered ZIP.
         # If they differ and Claude judges them too far apart by road, it's a
@@ -176,7 +193,7 @@ def _photo_check(ctx_pages, row, detail, vins, dry_run, skip_vision=False):
                 return
 
         total = sum(len(s["urls"]) for s in sections)
-        print(f"  BOL: {total} photos across {len(sections)} section(s)")
+        print(f"  API: {total} delivery photo(s) across {len(sections)} section(s)")
         missing_photo = False
         mismatch = False
         for idx, vin in enumerate(vins):
@@ -184,15 +201,18 @@ def _photo_check(ctx_pages, row, detail, vins, dry_run, skip_vision=False):
             # section, so we don't send another vehicle's photos for this VIN.
             sec = _section_for_vin(sections, vin, idx, len(vins))
             urls = sec["urls"] if sec else [u for s in sections for u in s["urls"]]
-            images = sd.fetch_images(bol_page, urls)
-            cand = ocr.scan_for_vin(images, vin)   # lazy OCR, stops at first full-VIN read
+            # Newest-first batched scan: downloads + OCRs ~20 photos at a time and stops
+            # as soon as one reads the full VIN, so huge sections don't pull every photo.
+            # If no full read is found it scans the whole section, so nothing is missed.
+            images, cand = ocr.scan_for_vin_lazy(sd.fetch_images_http, urls, vin)
             if not cand:
                 print(f"    {vin}: no VIN found in its {len(urls)}-photo section "
                       f"-> No VIN photo")
                 missing_photo = True
                 continue
             sent = [images[i] for i in cand]
-            print(f"    {vin}: {len(urls)}-photo section, sending {len(sent)} to API")
+            print(f"    {vin}: {len(urls)}-photo section, fetched {len(images)}, "
+                  f"sending {len(sent)} to API")
             v = vision.analyze_delivery_photos(sent, vin)
             # Decide the match in CODE from what Claude READ, rather than trusting
             # its conservative yes/no (it under-confirms legible-but-glary VINs).
@@ -233,7 +253,7 @@ def _photo_check(ctx_pages, row, detail, vins, dry_run, skip_vision=False):
 
 
 def process(ctx_pages, row, dry_run, skip_vision, photos_only=False):
-    sd_page, tesla_page, claims_page, bol_page = ctx_pages
+    sd_page, tesla_page, claims_page = ctx_pages
     detail = sd.open_order_detail(sd_page, row)
     vins = [v.vin for v in detail.vehicles]
     print(f"\n{row.order_id}  tags={row.tags}  VIN(s)={vins}")
@@ -242,7 +262,7 @@ def process(ctx_pages, row, dry_run, skip_vision, photos_only=False):
         return
 
     # --photos-only: skip both Tesla checks (payment + claims) and jump straight
-    # to the BOL delivery-photo / VIN-on-vehicle step.
+    # to the delivery-photo / VIN-on-vehicle step (photos from the Shipper API).
     if photos_only:
         print("  (photos-only: skipping Tesla payment + claims)")
         _photo_check(ctx_pages, row, detail, vins, dry_run)
@@ -302,7 +322,46 @@ def process(ctx_pages, row, dry_run, skip_vision, photos_only=False):
     _photo_check(ctx_pages, row, detail, vins, dry_run, skip_vision)
 
 
+# The SuperDispatch web app is a heavy React SPA, and the ONE long-lived sd_page tab
+# does a lot of navigating in a single renderer: collect_qualifying scans up to
+# max-pages invoiced-list pages up front, then every order adds ~3 more SD loads
+# (detail + edit + save). That renderer's memory climbs until the tab OOMs/freezes
+# (~35 orders in practice — the same wall as before, now on the SD tab itself since
+# the BOL image tab is gone). The cure is to drop the renderer process often enough
+# that it never approaches the ceiling: recycle the tab AFTER the big scan and every
+# RECYCLE_EVERY orders during processing. A renderer that only ever does ~scan-size
+# or ~RECYCLE_EVERY*3 loads stays comfortably under the limit.
+RECYCLE_EVERY = 12
+
+
+def _recycle_sd_page(pages):
+    """Close and reopen the SuperDispatch tab to drop its renderer process entirely —
+    the only sure way to return all the memory a long run of SD-SPA navigations piles
+    up. The Tesla payment/claims tabs are left untouched (they carry per-session setup
+    — claims filters / Approved view). Returns the new pages tuple (callers MUST adopt
+    it — the old sd_page is now closed)."""
+    sd_page, tesla_page, claims_page = pages
+    ctx = sd_page.context
+    # Keep one of OUR surviving tabs focused so the replacement opens in our window,
+    # not a concurrent tool's, in shared-Chrome (CDP) mode.
+    try:
+        tesla_page.bring_to_front()
+    except Exception:
+        pass
+    try:
+        sd_page.close(run_before_unload=False)
+    except Exception:
+        pass
+    return (ctx.new_page(), tesla_page, claims_page)
+
+
 def _process_orders(pages, orders, dry_run, skip_vision, photos_only):
+    # Start on a FRESH SD renderer: collect_qualifying just loaded dozens of heavy
+    # invoiced-list pages into sd_page, so drop that tab before processing piles more
+    # on top of it (this alone is what pushed the old run over the edge at ~35).
+    print("  [mem] recycling SuperDispatch tab after the invoiced-list scan")
+    pages = _recycle_sd_page(pages)
+
     errors = 0
     for i, row in enumerate(orders, 1):
         print(f"\n[{i}/{len(orders)}]", end="")
@@ -312,8 +371,14 @@ def _process_orders(pages, orders, dry_run, skip_vision, photos_only):
             errors += 1
             print(f"  !! ERROR on {row.order_id}: "
                   f"{type(exc).__name__}: {exc}\n  ...skipping, continuing batch")
+        # Periodically drop the SD renderer entirely so its SPA memory can never climb
+        # to the OOM/freeze ceiling over a long batch.
+        if i % RECYCLE_EVERY == 0 and i < len(orders):
+            print(f"  [mem] recycling SuperDispatch tab after {i} orders")
+            pages = _recycle_sd_page(pages)
     if errors:
         print(f"\n{errors}/{len(orders)} shipment(s) errored and were skipped.")
+    return pages        # may hold a freshly-recycled sd_page — caller must adopt it
 
 
 def main(args):
@@ -338,11 +403,13 @@ def main(args):
                   "this run.")
 
     with browser_context() as ctx:
+        # Three tabs now: one SuperDispatch (list/detail/tags) + two Tesla (payment,
+        # claims). Delivery photos come from the Shipper API, so the old 4th "BOL" tab
+        # is gone — nothing loads full-res photos into a renderer anymore.
         sd_page = ctx.new_page()
         tesla_page = ctx.new_page()
         claims_page = ctx.new_page()
-        bol_page = ctx.new_page()
-        pages = (sd_page, tesla_page, claims_page, bol_page)
+        pages = (sd_page, tesla_page, claims_page)
 
         # ---- single-order mode: one shot, ignores window/skip/loop ----
         if args.order:
@@ -361,7 +428,7 @@ def main(args):
             if not args.photos_only:
                 tesla.setup_claims_filters(claims_page)
                 tesla.ensure_approved(tesla_page)
-            _process_orders(pages, [row], args.dry_run, args.skip_vision, args.photos_only)
+            pages = _process_orders(pages, [row], args.dry_run, args.skip_vision, args.photos_only)
             input("\nPress Enter to close the browser...")
             return
 
@@ -377,12 +444,14 @@ def main(args):
             print(f"\n===== pass {pass_no}  {dt.datetime.now():%Y-%m-%d %H:%M} =====")
             print(f"Window {WINDOW_START}..{WINDOW_END}  count={limit}  "
                   f"dry_run={args.dry_run}  skip_vision={args.skip_vision}")
-            orders = collect_qualifying(sd_page, args.count, args.max_pages)
+            orders, pages = collect_qualifying(pages, args.count, args.max_pages)
+            sd_page, tesla_page, claims_page = pages   # adopt any mid-scan recycled tab
             if not orders:
                 print("No qualifying shipments found.")
             else:
                 print(f"Found {len(orders)} qualifying shipment(s).")
-                _process_orders(pages, orders, args.dry_run, args.skip_vision, args.photos_only)
+                pages = _process_orders(pages, orders, args.dry_run, args.skip_vision, args.photos_only)
+                sd_page, tesla_page, claims_page = pages   # adopt any recycled tab
 
             if not args.loop:
                 break
