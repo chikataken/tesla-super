@@ -529,7 +529,9 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .mbody h3{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:16px 0 8px}
  .imgs{display:flex;gap:12px;flex-wrap:wrap}
  figure{margin:0;width:168px}
- figure img{width:168px;height:126px;object-fit:cover;border:1px solid var(--bd);border-radius:8px;background:#f6f8fa}
+ figure img{width:168px;height:126px;object-fit:cover;border:1px solid var(--bd);border-radius:8px;background:#f6f8fa;cursor:zoom-in}
+ .lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:20;align-items:center;justify-content:center;padding:24px;cursor:zoom-out}
+ .lightbox img{max-width:96vw;max-height:96vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 40px rgba(0,0,0,.5);cursor:default}
 </style></head><body><div class=wrap>
  <h1>Tesla Delivery Service</h1>
  <div class=sub>shipments.wastake.com › App · auto-refreshes every 4s · <span id=gen></span></div>
@@ -565,6 +567,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
   <div id=mbody class=mbody></div>
  </div>
 </div>
+<div id=lightbox class=lightbox onclick="if(event.target===this)closeLightbox()"><img id=lbimg src="" alt=""></div>
 <script>
 const esc=s=>(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 let histTab='delivered', lastDeliv=0;
@@ -583,12 +586,15 @@ async function showPhotos(vin,action){
  let d; try{ d=await (await fetch('photos?vin='+encodeURIComponent(vin))).json(); }catch(e){ b.innerHTML='error loading photos'; return; }
  const secs=(d.sections||[]).filter(s=>s.photos.length);
  b.innerHTML = secs.length ? secs.map(s=>`<h3>${esc(s.name)}</h3><div class=imgs>`+
-   s.photos.map(p=>`<figure><img src="${esc(p.url)}" loading=lazy></figure>`).join('')
+   s.photos.map(p=>`<figure><img src="${esc(p.url)}" loading=lazy onclick="openLightbox(this.src)"></figure>`).join('')
    +`</div>`).join('')
    : '<div class=mut style=padding:14px-0>No photos on disk'+(action==='Pick Up'?' (pickups are photo-free).':'.')+'</div>';
 }
 function closeModal(){ document.getElementById('modal').style.display='none'; }
-document.addEventListener('keydown',e=>{ if(e.key==='Escape')closeModal(); });
+function openLightbox(src){ document.getElementById('lbimg').src=src; document.getElementById('lightbox').style.display='flex'; }
+function closeLightbox(){ document.getElementById('lightbox').style.display='none'; document.getElementById('lbimg').src=''; }
+document.addEventListener('keydown',e=>{ if(e.key!=='Escape')return;
+  if(document.getElementById('lightbox').style.display==='flex') closeLightbox(); else closeModal(); });
 const fmtAge=s=>s==null?'':(s<60?s+'s':Math.floor(s/60)+'m '+(s%60)+'s');
 function renderNow(now,up,curVin){
  const el=document.getElementById('hero');
