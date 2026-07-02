@@ -127,13 +127,17 @@ def _history(limit: int = 300) -> list[dict]:
     return rows[:limit]
 
 
-def _app_marked_vins() -> set:
-    """VINs our automation dropped off (from dropoffs.db) — used to badge delivered rows 'APP'."""
+def _app_marked_pairs() -> set:
+    """(order_guid, vin) pairs our automation dropped off (from dropoffs.db) — the exact
+    key for badging a delivered row 'APP'. The GUID pins the specific SD order (immune to
+    a VIN riding multiple orders over time) and the VIN pins the vehicle (per-VIN precision
+    on multi-VIN orders)."""
     if not os.path.exists(DB):
         return set()
     con = sqlite3.connect(DB)
     try:
-        return {r[0] for r in con.execute("SELECT vin FROM dropoffs")}
+        return {(g, v) for g, v in con.execute(
+            "SELECT order_guid, vin FROM dropoffs WHERE order_guid IS NOT NULL AND order_guid != ''")}
     except sqlite3.Error:
         return set()
     finally:
@@ -168,11 +172,11 @@ def _delivered(limit: int = 800) -> list[dict]:
         return _delivered_cache["data"]
     rows = []
     if os.path.exists(_REC_DB):
-        marked = _app_marked_vins()
+        marked = _app_marked_pairs()
         try:
             con = sqlite3.connect(f"file:{_REC_DB}?mode=ro", uri=True)
-            for number, dcity, dstate, vins_json, details in con.execute(
-                    "SELECT number, delivery_city, delivery_state, vins, details FROM orders "
+            for number, api_guid, dcity, dstate, vins_json, details in con.execute(
+                    "SELECT number, api_guid, delivery_city, delivery_state, vins, details FROM orders "
                     "WHERE status IN ('delivered','invoiced','paid') "
                     "AND details IS NOT NULL AND details != ''"):
                 try:
@@ -191,7 +195,7 @@ def _delivered(limit: int = 800) -> list[dict]:
                 for vin in vins:
                     rows.append({"when": _fmt_when(cat), "sort": cat, "vin": vin,
                                  "model": models.get(vin, ""), "dest": dest,
-                                 "number": number, "app": vin in marked})
+                                 "number": number, "app": (api_guid, vin) in marked})
             con.close()
         except sqlite3.Error:
             pass
