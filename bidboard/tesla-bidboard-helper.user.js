@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.19.0
+// @version      0.20.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -251,6 +251,7 @@
         .pin input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-size:16px;font-weight:700;color:#0a7d33;padding:0}
         .pin input::placeholder{color:#0a7d33;opacity:.45}
         .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:16px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
+        .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
       </style>
       <div class="panel">
         <div class="hd" id="hd"><div class="ttl">Bid Board <span class="sub" id="sub"></span></div><span class="livebadge">● LIVE</span><button id="min">–</button></div>
@@ -299,6 +300,7 @@
     window.addEventListener('hashchange', apply);
     let last = location.href;
     setInterval(() => { if (location.href !== last) { last = location.href; apply(); } }, 300);   // fallback for routers that bypass pushState
+    setInterval(() => { const el = root && root.querySelector('.empty.clock'); if (el) el.textContent = nowHHMM(); }, 10000);   // keep the "nothing to bid" clock current
     apply();
   }
 
@@ -334,8 +336,14 @@
       + `<input class="price" type="text" inputmode="decimal" placeholder="${esc(ph)}" value="${esc(local)}" data-key="${esc(k)}" data-priced="${done ? 1 : 0}"></div></div>`;
   }
 
+  function nowHHMM() {
+    const d = new Date();
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+
   function render() {
     if (!root) return;
+    body.left.classList.remove('center-empty'); body.right.classList.remove('center-empty');
     const totalVins = state.groups.reduce((s, g) => s + ((g.bids && g.bids.totalRecords) || 0), 0);
     body.sub.textContent = state.loading ? 'loading…' : state.error ? '' : `· ${state.groups.length} routes · ${totalVins} VINs`;
 
@@ -344,11 +352,15 @@
 
     const gs = currentGroups();
     if (!gs.length) {
-      if (state.todoOnly) {
+      if (state.todoOnly && !state.filter) {
+        // Genuinely nothing left to bid: center "Nothing to Bid" on the left, show the current time
+        // (green) on the right, and drop the panes' scroll/padding.
+        body.left.classList.add('center-empty'); body.right.classList.add('center-empty');
         body.left.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
-        body.right.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
+        body.right.innerHTML = `<div class="empty done clock">${nowHHMM()}</div>`;
         showToast('Nothing to Bid');
       } else {
+        // A filter (in TO-DO or ALL) that matched nothing, or no routes captured yet — default message.
         body.left.innerHTML = `<div class="empty">No routes${state.filter ? ' match the filter' : ' captured yet'}.</div>`;
         body.right.innerHTML = '';
       }
