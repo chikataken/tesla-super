@@ -285,8 +285,8 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .st .el{font-size:10px;color:var(--acc);margin-top:2px;font-variant-numeric:tabular-nums}
  details#logwrap{margin-top:8px}
  details#logwrap>summary{cursor:pointer;color:var(--mut);font-size:13px;user-select:none;padding:4px 0}
- /* prod (?hide_activity=1) keeps the App tab but drops the live-activity section — see dashboard.py do_GET */
- .noactivity #hero,.noactivity #liveact,.noactivity #logwrap{display:none}
+ /* prod (?hide_activity=1) keeps the App tab + the rich hero tracker, drops only the raw log — see do_GET */
+ .noactivity #liveact,.noactivity #logwrap{display:none}
  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:22px 0 8px}
  pre{background:#ffffff;border:1px solid var(--bd);border-radius:8px;padding:12px;overflow:auto;max-height:330px;
      font:12px/1.5 ui-monospace,monospace;color:#1f2328;white-space:pre-wrap;word-break:break-word}
