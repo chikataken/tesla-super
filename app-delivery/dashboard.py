@@ -47,6 +47,8 @@ _STEP_RE = re.compile(r"STEP (pickup|dropoff) ([1-5])/5 (\S+) vin=(\S*) shp=(\S*
 _STALL = {("pickup", 3): 210, ("pickup", 4): 90, ("pickup", 5): 150,
           ("dropoff", 2): 300, ("dropoff", 3): 240, ("dropoff", 4): 120}
 _STALL_DEFAULT = 90
+# A flow's commit line (fires right after step 5) — marks the mark as DONE, not stuck.
+_COMPLETE_RE = re.compile(r"ledger:|ledger\(pickup\):")
 
 
 def _service_running() -> bool:
@@ -141,33 +143,37 @@ def _now(raw_lines: list[str]) -> dict:
     step = None
     vin = shp = ""
     started = None
+    done = False
     for ln in raw_lines:
         m = _STEP_RE.search(ln)
         if m:
             f, n, lab, v, s = m.group(1), int(m.group(2)), m.group(3), m.group(4), m.group(5)
-            if f != flow:                       # new flow run -> reset the sticky identity
+            if f != flow or n == 1:             # new flow run OR a new shipment -> reset sticky id
                 vin = shp = ""
-            flow, step, label = f, n, lab
+            flow, step, label, done = f, n, lab, False
             if v:
                 vin = v
             if s:
                 shp = s
             started = _parse_ts(ln) or started
-        elif flow and _HIDE_RE.search(ln):      # went idle after the last marker
+        elif flow and _HIDE_RE.search(ln):      # worker went idle after the last marker -> reset
             flow = label = None
             step = None
             vin = shp = ""
             started = None
+            done = False
+        elif flow and not done and _COMPLETE_RE.search(ln):   # this mark committed (ledger written)
+            done = True
     if not flow:
         return {"flow": None}
     age = int((datetime.datetime.now() - started).total_seconds()) if started else None
     thr = _STALL.get((flow, step), _STALL_DEFAULT)
     return {
         "flow": flow, "flow_label": FLOW_LABEL[flow], "steps": STEPS[flow],
-        "step": step, "label": label, "vin": vin, "shp": shp, "model": "",
+        "step": step, "label": label, "vin": vin, "shp": shp, "model": "", "done": done,
         "step_started_at": started.isoformat(timespec="seconds") if started else None,
         "step_age_s": age,
-        "stalled": age is not None and age > thr,
+        "stalled": (not done) and age is not None and age > thr,   # a committed mark is never "stalled"
     }
 
 
@@ -270,6 +276,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .hero .vin{font-family:ui-monospace,monospace;font-size:16px;font-weight:600}
  .hero .shp{color:var(--mut);font-size:13px}
  .stall{margin-left:auto;background:#fff8c5;color:#9a6700;font-weight:600;padding:2px 10px;border-radius:20px;font-size:12px}
+ .donebadge{margin-left:auto;background:#dafbe1;color:var(--ok);font-weight:700;padding:2px 11px;border-radius:20px;font-size:12px}
  .track{display:flex;align-items:flex-start}
  .st{flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;position:relative}
  .st::before{content:"";position:absolute;top:15px;left:-50%;width:100%;height:3px;background:var(--bd);z-index:0}
@@ -378,17 +385,19 @@ function renderNow(now,up,curVin){
    return;
  }
  el.className='card hero '+now.flow;
+ const isDone=!!now.done;
  const track=(now.steps||[]).map((lbl,i)=>{
-   const n=i+1, cls=n<now.step?'done':(n===now.step?'active':'');
-   const mark=n<now.step?'✓':n;
-   const el2=(n===now.step&&now.step_age_s!=null)?`<div class=el>${fmtAge(now.step_age_s)}</div>`:'';
+   const n=i+1, cls=isDone?'done':(n<now.step?'done':(n===now.step?'active':''));
+   const mark=(isDone||n<now.step)?'✓':n;
+   const el2=(!isDone&&n===now.step&&now.step_age_s!=null)?`<div class=el>${fmtAge(now.step_age_s)}</div>`:'';
    return `<div class="st ${cls}"><div class=num>${mark}</div><div class=lbl>${esc(lbl)}</div>${el2}</div>`;
  }).join('');
  const id=[now.vin?`<span class=vin>${esc(now.vin)}</span>`:'',
    now.model?`<span class=shp>${esc(now.model)}</span>`:'',
    now.shp?`<span class=shp>· ${esc(now.shp)}</span>`:''].filter(Boolean).join(' ');
- const stall=now.stalled?'<span class=stall>⏳ taking longer than usual</span>':'';
- el.innerHTML=`<div class=htop><span class="fbadge ${now.flow}">${esc(now.flow_label)}</span>${id}${stall}</div>`
+ const badge=isDone?'<span class=donebadge>✓ committed</span>'
+   :(now.stalled?'<span class=stall>⏳ taking longer than usual</span>':'');
+ el.innerHTML=`<div class=htop><span class="fbadge ${now.flow}">${esc(now.flow_label)}</span>${id}${badge}</div>`
    +`<div class=track>${track}</div>`;
 }
 async function tick(){

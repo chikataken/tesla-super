@@ -732,6 +732,13 @@ def goto_in_transit_home():
             tap(tab["cx"], tab["cy"], pause=NAV_PAUSE)
             wait_until(lambda ns: find_text(ns, "View Details") or find_text(ns, "In Transit ("), tries=6)
             return True
+        # A wedged "Add Photos" drop-off screen can't be backed out cleanly (Back pops a
+        # discard-photos dialog and we re-land here), so soft back-taps loop forever — this
+        # is the wedge that once left the worker idle seeing "In Transit (0)". Force a clean
+        # relaunch instead of tapping Back.
+        if find_text(nodes, "Add Photos") and restarts < 2:
+            restarts += 1; stuck = 0
+            restart_app(); continue
         bb = by(nodes, id_suffix="Header.buttonGoBack")   # in-app back (detail -> home)
         if bb:
             tap(bb["cx"], bb["cy"], pause=1.5); stuck = 0; continue
@@ -842,7 +849,12 @@ def _dropoff_open_detail(confirm):
     try:
         committed = drop_off(confirm)
     except Exception as e:
-        log(f" ! drop off failed: {e}")
+        # The drop-off can fail with the app left on a wedged screen (e.g. "Add Photos"
+        # after a photo-add that didn't commit) that soft navigation can't escape — which
+        # once stranded a photographed shipment. Force a clean relaunch so the next drain
+        # pass re-detects the still-In-Transit shipment and re-attempts from home.
+        log(f" ! drop off failed: {e} — restarting the app to clear any wedged screen")
+        restart_app()
         return (False, ship_units)
     if committed:
         record_dropoffs(ship_units, "Subject to Inspection", processed)
