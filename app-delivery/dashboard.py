@@ -542,9 +542,9 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  <h2 id=liveact>Live activity</h2>
  <details id=logwrap open><summary>Show raw log</summary><pre id=log>loading…</pre></details>
  <div class=histhead>
-   <button id=tabDelivered class="htab on">Delivered</button>
+   <button id=tabDelivered class="htab on">All</button>
    <button id=tabUnmarked class="htab">Unmarked</button>
-   <button id=tabMarks class="htab">Marks</button>
+   <button id=tabMarks class="htab">Log</button>
    <span class=mut id=histsub style="margin-left:auto;font-size:12px"></span>
  </div>
  <div id=viewDelivered>
