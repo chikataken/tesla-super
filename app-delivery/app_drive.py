@@ -73,6 +73,8 @@ def record_dropoffs(units, option, photographed_vins):
     including whether each section's photo was actually FOUND (from the decode manifest):
     exterior = the 4 sides, vin_found = a real OCR VIN plate, key_found = a real key
     card (not a fallback)."""
+    if units:
+        step("dropoff", 5, "commit", vin=units[0][0], shp=units[0][1])
     con = _ledger()
     now = datetime.datetime.now().isoformat(timespec="seconds")
     for vin, shp in units:
@@ -268,6 +270,13 @@ def log(msg):
         pass
 
 
+def step(flow, n, label, vin="", shp=""):
+    """Emit a machine-readable milestone marker for the dashboard's step tracker.
+    Purely additive (a normal log line) — does NOT change automation behavior.
+    flow = 'pickup' | 'dropoff'; n = 1..5 (see the 5-step lists in dashboard.py)."""
+    log(f"STEP {flow} {n}/5 {label} vin={vin} shp={shp}")
+
+
 def current_focus():
     return shell("dumpsys window | grep -E 'mCurrentFocus'")
 
@@ -458,6 +467,7 @@ def first_plus_box(nodes):
 
 # ------------------------------- decode ------------------------------------
 def decode(vin):
+    step("dropoff", 2, "decode", vin=vin)
     log(f"  decoding {vin} (fetch latest shipment + model + OCR)…")
     env = dict(os.environ, HF_HUB_DISABLE_TELEMETRY="1",
                CLIP_DEVICE=os.environ.get("CLIP_DEVICE", "cuda"),     # corner model on GPU
@@ -522,6 +532,7 @@ def add_photos_for_unit(vin, unit_node):
 
     add = by(dump(), text="Add", desc="Add")
     tap(add["cx"] if add else 360, add["cy"] if add else 1498, pause=NAV_PAUSE)
+    step("dropoff", 3, "upload", vin=vin)
     log("  tapped Add; waiting for upload…")
     wait_until(_drop_off_btn, tries=14, interval=1.5)     # upload done -> back on detail
     shot("after_add")
@@ -597,6 +608,7 @@ def drop_off(confirm):
         conf = by(nodes, id_suffix="buttonConfirmDropOff", desc="Confirm")
         if not conf:
             raise RuntimeError("no 'Confirm' button")
+        step("dropoff", 4, "confirm")
         log("  CONFIRMING drop off (Subject to Inspection)…" + (f" [retry {attempt}]" if attempt else ""))
         tap(conf["cx"], conf["cy"], pause=NAV_PAUSE)
         # Outcome: success (home / Dropped Off; After-Hours is auto-confirmed by
@@ -777,6 +789,7 @@ def _dropoff_open_detail(confirm):
     Subject to Inspection -> Confirm. Returns (committed, ship_units); ledgers on success."""
     nodes = dump()
     shot("detail")
+    step("dropoff", 1, "open")
     log(f" detail loaded; {len(units_from(nodes))} unit(s) "
         f"({sum(u['attached'] for u in units_from(nodes))} already attached)")
     processed = set()
@@ -1113,6 +1126,7 @@ def _collect_and_verify_units(max_passes=80):
         if todo:
             u = todo[0]
             attempted.add(u["vin"])
+            step("pickup", 2, "verify", vin=u["vin"], shp=ship.get(u["vin"], ""))
             log(f"  verifying {u['vin']}…")
             node = _unit_in_clean_view(u["vin"]) or u["node"]   # avoid a mis-tap on a clipped card
             try:
@@ -1149,6 +1163,8 @@ def do_pickup(confirm):
     verifying."""
     shot("pickup_detail")
     ship_units = _collect_and_verify_units()
+    pvin = ship_units[0][0] if ship_units else ""      # representative VIN/shipment for the step tracker
+    pshp = ship_units[0][1] if ship_units else ""
     if not confirm:
         log("  (dry run) units verified — not loading/departing.")
         return (False, ship_units, None)
@@ -1161,6 +1177,7 @@ def do_pickup(confirm):
         log("  Start Loading not enabled (a unit didn't verify) — skipping this shipment.")
         return (False, ship_units, None)
     tap(sl["cx"], sl["cy"], pause=NAV_PAUSE)
+    step("pickup", 3, "load", vin=pvin, shp=pshp)
     log("  loading — waiting out the ~2-min timer…")
     nodes = wait_until(_finish_enabled, tries=80, interval=2.0)     # timer is 2:00
     fl = _click(nodes, contains="Finish Loading", min_w=300)
@@ -1168,7 +1185,9 @@ def do_pickup(confirm):
         raise RuntimeError("loading timer never enabled Finish Loading")
     tap(fl["cx"], fl["cy"], pause=NAV_PAUSE)
     wait_until(lambda ns: find_text(ns, "Update ETA") or by(ns, desc="Arrival Date"), tries=8)
+    step("pickup", 4, "eta", vin=pvin, shp=pshp)
     eta = set_eta()                      # sets the ETA, taps its Confirm, waits out the spinner
+    step("pickup", 5, "depart", vin=pvin, shp=pshp)
     # If a separate 'Ready to Depart?' step is shown, confirm it. set_eta already waited for
     # the ETA submit to settle, so this Confirm lands on a stable screen (no revert race).
     nodes = wait_until(lambda ns: find_text(ns, "Ready to Depart") or _home_now(ns), tries=8)
@@ -1381,6 +1400,7 @@ def process_cycle(confirm, max_shipments):
             break
         _all_skipped_logged = False   # a real pickup opened -> allow the notice again later
         tried.add(opened)          # never reopen the same shipment within this cycle
+        step("pickup", 1, "select", shp=opened)
         log(f"Pick Up — picking up {opened}")
         wait_until(lambda ns: pickup_units(ns) or find_text(ns, "Start Loading"), tries=8)
         try:

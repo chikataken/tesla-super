@@ -34,6 +34,20 @@ _VIN_RE = re.compile(r"(?:unit VIN|verifying)\s+([A-HJ-NPR-Z0-9]{17})")
 _HIDE_RE = re.compile(r"nothing to (do|pick)|queues? empty|waiting for new|service up|"
                       r"emulator unavailable|both queues empty", re.I)
 
+# --- live step tracker: fed by app_drive.step() lines "STEP <flow> <n>/5 <label> vin= shp=" ---
+# The 5 canonical major steps per flow (labels drive the tracker UI, order = step 1..5).
+STEPS = {
+    "pickup":  ["Select shipment", "Verify units", "Load", "Set ETA", "Depart"],
+    "dropoff": ["Open shipment", "Decode photos", "Upload photos", "Confirm", "Commit"],
+}
+FLOW_LABEL = {"pickup": "Pick Up", "dropoff": "Drop Off"}
+_STEP_RE = re.compile(r"STEP (pickup|dropoff) ([1-5])/5 (\S+) vin=(\S*) shp=(\S*)")
+# Per-(flow, step) "taking longer than usual" budget in seconds — photo decode + the ~2-min
+# loading timer legitimately run long, so they get a bigger budget before we flag a stall.
+_STALL = {("pickup", 3): 210, ("pickup", 4): 90, ("pickup", 5): 150,
+          ("dropoff", 2): 300, ("dropoff", 3): 240, ("dropoff", 4): 120}
+_STALL_DEFAULT = 90
+
 
 def _service_running() -> bool:
     """True if the app_drive worker process is alive (scan /proc, no deps). Matches the
@@ -118,6 +132,45 @@ def _current(log_lines: list[str]) -> str | None:
     return last_vin
 
 
+def _now(raw_lines: list[str]) -> dict:
+    """Live step-tracker state from the RAW log tail (STEP + idle lines both matter, so
+    this scans the unfiltered lines). The most recent STEP marker sets flow/step/label;
+    vin & shipment are STICKY within a flow run (later markers may omit them). An idle
+    line after the last marker means the worker went quiet -> clear to idle (flow=None)."""
+    flow = label = None
+    step = None
+    vin = shp = ""
+    started = None
+    for ln in raw_lines:
+        m = _STEP_RE.search(ln)
+        if m:
+            f, n, lab, v, s = m.group(1), int(m.group(2)), m.group(3), m.group(4), m.group(5)
+            if f != flow:                       # new flow run -> reset the sticky identity
+                vin = shp = ""
+            flow, step, label = f, n, lab
+            if v:
+                vin = v
+            if s:
+                shp = s
+            started = _parse_ts(ln) or started
+        elif flow and _HIDE_RE.search(ln):      # went idle after the last marker
+            flow = label = None
+            step = None
+            vin = shp = ""
+            started = None
+    if not flow:
+        return {"flow": None}
+    age = int((datetime.datetime.now() - started).total_seconds()) if started else None
+    thr = _STALL.get((flow, step), _STALL_DEFAULT)
+    return {
+        "flow": flow, "flow_label": FLOW_LABEL[flow], "steps": STEPS[flow],
+        "step": step, "label": label, "vin": vin, "shp": shp, "model": "",
+        "step_started_at": started.isoformat(timespec="seconds") if started else None,
+        "step_age_s": age,
+        "stalled": age is not None and age > thr,
+    }
+
+
 SECTIONS = (("Exterior", "sides"), ("VIN plate", "vin_plate"), ("Key", "key"))
 OUT = os.path.join(HERE, "out")
 
@@ -160,17 +213,24 @@ def _fmt_log_line(ln: str) -> str:
 
 def snapshot() -> dict:
     raw = _tail(LOGFILE, 800)
-    log_lines = [ln for ln in raw if ln.strip() and not _HIDE_RE.search(ln)]   # marking only
+    # Human log: real marking work only — drop idle heartbeats AND the machine STEP markers.
+    log_lines = [ln for ln in raw
+                 if ln.strip() and not _HIDE_RE.search(ln) and not _STEP_RE.search(ln)]
     last_ts = next((t for t in (_parse_ts(ln) for ln in reversed(log_lines)) if t), None)
     age = (datetime.datetime.now() - last_ts).total_seconds() if last_ts else None
     proc_alive = _service_running()
     history = _history()
+    now = _now(raw)                                   # live step tracker (uses the raw tail)
+    if now.get("flow") and now.get("vin") and not now.get("model"):
+        now["model"] = next((h["model"] for h in history
+                             if h["vin"] == now["vin"] and h.get("model")), "")
     today = datetime.date.today().isoformat()
     return {
         "running": proc_alive,
         "log_fresh": age is not None and age < ALIVE_SECONDS,
         "last_seen": last_ts.isoformat(timespec="seconds") if last_ts else None,
         "last_seen_age_s": int(age) if age is not None else None,
+        "now": now,
         "current_vin": _current(log_lines),
         "log": [_fmt_log_line(ln) for ln in log_lines[-LOG_TAIL:]],
         "stats": {"total": len(history),
@@ -200,6 +260,31 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .on{background:var(--ok)}.off{background:var(--bad)}
  .now{background:linear-gradient(90deg,#ddf4ff,#ffffff);border-color:#54aeff}
  .now .v{color:var(--acc);font-family:ui-monospace,monospace;font-size:18px}
+ /* live step tracker (hero) */
+ .hero.idle{background:linear-gradient(90deg,#f6f8fa,#fff)}
+ .hero.pickup{background:linear-gradient(90deg,#ddf4ff,#fff);border-color:#54aeff}
+ .hero.dropoff{background:linear-gradient(90deg,#fff,#dafbe1);border-color:#4ac26b}
+ .hero .htop{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:16px}
+ .fbadge{padding:2px 11px;border-radius:20px;font-size:12px;font-weight:700;color:#fff}
+ .fbadge.pickup{background:var(--acc)}.fbadge.dropoff{background:#2da44e}
+ .hero .vin{font-family:ui-monospace,monospace;font-size:16px;font-weight:600}
+ .hero .shp{color:var(--mut);font-size:13px}
+ .stall{margin-left:auto;background:#fff8c5;color:#9a6700;font-weight:600;padding:2px 10px;border-radius:20px;font-size:12px}
+ .track{display:flex;align-items:flex-start}
+ .st{flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;position:relative}
+ .st::before{content:"";position:absolute;top:15px;left:-50%;width:100%;height:3px;background:var(--bd);z-index:0}
+ .st:first-child::before{display:none}
+ .st.done::before,.st.active::before{background:var(--ok)}
+ .st .num{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+   font-size:13px;font-weight:700;background:#fff;border:3px solid var(--bd);color:var(--mut);z-index:1;position:relative}
+ .st.done .num{background:var(--ok);border-color:var(--ok);color:#fff}
+ .st.active .num{border-color:var(--acc);color:var(--acc);box-shadow:0 0 0 4px rgba(9,105,218,.15);animation:pulse 1.5s infinite}
+ @keyframes pulse{0%,100%{box-shadow:0 0 0 4px rgba(9,105,218,.16)}50%{box-shadow:0 0 0 8px rgba(9,105,218,.04)}}
+ .st .lbl{font-size:11px;margin-top:7px;color:var(--mut);max-width:92px;line-height:1.25}
+ .st.active .lbl{color:var(--fg);font-weight:600}
+ .st .el{font-size:10px;color:var(--acc);margin-top:2px;font-variant-numeric:tabular-nums}
+ details#logwrap{margin-top:8px}
+ details#logwrap>summary{cursor:pointer;color:var(--mut);font-size:13px;user-select:none;padding:4px 0}
  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:22px 0 8px}
  pre{background:#ffffff;border:1px solid var(--bd);border-radius:8px;padding:12px;overflow:auto;max-height:330px;
      font:12px/1.5 ui-monospace,monospace;color:#1f2328;white-space:pre-wrap;word-break:break-word}
@@ -237,8 +322,9 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
    <div class=card><div class=k>API errors</div><div class=v id=apierrors>…</div></div>
    <div class=card><div class=k>Last activity</div><div class=v id=last style=font-size:15px>…</div></div>
  </div>
- <div class="card now"><div class=k>Currently marking</div><div class=v id=current>—</div></div>
- <h2>Live activity</h2><pre id=log>loading…</pre>
+ <div class="card hero idle" id=hero>loading…</div>
+ <h2>Live activity</h2>
+ <details id=logwrap open><summary>Show raw log</summary><pre id=log>loading…</pre></details>
  <h2>History — past marks <span class=mut style=text-transform:none>(Exterior / VIN / Key = photo found?)</span></h2>
  <table><thead><tr><th>When</th><th>Action</th><th>VIN</th><th>Model</th><th>Shipment</th>
    <th>Exterior</th><th>VIN</th><th>Key</th></tr></thead>
@@ -273,6 +359,36 @@ async function showPhotos(vin,action){
 }
 function closeModal(){ document.getElementById('modal').style.display='none'; }
 document.addEventListener('keydown',e=>{ if(e.key==='Escape')closeModal(); });
+const fmtAge=s=>s==null?'':(s<60?s+'s':Math.floor(s/60)+'m '+(s%60)+'s');
+function renderNow(now,up,curVin){
+ const el=document.getElementById('hero');
+ if(!now||!now.flow){
+   el.className='card hero idle';
+   // Fallback: no STEP marker (e.g. worker not yet restarted) but a VIN is in-flight per the log.
+   if(up&&curVin){
+     el.innerHTML='<div class=htop><span class="dot on"></span><b>Marking</b> '
+       +`<span class=vin>${esc(curVin)}</span></div>`;
+   }else{
+     el.innerHTML = up
+       ? '<div class=htop><span class="dot on"></span><b>Idle</b> <span class=shp>— waiting for the next shipment</span></div>'
+       : '<div class=htop><span class="dot off"></span><b>Service stopped</b></div>';
+   }
+   return;
+ }
+ el.className='card hero '+now.flow;
+ const track=(now.steps||[]).map((lbl,i)=>{
+   const n=i+1, cls=n<now.step?'done':(n===now.step?'active':'');
+   const mark=n<now.step?'✓':n;
+   const el2=(n===now.step&&now.step_age_s!=null)?`<div class=el>${fmtAge(now.step_age_s)}</div>`:'';
+   return `<div class="st ${cls}"><div class=num>${mark}</div><div class=lbl>${esc(lbl)}</div>${el2}</div>`;
+ }).join('');
+ const id=[now.vin?`<span class=vin>${esc(now.vin)}</span>`:'',
+   now.model?`<span class=shp>${esc(now.model)}</span>`:'',
+   now.shp?`<span class=shp>· ${esc(now.shp)}</span>`:''].filter(Boolean).join(' ');
+ const stall=now.stalled?'<span class=stall>⏳ taking longer than usual</span>':'';
+ el.innerHTML=`<div class=htop><span class="fbadge ${now.flow}">${esc(now.flow_label)}</span>${id}${stall}</div>`
+   +`<div class=track>${track}</div>`;
+}
 async function tick(){
  let d; try{ d=await (await fetch('api',{cache:'no-store'})).json(); }catch(e){ return; }
  const up = d.running || d.log_fresh;
@@ -283,7 +399,7 @@ async function tick(){
  document.getElementById('apierrors').textContent = d.stats.api_errors ?? 0;
  document.getElementById('last').textContent = d.last_seen
    ? (d.last_seen_age_s<60?`${d.last_seen_age_s}s ago`:d.last_seen.replace('T',' ')) : '—';
- document.getElementById('current').textContent = d.current_vin || (up?'idle - add "Andrew Enkh 3106925984" as driver to auto mark':'—');
+ renderNow(d.now, up, d.current_vin);
  document.getElementById('gen').textContent = 'updated '+(d.generated_at||'').replace('T',' ');
  document.getElementById('log').textContent = (d.log||[]).join('\\n') || '(no shipment marked yet)';
  const lg=document.getElementById('log'); lg.scrollTop=lg.scrollHeight;
