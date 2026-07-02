@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Tesla Dispatch Dashboard — Recorder (dev)
+// @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.3.0
-// @description  DEV TOOL. Piggybacks on the Dispatch Dashboard 2.0 page's own data calls (hooks GetCarrierDispatchShipment via XHR at document-start) and records every VIN + its shipment status/dates/route it sees. Passive recording makes NO requests of its own; a manual "Pull 2 wks → server" button does one extensive last-2-weeks pull (all statuses incl. Delivered) and POSTs {vin,order_name,status,eta} to shipments.wastake.com/api/tesla-status. Pops up a panel showing everything captured.
+// @version      0.9.0
+// @description  Bottom-right "Cleaner/Marker" pill expands an upward action menu (uniform-width buttons). "Clean Pickups": scans the board for the Pickup Date Today alert, shows the count ("N → date · Confirm?"), and on confirm bulk-moves ALL those pickups to the next day 16:00Z (reason 4) via updateestimatedshipdate. "Pull red VINs to mark": re-query the App-tab Unmarked (red) VINs on Tesla and POST fresh status. Buttons are tap-to-confirm (yellow) then green ✓. Also piggybacks the page's own GetCarrierDispatchShipment calls; auto-send (default on, toggle in Tampermonkey menu) POSTs searched VINs to shipments.wastake.com/api/tesla-status. Clean ETA is a stub.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -46,8 +46,14 @@
   const PULL_DAYS = 14;                          // last 2 weeks (by SHP create date)
   const PULL_STATUS_IDS = [9, 6, 12, 4];        // Tendered, Transit, At Destination, Delivered
   const PULL_ALERT_IDS = [1, 2, 3, 4, 5, 6, 7]; // all alert types (so delivered/no-action rows come through)
+  // "Pull red VINs to mark": re-check only the App-tab's Unmarked (red) VINs on Tesla.
+  const RED_LIST_URL = 'https://shipments.wastake.com/app/delivered';  // /app proxy -> app-delivery :8011
+  const RED_CHUNK = 100;                         // VINs per Tesla request (vins[] batch)
   // Auth captured off the page's OWN requests (never asked for) — used only by the manual button.
   let apiAuth = null, apiCarrier = null, apiUrl = null;
+  // Auto-send: when on, every piggybacked pull (VINs you search/paginate) is POSTed to the server too.
+  const AUTOSEND_KEY = 'dd_autosend';
+  let autoSend = (GM_getValue(AUTOSEND_KEY, 'on') === 'on');
   // Normalize a stopStatusDescription to the token the server + App tab expect.
   function normStatus(desc) {
     const s = String(desc || '').toLowerCase();
@@ -172,6 +178,46 @@
     if (added) updateBadge();
   }
 
+  // ---- send to server --------------------------------------------------------
+  // Build the {vin,order_name,status,eta} rows the server ingests from a dispatch response.
+  function recordsFrom(json) {
+    let d;
+    try { d = (typeof json === 'string' ? JSON.parse(json) : json).data; } catch (e) { return []; }
+    if (!d || !Array.isArray(d.shipmentList)) return [];
+    const out = [];
+    d.shipmentList.forEach(ship => (ship.stops || []).forEach(stop => (stop.vins || []).forEach(v => {
+      if (v && v.vin) out.push({ vin: v.vin, order_name: stop.shipmentNumber,
+        status: normStatus(stop.stopStatusDescription), eta: stop.estimatedDeliveryDate });
+    })));
+    return out;
+  }
+  // POST rows to /api/tesla-status (server upserts by vin+order_base). onDone(status,n) optional.
+  function sendToServer(records, source, onDone) {
+    if (!records || !records.length) { if (onDone) onDone('empty', 0); return; }
+    GM_xmlhttpRequest({
+      method: 'POST', url: SERVER_URL, timeout: 30000,
+      headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ pulled_at: new Date().toISOString(), source: source, records: records }),
+      onload: (r) => { if (onDone) onDone(r.status, records.length); },
+      onerror: () => { if (onDone) onDone('error', records.length); },
+      ontimeout: () => { if (onDone) onDone('timeout', records.length); },
+    });
+  }
+  // Debounced auto-send of piggybacked pulls: batch a browsing burst into ONE POST, dedup by vin+shipment.
+  let autoBuf = {}, autoTimer = null;
+  function queueAutoSend(dataObj) {
+    if (!autoSend) return;
+    const recs = recordsFrom(dataObj);
+    if (!recs.length) return;
+    recs.forEach(r => { autoBuf[r.vin + '|' + (r.order_name || '')] = r; });
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(flushAutoSend, 2000);
+  }
+  function flushAutoSend() {
+    const recs = Object.values(autoBuf); autoBuf = {};
+    if (recs.length) sendToServer(recs, 'piggyback', null);
+  }
+
   // Hook the PAGE's XHR (Tampermonkey shares the XHR prototype with the page, so this
   // catches Tesla's own requests). We only READ responses — we never open/send our own.
   (function hookXHR() {
@@ -197,7 +243,13 @@
         if (String(this.__ddUrl || '').indexOf(ENDPOINT) > -1) {
           apiUrl = this.__ddUrl;
           this.addEventListener('load', function () {
-            try { if (this.status >= 200 && this.status < 300) ingest(this.responseText); } catch (e) {}
+            try {
+              if (this.status >= 200 && this.status < 300) {
+                let parsed; try { parsed = JSON.parse(this.responseText); } catch (e) { return; }
+                ingest(parsed);          // fold into the local store (panel)
+                queueAutoSend(parsed);   // and auto-send these piggybacked VINs to the server (if enabled)
+              }
+            } catch (e) {}
           });
         }
       } catch (e) {}
@@ -205,260 +257,206 @@
     };
   })();
 
-  // ---- manual "Pull 2 wks -> server" -----------------------------------------
-  // ONE deliberate extensive pull (all statuses incl. Delivered, last 2 weeks) using the
-  // token captured above, then POST the {vin,order_name,status,eta} rows to our server.
-  function setBtn(btn, txt) { if (btn) btn.textContent = txt; }
-  async function pullAndSend(btn) {
-    if (!apiAuth || !apiUrl) { setBtn(btn, 'load a search first'); return; }
-    setBtn(btn, 'pulling…');
-    const end = new Date();
-    const start = new Date(end.getTime() - PULL_DAYS * 86400000);
-    const body = { skip: 0, take: 5000, stopStatusIds: PULL_STATUS_IDS, selectedDispatchAlertIds: PULL_ALERT_IDS,
-      createdDateStart: start.toISOString(), createdDateEnd: end.toISOString(), carrierId: null };
-    let data;
-    try {
-      const res = await fetch(apiUrl, { method: 'POST',
-        headers: { 'Authorization': apiAuth, 'Content-Type': 'application/json', 'Accept': 'application/json',
-                   'x-selectedCarrierId': apiCarrier || '' },
-        body: JSON.stringify(body) });
-      if (!res.ok) { setBtn(btn, 'pull HTTP ' + res.status); return; }
-      data = await res.json();
-    } catch (e) { setBtn(btn, 'pull failed'); return; }
-
-    ingest(data);                                   // fold into the local store -> panel updates
-    const records = [];
-    ((data.data && data.data.shipmentList) || []).forEach(ship => (ship.stops || []).forEach(stop => (stop.vins || []).forEach(v => {
-      if (v && v.vin) records.push({ vin: v.vin, order_name: stop.shipmentNumber,
-        status: normStatus(stop.stopStatusDescription), eta: stop.estimatedDeliveryDate });
-    })));
-    if (!records.length) { setBtn(btn, 'no rows'); return; }
-    setBtn(btn, 'sending ' + records.length + '…');
-    GM_xmlhttpRequest({
-      method: 'POST', url: SERVER_URL, timeout: 30000,
-      headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ pulled_at: end.toISOString(), window_days: PULL_DAYS, records: records }),
-      onload: (r) => setBtn(btn, r.status === 200 ? ('sent ' + records.length + ' ✓') : ('server ' + r.status)),
-      onerror: () => setBtn(btn, 'send failed'),
-      ontimeout: () => setBtn(btn, 'send timeout'),
+  // ---- actions ---------------------------------------------------------------
+  function gmGet(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({ method: 'GET', url, timeout: 30000,
+        onload: (r) => { try { resolve(JSON.parse(r.responseText)); } catch (e) { reject(e); } },
+        onerror: () => reject(new Error('net')), ontimeout: () => reject(new Error('timeout')) });
     });
-    setTimeout(() => { const b2 = root && root.getElementById('ddpull'); if (b2 && /sent|server|failed|timeout/.test(b2.textContent)) setTimeout(()=>setBtn(b2,'Pull 2 wks → server'), 4000); }, 100);
+  }
+  function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
+  async function queryVins(vins) {
+    // 90d window: vins[] is the real filter; keeps the server-side query reasonably fast.
+    const end = new Date(), start = new Date(end.getTime() - 90 * 86400000);
+    const body = { skip: 0, take: 5000, vins: vins, stopStatusIds: PULL_STATUS_IDS, selectedDispatchAlertIds: PULL_ALERT_IDS,
+      createdDateStart: start.toISOString(), createdDateEnd: end.toISOString(), carrierId: null };
+    const res = await fetch(apiUrl, { method: 'POST',
+      headers: { 'Authorization': apiAuth, 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-selectedCarrierId': apiCarrier || '' },
+      body: JSON.stringify(body) });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return recordsFrom(await res.json());
+  }
+  // "Pull red VINs to mark": fetch the App-tab Unmarked (red) VINs, re-query ONLY those on Tesla
+  // (vins[] batch), POST fresh status. Red = App-tab status not in (app, marked). setStatus(msg)
+  // drives the button's inline line; returns a one-line summary for the green done-state.
+  async function runPullRed(setStatus) {
+    if (!apiAuth || !apiUrl) throw new Error('search the dashboard once');
+    setStatus('fetching red list…');
+    const deliv = await gmGet(RED_LIST_URL);
+    const rows = (deliv && deliv.delivered) || [];
+    const redVins = [...new Set(rows.filter(r => r.status !== 'app' && r.status !== 'marked').map(r => r.vin).filter(Boolean))];
+    if (!redVins.length) return 'no red VINs';
+    setStatus('querying ' + redVins.length + ' red…');
+    const all = [];
+    for (const c of chunk(redVins, RED_CHUNK)) {
+      try { all.push(...await queryVins(c)); } catch (e) { /* skip a failed chunk, keep going */ }
+    }
+    if (!all.length) throw new Error('no Tesla rows');
+    setStatus('sending ' + all.length + '…');
+    const st = await new Promise((resolve) => sendToServer(all, 'red-remark', (s) => resolve(s)));
+    if (st !== 200) throw new Error('server ' + st);
+    const greened = all.filter(r => r.status === 'delivered').length;
+    return redVins.length + ' red · ' + greened + ' now delivered';
   }
 
-  // ---- panel (shadow DOM) ----------------------------------------------------
-  let host, root, mounted = false, open = false, renderTimer = null;
-  let uiFilter = '', uiStatus = '';
+  // ---- pickup-date cleaner (write) -------------------------------------------
+  // Next day at 16:00Z from an ISO pickup date (current pickup date + 1 day). Copies the recorded
+  // format exactly ("YYYY-MM-DDT16:00:00Z"). Falls back to tomorrow if the input is unparseable.
+  function nextDay16(iso) {
+    const datePart = String(iso || '').split('T')[0];
+    let d = datePart ? new Date(datePart + 'T00:00:00Z') : new Date();
+    if (isNaN(d)) d = new Date();
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().slice(0, 10) + 'T16:00:00Z';
+  }
+  // Batch pickup-date write — the exact contract we recorded. items = [{stopId, estimateShipDate}].
+  async function updatePickups(items) {
+    const url = apiUrl.replace('GetCarrierDispatchShipment', 'updateestimatedshipdate') + '?dateTrackingSource=3';
+    let ok = 0;
+    for (const c of chunk(items, 100)) {
+      const list = c.map(it => ({ updateReasonId: 4, estimateShipDate: it.estimateShipDate, stopId: it.stopId }));
+      const res = await fetch(url, { method: 'POST',
+        headers: { 'Authorization': apiAuth, 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-selectedCarrierId': apiCarrier || '' },
+        body: JSON.stringify({ updateEstimatedShipDateList: list }) });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      ok += c.length;
+    }
+    return ok;
+  }
+  // Scan the board for stops flagged "Pickup Date Today" (alert id 7).
+  async function scanPickupsToday() {
+    if (!apiAuth || !apiUrl) throw new Error('search the dashboard once');
+    const end = new Date(), start = new Date(end.getTime() - 90 * 86400000);
+    const body = { skip: 0, take: 5000, stopStatusIds: [9, 6, 12], selectedDispatchAlertIds: [7],
+      createdDateStart: start.toISOString(), createdDateEnd: end.toISOString(), carrierId: null };
+    const res = await fetch(apiUrl, { method: 'POST',
+      headers: { 'Authorization': apiAuth, 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-selectedCarrierId': apiCarrier || '' },
+      body: JSON.stringify(body) });
+    if (!res.ok) throw new Error('scan HTTP ' + res.status);
+    const j = await res.json();
+    const targets = [];
+    ((j.data && j.data.shipmentList) || []).forEach(s => (s.stops || []).forEach(st => {
+      if ((st.dispatchAlertIds || []).includes(7))
+        targets.push({ stopId: st.stopId, estimateShipDate: nextDay16(st.estimatedShipDate) });
+    }));
+    return targets;
+  }
+  // Clean Pickups: prep() scans (read, shows the count in the Confirm? label); run() does the write.
+  async function prepCleanPickups(setStatus) {
+    setStatus('scanning Pickup Date Today…');
+    const targets = await scanPickupsToday();
+    if (!targets.length) return { count: 0, emptyMsg: 'none today ✓' };
+    return { count: targets.length, confirmMsg: targets.length + ' → ' + targets[0].estimateShipDate.slice(0, 10) + ' 4PM · Confirm?', data: targets };
+  }
+  async function runCleanPickups(setStatus, prep) {
+    setStatus('moving ' + prep.data.length + ' pickups…');
+    const ok = await updatePickups(prep.data);
+    return ok + ' → next day 4PM';
+  }
+
+  // ---- UI: bottom-right pill + upward-expanding action menu ------------------
+  let host, root, mounted = false, open = false;
+  // ingest()/clearStore() still call these; with the FAB menu there's no live view to repaint -> no-ops.
+  function scheduleRender() {}
+  function updateBadge() {}
 
   const CSS = `
     :host { all: initial; }
-    * { box-sizing: border-box; font-family: -apple-system, Segoe UI, Roboto, sans-serif; }
-    .launch { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647;
-      background: #111; color: #fff; border: 0; border-radius: 999px; padding: 10px 14px;
-      font-size: 13px; font-weight: 700; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.3); }
-    .launch .badge { display: inline-block; margin-left: 6px; background: #0a7d33; color: #fff;
-      border-radius: 999px; padding: 1px 7px; font-size: 11px; }
-    .wrap { position: fixed; right: 16px; bottom: 62px; z-index: 2147483647; width: min(1120px, 96vw);
-      height: min(640px, 82vh); background: #fff; border: 1px solid #d9dee5; border-radius: 12px;
-      box-shadow: 0 12px 40px rgba(0,0,0,.28); display: flex; flex-direction: column; overflow: hidden; }
-    .hd { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: #111; color: #fff; }
-    .hd h1 { font-size: 13px; margin: 0; font-weight: 800; letter-spacing: .02em; }
-    .hd .meta { font-size: 11px; color: #b9c0c9; }
-    .hd .spacer { flex: 1; }
-    .hd button { background: #2a2f36; color: #fff; border: 0; border-radius: 6px; padding: 6px 10px;
-      font-size: 12px; cursor: pointer; }
-    .hd button:hover { background: #3a414a; }
-    .hd button.go { background: #0a7d33; font-weight: 700; }
-    .hd button.go:hover { background: #0b8f3a; }
-    .hd button.danger:hover { background: #7a1f1f; }
-    .bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #eef1f4; flex-wrap: wrap; }
-    .bar input { flex: 1; min-width: 180px; padding: 6px 9px; border: 1px solid #cdd3da; border-radius: 6px; font-size: 13px; }
-    .chip { border: 1px solid #cdd3da; background: #f6f7f9; border-radius: 999px; padding: 4px 10px;
-      font-size: 12px; cursor: pointer; user-select: none; }
-    .chip.on { background: #111; color: #fff; border-color: #111; }
-    .counts { font-size: 12px; color: #566; padding: 6px 12px; border-bottom: 1px solid #eef1f4; }
-    .counts b { color: #111; }
-    .scroll { flex: 1; overflow: auto; }
-    table { border-collapse: collapse; width: 100%; font-size: 12px; }
-    th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #f0f2f5; white-space: nowrap; }
-    th { position: sticky; top: 0; background: #f6f7f9; z-index: 1; font-size: 11px; color: #556;
-      text-transform: uppercase; letter-spacing: .03em; }
-    tr:hover td { background: #fafbfc; }
-    td.vin { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 600; }
-    td.route { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
-    .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; border: 1px solid #ccc; }
-    .empty { padding: 30px; text-align: center; color: #889; font-size: 13px; }
-    .dim { color: #99a; }
+    * { box-sizing: border-box; font-family: system-ui, Segoe UI, Arial, sans-serif; }
+    .launch { position: fixed; bottom: 12px; right: 12px; z-index: 2147483647;
+      background: #111; color: #fff; font: 12px/1.3 system-ui, Segoe UI, Arial, sans-serif;
+      padding: 6px 10px; border: 0; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.35);
+      opacity: .92; cursor: pointer; transition: opacity .15s; }
+    .launch:hover { opacity: 1; }
+    .menu { position: fixed; right: 12px; bottom: 46px; z-index: 2147483647;
+      display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+      opacity: 0; transform: translateY(10px); pointer-events: none;
+      transition: opacity .18s ease, transform .18s ease; }
+    .menu.open { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .act { width: 260px; text-align: left; padding: 9px 13px; border: 0; border-radius: 9px;
+      background: #1b1e22; color: #fff; cursor: pointer; box-shadow: 0 3px 12px rgba(0,0,0,.3);
+      display: flex; flex-direction: column; gap: 1px;
+      transition: background-color .2s ease, color .2s ease, transform .1s ease; }
+    .act:hover { transform: translateX(-2px); }
+    .act .t { font-size: 13px; font-weight: 700; }
+    .act .s { font-size: 11px; opacity: .72; }
+    .act.armed { background: #f5c518; color: #171a20; }        /* yellow — confirm */
+    .act.armed .s { opacity: .9; }
+    .act.run { background: #2a2f36; }
+    .act.done { background: #0a7d33; }                         /* green — success */
+    .act.err { background: #b42318; }
+    .act.soon { opacity: .85; }
   `;
 
   function mount() {
     if (mounted) return;
     host = document.createElement('div');
-    host.id = 'dd-recorder-host';
+    host.id = 'dd-cleanermarker-host';
     (document.body || document.documentElement).appendChild(host);
     root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style'); style.textContent = CSS; root.appendChild(style);
+    const menu = document.createElement('div'); menu.className = 'menu'; menu.id = 'ddmenu';
+    menu.appendChild(actionButton('Clean Pickups', 'move Pickup-Date-Today → next day 4PM', runCleanPickups, prepCleanPickups));
+    menu.appendChild(actionButton('Clean ETA', 'not wired yet', null));
+    menu.appendChild(actionButton('Pull red VINs to mark', 'tap to confirm', runPullRed));  // nearest the pill
+    root.appendChild(menu);
     const launch = document.createElement('button');
     launch.className = 'launch';
-    launch.innerHTML = 'DD Recorder <span class="badge" id="ddbadge">0</span>';
+    launch.textContent = 'Cleaner/Marker';
     launch.addEventListener('click', () => toggle());
     root.appendChild(launch);
     mounted = true;
-    updateBadge();
-  }
-
-  function updateBadge() {
-    if (!mounted) return;
-    const b = root.getElementById('ddbadge');
-    if (b) b.textContent = String(Object.keys(store.vins).length);
   }
 
   function toggle(force) {
     open = force == null ? !open : force;
-    render();
+    const menu = root && root.getElementById('ddmenu');
+    if (menu) menu.classList.toggle('open', open);
   }
 
-  function scheduleRender() {
-    clearTimeout(renderTimer);
-    renderTimer = setTimeout(render, 120);
-  }
-
-  function currentRows() {
-    const q = uiFilter.trim().toLowerCase();
-    let rows = Object.values(store.vins);
-    if (uiStatus) rows = rows.filter(r => (r.status || '') === uiStatus);
-    if (q) rows = rows.filter(r =>
-      (r.vin || '').toLowerCase().includes(q) ||
-      (r.shipment || '').toLowerCase().includes(q) ||
-      (r.dispatcher || '').toLowerCase().includes(q) ||
-      (r.origin || '').toLowerCase().includes(q) ||
-      (r.dest || '').toLowerCase().includes(q) ||
-      (r.status || '').toLowerCase().includes(q));
-    rows.sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
-    return rows;
-  }
-
-  function statusPill(s) {
-    const c = STATUS_COLOR[s] || { bg: '#f2f3f5', fg: '#556', bd: '#dce0e6' };
-    return `<span class="pill" style="background:${c.bg};color:${c.fg};border-color:${c.bd}">${esc(s || '—')}</span>`;
-  }
-
-  // The panel shell (header, search box, chip/counts/scroll containers) is built ONCE, so
-  // typing and live captures only refresh the data parts — the input keeps focus + cursor.
-  let shellBuilt = false;
-
-  function render() {
-    if (!mounted) return;
-    updateBadge();
-    if (!open) { const w = root.querySelector('.wrap'); if (w) w.remove(); shellBuilt = false; return; }
-    if (!shellBuilt) buildShell();
-    renderBody();
-  }
-
-  function buildShell() {
-    const wrap = document.createElement('div');
-    wrap.className = 'wrap';
-    wrap.innerHTML = `
-      <div class="hd">
-        <h1>DISPATCH DASHBOARD · RECORDER</h1>
-        <span class="meta">dev</span>
-        <span class="spacer"></span>
-        <button id="ddpull" class="go" title="One extensive pull of the last 2 weeks (all statuses incl. Delivered), then POST to shipments.wastake.com/api/tesla-status">Pull 2 wks → server</button>
-        <button id="ddcopy">Copy JSON</button>
-        <button id="dddl">Download</button>
-        <button id="ddclear" class="danger">Clear</button>
-        <button id="ddclose">✕</button>
-      </div>
-      <div class="bar">
-        <input id="ddsearch" placeholder="Search VIN / shipment / dispatcher / route / status…" />
-        <span id="ddchips"></span>
-      </div>
-      <div class="counts" id="ddcounts"></div>
-      <div class="scroll" id="ddscroll"></div>`;
-    root.appendChild(wrap);
-
-    const s = root.getElementById('ddsearch');
-    s.value = uiFilter;
-    s.addEventListener('input', () => { uiFilter = s.value; renderBody(); });
-    root.getElementById('ddclose').addEventListener('click', () => toggle(false));
-    root.getElementById('ddpull').addEventListener('click', (e) => pullAndSend(e.currentTarget));
-    root.getElementById('ddclear').addEventListener('click', () => { if (confirm('Clear all recorded VINs?')) clearStore(); });
-    root.getElementById('ddcopy').addEventListener('click', () => {
-      const txt = JSON.stringify(Object.values(store.vins), null, 2);
-      if (navigator.clipboard) navigator.clipboard.writeText(txt).then(() => flash('ddcopy', 'Copied ✓'), () => flash('ddcopy', 'Copy failed'));
+  // Confirm-to-run button. idle -> (click) either arms directly, or if prepFn is given, runs a
+  // read-only scan first and arms with its count ("N → date · Confirm?"). armed -> (click) runs
+  // runFn(setStatus, prepData) -> green "✓" on success, red on error, then auto-reverts.
+  function actionButton(label, subtitle, runFn, prepFn) {
+    const btn = document.createElement('button');
+    btn.innerHTML = `<span class="t"></span><span class="s"></span>`;
+    const T = btn.querySelector('.t'), S = btn.querySelector('.s');
+    let state = 'idle', armTimer = null, prepData = null;
+    const setStatus = (msg) => { S.textContent = msg; };
+    function idle() { state = 'idle'; btn.className = 'act' + (runFn ? '' : ' soon'); T.textContent = label; S.textContent = subtitle; prepData = null; }
+    function armPlain() { state = 'armed'; btn.className = 'act armed'; T.textContent = 'Confirm?'; S.textContent = label; clearTimeout(armTimer); armTimer = setTimeout(idle, 4000); }
+    function err(e) { btn.className = 'act err'; T.textContent = '✕ ' + label; S.textContent = String((e && e.message) || e).slice(0, 40); state = 'idle'; setTimeout(idle, 5000); }
+    idle();
+    btn.addEventListener('click', async () => {
+      if (state === 'running' || state === 'prepping') return;
+      if (state === 'armed') {                              // confirmed -> run
+        clearTimeout(armTimer);
+        if (!runFn) { btn.className = 'act err'; T.textContent = 'Not wired yet'; S.textContent = ''; setTimeout(idle, 1800); return; }
+        state = 'running'; btn.className = 'act run'; T.textContent = label; S.textContent = '…';
+        try {
+          const summary = await runFn(setStatus, prepData);
+          state = 'done'; btn.className = 'act done'; T.textContent = '✓ ' + label; S.textContent = summary || 'done'; setTimeout(idle, 6000);
+        } catch (e) { err(e); }
+        return;
+      }
+      // idle/done -> arm (scan-first when prepFn is provided)
+      if (!runFn || !prepFn) { armPlain(); return; }
+      state = 'prepping'; btn.className = 'act run'; T.textContent = label;
+      try {
+        const r = await prepFn(setStatus);
+        if (!r || !r.count) { btn.className = 'act'; T.textContent = label; S.textContent = (r && r.emptyMsg) || 'nothing to do'; state = 'idle'; setTimeout(idle, 2500); return; }
+        prepData = r; state = 'armed'; btn.className = 'act armed'; T.textContent = 'Confirm?'; S.textContent = r.confirmMsg; clearTimeout(armTimer); armTimer = setTimeout(idle, 6000);
+      } catch (e) { err(e); }
     });
-    root.getElementById('dddl').addEventListener('click', () => {
-      const blob = new Blob([JSON.stringify(Object.values(store.vins), null, 2)], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'dispatch-dashboard-vins.json';
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    });
-    shellBuilt = true;
+    return btn;
   }
 
-  function renderBody() {
-    if (!shellBuilt) return;
-    const rows = currentRows();
-    const all = Object.values(store.vins);
-    const byStatus = {};
-    all.forEach(r => { byStatus[r.status || '—'] = (byStatus[r.status || '—'] || 0) + 1; });
-    const statusList = Object.keys(byStatus).sort();
-    const last = store.lastAt ? new Date(store.lastAt).toLocaleTimeString() : '—';
-
-    const chips = root.getElementById('ddchips');
-    chips.innerHTML =
-      `<span class="chip ${uiStatus === '' ? 'on' : ''}" data-st="">All</span>` +
-      statusList.map(s => `<span class="chip ${uiStatus === s ? 'on' : ''}" data-st="${esc(s)}">${esc(s)} ${byStatus[s]}</span>`).join('');
-    chips.querySelectorAll('.chip').forEach(ch => ch.addEventListener('click', () => { uiStatus = ch.getAttribute('data-st'); renderBody(); }));
-
-    root.getElementById('ddcounts').innerHTML =
-      `<b>${all.length}</b> VINs captured · <b>${store.pulls || 0}</b> pulls piggybacked · ` +
-      `last Tesla total: <b>${store.lastTotalCount || 0}</b> · last capture: <b>${last}</b> · showing <b>${rows.length}</b>`;
-
-    root.getElementById('ddscroll').innerHTML = rows.length ? `
-      <table>
-        <thead><tr>
-          <th>VIN</th><th>Status</th><th>Dispatcher</th><th>Shipment</th><th>Service</th>
-          <th>Origin → Dest</th><th>Pickup</th><th>Need By</th><th>ETA</th>
-          <th>ETA Reason</th><th>Alerts</th><th>Carrier</th><th>Seen</th>
-        </tr></thead>
-        <tbody>
-        ${rows.map(r => `
-          <tr>
-            <td class="vin">${esc(r.vin)}</td>
-            <td>${statusPill(r.status)}</td>
-            <td>${esc(r.dispatcher) || '<span class="dim">—</span>'}</td>
-            <td>${esc(r.shipment)}</td>
-            <td>${esc(r.service)}</td>
-            <td class="route" title="${esc(r.origin)}  →  ${esc(r.dest)}">${esc(r.state || '?')}: ${esc(shortLoc(r.origin))} <span class="dim">→</span> ${esc(shortLoc(r.dest))}</td>
-            <td>${esc(fmt(r.pickup))}</td>
-            <td>${esc(fmt(r.needBy))}</td>
-            <td>${esc(fmt(r.eta))}</td>
-            <td>${esc(r.etaReason || '')}</td>
-            <td>${esc((r.alerts || []).map(a => ALERT_LABELS[a] || a).join(', '))}</td>
-            <td>${esc(r.carrierId != null ? r.carrierId : '')}</td>
-            <td class="dim">${r.seen || 1}×</td>
-          </tr>`).join('')}
-        </tbody>
-      </table>` : `<div class="empty">Nothing captured yet. Load / search the Dispatch Dashboard and rows will appear here as the page fetches them.</div>`;
-  }
-
-  function shortLoc(s) {
-    s = String(s || '');
-    if (s.length <= 26) return s;
-    return s.slice(0, 24) + '…';
-  }
-  function flash(id, msg) {
-    const b = root.getElementById(id); if (!b) return;
-    const t = b.textContent; b.textContent = msg;
-    setTimeout(() => { if (b) b.textContent = t; }, 1200);
-  }
 
   // ---- show/hide launcher on SPA nav ----------------------------------------
   function sync() {
     if (ON_DASH()) { mount(); if (host) host.style.display = ''; }
-    else if (host) { host.style.display = 'none'; open = false; }
+    else if (host) { host.style.display = 'none'; toggle(false); }
   }
   function hookNav() {
     const fire = () => setTimeout(sync, 60);
@@ -478,7 +476,12 @@
 
   // ---- Tampermonkey menu -----------------------------------------------------
   try {
-    GM_registerMenuCommand('Toggle recorder panel', () => { mount(); if (host) host.style.display = ''; toggle(); });
-    GM_registerMenuCommand('Clear recorded data', () => clearStore());
+    GM_registerMenuCommand('Toggle Cleaner/Marker menu', () => { mount(); if (host) host.style.display = ''; toggle(); });
+    GM_registerMenuCommand('Toggle auto-send (piggyback → server)', () => {
+      autoSend = !autoSend;
+      try { GM_setValue(AUTOSEND_KEY, autoSend ? 'on' : 'off'); } catch (e) {}
+      alert('Auto-send is now ' + (autoSend ? 'ON' : 'OFF'));
+    });
+    GM_registerMenuCommand('Clear captured VIN cache', () => clearStore());
   } catch (e) {}
 })();

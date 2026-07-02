@@ -30,6 +30,42 @@ Tampermonkey menu: *Toggle recorder panel*, *Clear recorded data*.
 Tampermonkey ▸ install `tesla-dispatch-dashboard-recorder.user.js` (auto-update wired to the
 GitHub raw URL; bump `@version` to push updates).
 
+## "Clean Pickups" (v0.9.0) — bulk pickup-date write
+**Clean Pickups** (scan-first, tap-to-confirm): scans the board for the **Pickup Date Today**
+alert (id 7) across all non-delivered stops, shows the count (`N → date · Confirm?`), and on
+confirm bulk-moves **all** of them to the **next day at 16:00Z (4 PM)** with **reason 4** — the
+exact contract we recorded: `POST …/updateestimatedshipdate?dateTrackingSource=3` with
+`{updateEstimatedShipDateList:[{updateReasonId:4, estimateShipDate, stopId}]}` (chunked 100).
+Verified live (read-only): the alert-7 scan returned 403 targets, dates computed correctly.
+Bounds: 90-day SHP-create-date window + `take:5000` (no pagination).
+
+Note: `updateReasonId:4` is copied verbatim from the recorded manual edit. Change it (and the
+`16:00` time / next-day rule) at the top of `updatePickups`/`nextDay16` if the desired reason changes.
+
+## "Pull red VINs to mark" (v0.6.0) — targeted reconciliation
+Menu button that re-checks **only** the App-tab **Unmarked (red)** VINs on Tesla, instead of
+scanning everything:
+1. GETs the App-tab delivered list (`shipments.wastake.com/app/delivered`, via `GM_xmlhttpRequest`)
+   and filters to **red** = rows whose status is **not** `app` and **not** `marked` (the exact
+   `isGreen` rule the Unmarked tab uses).
+2. Batch-queries those VINs on Tesla in one request each (`vins:[...]`, chunked at 100), 180-day
+   window, all statuses incl. Delivered.
+3. POSTs the fresh `{vin,order_name,status,eta}` to `/api/tesla-status` (upsert).
+
+Any red VIN that Tesla now shows **Delivered** flips `delivered → marked` (green) on the next
+App-tab refresh and drops out of the Unmarked tab. Verified live: 46 red VINs → 39 already
+Delivered on Tesla (would green), ~9 s. Much lighter than the 2-week pull.
+
+## Auto-send piggybacked VINs (v0.4.0)
+When **auto-send** is on (default), every pull you passively piggyback — i.e. VINs you search
+or paginate through on the dashboard — is also POSTed to `/api/tesla-status`, **debounced ~2 s**
+so a browsing burst batches into one request and **deduped** by `vin+shipment`. This keeps the
+server's `tesla_dispatch_status` continuously fresh from normal use (no button press needed for
+tendered/transit). It still only covers what your current filter fetched, so **Delivered** still
+needs the button (it's the heavy pull). Toggle it with the **`auto→srv: on/off`** button in the
+panel header (persisted in Tampermonkey storage). Same `{vin,order_name,status,eta}` payload and
+same upsert behavior as the button.
+
 ## "Pull 2 wks → server" button (v0.3.0)
 The green header button does ONE deliberate extensive pull — last 2 weeks, **all** statuses
 incl. **Delivered** — using the bearer token captured off the page's own requests, then POSTs
