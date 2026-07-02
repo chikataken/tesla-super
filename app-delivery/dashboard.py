@@ -507,6 +507,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .pill.tr{background:#ddf4ff;color:var(--acc)}
  .pill.g{background:#dafbe1;color:var(--ok)}    /* status column: green = driver + APP */
  .pill.r{background:#ffebe9;color:var(--bad)}   /* status column: red = everything else */
+ .pill.dr{background:#8b0000;color:#fff}         /* very dark red = plain "delivered" (unconfirmed) */
  .prov{white-space:nowrap}
  .pb{display:inline-block;padding:1px 7px;margin-left:4px;border-radius:20px;font-size:10px}
  .pb.g{background:#dafbe1;color:var(--ok)}     /* photo found */
@@ -629,9 +630,11 @@ async function loadDelivered(){
    ? rows.length+' unmarked'
    : all.length+' delivered'+(nErr?` · ${nErr} error`:'');
  document.getElementById('deliv').innerHTML = rows.length ? rows.map(r=>{
-   const green = r.status==='app' || r.status==='marked';    // green = driver + APP; red = everything else
+   const cls = (r.status==='app' || r.status==='marked') ? 'g'    // green = APP + driver
+             : (r.status==='delivered') ? 'dr'                    // very dark red = plain delivered (unconfirmed)
+             : 'r';                                               // red = tendered/transit/error
    const label = r.status==='app' ? 'APP' : r.status==='marked' ? 'driver' : r.status;
-   const badge = `<span class="pill ${green?'g':'r'}">${label}</span>`;
+   const badge = `<span class="pill ${cls}">${label}</span>`;
    const clickable = r.status==='app' || r.status==='error';
    const click = clickable ? `onclick="showPhotos('${esc(r.vin)}','Drop Off')" title="click to see the photos used" style=cursor:pointer` : '';
    return `<tr ${click}><td class=mut>${esc(r.when)}</td><td>${badge}</td>`
