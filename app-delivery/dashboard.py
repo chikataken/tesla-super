@@ -372,16 +372,11 @@ const fmtAge=s=>s==null?'':(s<60?s+'s':Math.floor(s/60)+'m '+(s%60)+'s');
 function renderNow(now,up,curVin){
  const el=document.getElementById('hero');
  if(!now||!now.flow){
-   el.className='card hero idle';
-   // Fallback: no STEP marker (e.g. worker not yet restarted) but a VIN is in-flight per the log.
-   if(up&&curVin){
-     el.innerHTML='<div class=htop><span class="dot on"></span><b>Marking</b> '
-       +`<span class=vin>${esc(curVin)}</span></div>`;
-   }else{
-     el.innerHTML = up
-       ? '<div class=htop><span class="dot on"></span><b>Idle</b> <span class=shp>— waiting for the next shipment</span></div>'
-       : '<div class=htop><span class="dot off"></span><b>Service stopped</b></div>';
-   }
+   // Idle (or a VIN in-flight without STEP markers) -> the classic blue box with the
+   // driver phone hint (curVin shows the VIN being marked when there's no active flow).
+   el.className='card hero now';
+   const msg = up ? (curVin || 'idle - add "Andrew Enkh 3106925984" as driver to auto mark') : '—';
+   el.innerHTML = `<div class=k>Currently marking</div><div class=v>${esc(msg)}</div>`;
    return;
  }
  el.className='card hero '+now.flow;
