@@ -102,14 +102,16 @@ def _history(limit: int = 300) -> list[dict]:
                 "SELECT vin, model, shipment, option, photographed, dropped_at, "
                 "exterior, vin_found, key_found FROM dropoffs"):
             rows.append({"action": "Drop Off", "vin": v, "model": m, "shipment": s,
-                         "exterior": ext, "vin_found": vf, "key_found": kf, "at": t})
+                         "exterior": ext, "vin_found": vf, "key_found": kf,
+                         "at": t, "when": _fmt_when(t)})
     except sqlite3.Error:
         pass
     try:
         for v, m, s, e, t in con.execute(
                 "SELECT vin, model, shipment, eta, picked_at FROM pickups"):
             rows.append({"action": "Pick Up", "vin": v, "model": m, "shipment": s,
-                         "exterior": None, "vin_found": None, "key_found": None, "at": t})
+                         "exterior": None, "vin_found": None, "key_found": None,
+                         "at": t, "when": _fmt_when(t)})
     except sqlite3.Error:
         pass
     try:
@@ -117,7 +119,7 @@ def _history(limit: int = 300) -> list[dict]:
                 "SELECT shipment, vin, stage, detail, seen_at FROM api_errors"):
             rows.append({"action": "API ERROR", "vin": v or "", "model": detail or stage,
                          "shipment": s, "exterior": None, "vin_found": None,
-                         "key_found": None, "at": t})
+                         "key_found": None, "at": t, "when": _fmt_when(t)})
     except sqlite3.Error:
         pass
     con.close()
@@ -138,14 +140,21 @@ def _app_marked_vins() -> set:
         con.close()
 
 
-def _fmt_delivered(cat: str) -> str:
-    """'2026-06-29T16:50:29.000+0000' -> 'JUN-29 9:50AM' in local time."""
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+def _fmt_when(ts: str) -> str:
+    """Any ISO timestamp -> 'JUL-01 2:30PM' (local). Handles tz-aware (SD delivery, e.g.
+    +0000 -> converted to local) and naive-local (our ledger) forms alike."""
+    if not ts:
+        return ""
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
         try:
-            return datetime.datetime.strptime(cat, fmt).astimezone().strftime("%b-%d %-I:%M%p").upper()
+            dt = datetime.datetime.strptime(ts, fmt)
         except ValueError:
             continue
-    return cat[:16]
+        if dt.tzinfo:
+            dt = dt.astimezone()
+        return dt.strftime("%b-%d %-I:%M%p").upper()
+    return ts[:16]
 
 
 def _delivered(limit: int = 800) -> list[dict]:
@@ -180,7 +189,7 @@ def _delivered(limit: int = 800) -> list[dict]:
                     vins = []
                 dest = ", ".join(p for p in (dcity, dstate) if p)
                 for vin in vins:
-                    rows.append({"when": _fmt_delivered(cat), "sort": cat, "vin": vin,
+                    rows.append({"when": _fmt_when(cat), "sort": cat, "vin": vin,
                                  "model": models.get(vin, ""), "dest": dest,
                                  "number": number, "app": vin in marked})
             con.close()
@@ -398,7 +407,6 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .imgs{display:flex;gap:12px;flex-wrap:wrap}
  figure{margin:0;width:168px}
  figure img{width:168px;height:126px;object-fit:cover;border:1px solid var(--bd);border-radius:8px;background:#f6f8fa}
- figcaption{font-size:12px;color:var(--mut);margin-top:5px;text-align:center}
 </style></head><body><div class=wrap>
  <h1>Tesla Delivery Service</h1>
  <div class=sub>shipments.wastake.com › App · auto-refreshes every 4s · <span id=gen></span></div>
@@ -451,7 +459,7 @@ async function showPhotos(vin,action){
  let d; try{ d=await (await fetch('photos?vin='+encodeURIComponent(vin))).json(); }catch(e){ b.innerHTML='error loading photos'; return; }
  const secs=(d.sections||[]).filter(s=>s.photos.length);
  b.innerHTML = secs.length ? secs.map(s=>`<h3>${esc(s.name)}</h3><div class=imgs>`+
-   s.photos.map(p=>`<figure><img src="${esc(p.url)}" loading=lazy><figcaption>${esc(p.label)}</figcaption></figure>`).join('')
+   s.photos.map(p=>`<figure><img src="${esc(p.url)}" loading=lazy></figure>`).join('')
    +`</div>`).join('')
    : '<div class=mut style=padding:14px-0>No photos on disk'+(action==='Pick Up'?' (pickups are photo-free).':'.')+'</div>';
 }
@@ -521,7 +529,7 @@ async function tick(){
  const pillCls=a=>a==='Pick Up'?'p':(a==='API ERROR'?'e':'d');
  document.getElementById('hist').innerHTML = (d.history||[]).map(h=>`<tr
    onclick="showPhotos('${esc(h.vin)}','${esc(h.action)}')" title="click to see the photos used">
-   <td class=mut>${esc((h.at||'').replace('T',' '))}</td>
+   <td class=mut>${esc(h.when||'')}</td>
    <td><span class="pill ${pillCls(h.action)}">${esc(h.action)}</span></td>
    <td class=vin>${esc(h.vin)}</td><td>${esc(h.model||'')}</td>
    <td class=mut>${esc(h.shipment||'')}</td>
