@@ -31,14 +31,13 @@ can be joined to our `dropoffs`). Schema (also created by `app_drive.py:_ledger(
 | `received_at` | server | server receive time (UTC) |
 | `matched_guid` / `matched_ok` | later | filled by the correlation step (leave null) |
 
-## How to reach it — the endpoint (OPEN, no auth)
-The extension can't touch the SQLite file directly; POST to a public HTTP endpoint that writes
-it. Add this to **`shipment-creator/app.py`** (it's the public FastAPI app behind
-`https://shipments.wastake.com`, mirrors the bidboard `/api/bids` idea). Public URL:
-**`https://shipments.wastake.com/api/driver-marks`**.
-
-Ready-to-paste. Put the CORS line right after `app = FastAPI(...)` (~line 103), and the route
-near the other `@app.post` routes:
+## How to reach it — the endpoint (OPEN, no auth) — ALREADY BUILT
+The endpoint is **already implemented** in `shipment-creator/app.py`: `POST /api/driver-marks`,
+OPEN (no auth), which writes a row into the table above. Public URL:
+**`https://shipments.wastake.com/api/driver-marks`**. You do **not** need to add server code —
+just build the extension to POST to it. It only needs a one-time
+**`sudo systemctl restart shipment-creator-web`** to go live (skip if it already responds).
+The implementation, for reference:
 
 ```python
 from fastapi.middleware.cors import CORSMiddleware

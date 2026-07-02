@@ -102,6 +102,53 @@ async def _capture_profile(request: Request):
 
 app = FastAPI(title="Shipment Creator", dependencies=[Depends(_capture_profile)])
 
+# ---- driver_marks: OPEN (no-auth) intake for the Tesla-portal Chrome extension ----------
+# Stores "driver_marked" events into app-delivery/dropoffs.db driver_marks (the same DB the
+# App-tab dashboard reads), so they can be correlated to our own drop-offs. OPEN for now —
+# add a shared-secret header later (see driver-marks-extension-prompt.md).
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+app.add_middleware(CORSMiddleware, allow_origins=["https://suppliers.teslamotors.com"],
+                   allow_methods=["POST", "OPTIONS"], allow_headers=["Content-Type"])
+
+_DROPOFFS_DB = os.getenv("DROPOFFS_DB",
+                         os.path.join(_HERE, "..", "app-delivery", "dropoffs.db"))
+
+
+def _order_base(s: str) -> str:
+    """7-char Tesla order base: drop a 'SHPxxxx-' prefix + leading junk, first 7 alnum chars."""
+    if not s:
+        return ""
+    s = re.sub(r"^SHP\w*-", "", s.strip(), flags=re.I)
+    m = re.search(r"[A-Za-z0-9]+", s)
+    return m.group(0)[:7].upper() if m else ""
+
+
+@app.post("/api/driver-marks")
+def api_driver_marks(body: dict = Body(...)):
+    import sqlite3 as _sq
+    import datetime as _dt
+    con = _sq.connect(_DROPOFFS_DB, timeout=10)
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS driver_marks(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, mark_id TEXT UNIQUE, vin TEXT,
+            order_name TEXT, order_base TEXT, order_guid TEXT, marked_at TEXT,
+            status TEXT, source TEXT, raw TEXT, received_at TEXT,
+            matched_guid TEXT, matched_ok INTEGER)""")
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        con.execute(
+            "INSERT OR IGNORE INTO driver_marks"
+            "(mark_id,vin,order_name,order_base,order_guid,marked_at,status,source,raw,received_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (body.get("mark_id"), (body.get("vin") or "").upper().strip(),
+             body.get("order_name"), _order_base(body.get("order_name")),
+             body.get("order_guid"), body.get("marked_at"),
+             body.get("status") or "driver_marked", body.get("source") or "tesla-portal-ext",
+             json.dumps(body), now))
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True}
+
 
 def _staged_files() -> list[str]:
     return sorted(glob.glob(os.path.join(_orders_dir(), "*.json")),
