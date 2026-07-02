@@ -285,6 +285,8 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .st .el{font-size:10px;color:var(--acc);margin-top:2px;font-variant-numeric:tabular-nums}
  details#logwrap{margin-top:8px}
  details#logwrap>summary{cursor:pointer;color:var(--mut);font-size:13px;user-select:none;padding:4px 0}
+ /* prod (?hide_activity=1) keeps the App tab but drops the live-activity section — see dashboard.py do_GET */
+ .noactivity #hero,.noactivity #liveact,.noactivity #logwrap{display:none}
  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin:22px 0 8px}
  pre{background:#ffffff;border:1px solid var(--bd);border-radius:8px;padding:12px;overflow:auto;max-height:330px;
      font:12px/1.5 ui-monospace,monospace;color:#1f2328;white-space:pre-wrap;word-break:break-word}
@@ -323,7 +325,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
    <div class=card><div class=k>Last activity</div><div class=v id=last style=font-size:15px>…</div></div>
  </div>
  <div class="card hero idle" id=hero>loading…</div>
- <h2>Live activity</h2>
+ <h2 id=liveact>Live activity</h2>
  <details id=logwrap open><summary>Show raw log</summary><pre id=log>loading…</pre></details>
  <h2>History — past marks <span class=mut style=text-transform:none>(Exterior / VIN / Key = photo found?)</span></h2>
  <table><thead><tr><th>When</th><th>Action</th><th>VIN</th><th>Model</th><th>Shipment</th>
@@ -433,8 +435,11 @@ class Handler(BaseHTTPRequestHandler):
             self._photos()
         elif self.path.startswith("/img"):
             self._img()
-        elif self.path in ("/", "/index.html"):
-            self._send(200, PAGE, "text/html; charset=utf-8")
+        elif urllib.parse.urlparse(self.path).path in ("/", "/index.html"):
+            # ?hide_activity=1 (prod's App-tab iframe) keeps the page but hides the
+            # live-activity section; test's iframe omits the flag and shows it in full.
+            page = PAGE.replace("<body>", "<body class=noactivity>", 1) if self._q("hide_activity") else PAGE
+            self._send(200, page, "text/html; charset=utf-8")
         elif self.path == "/healthz":
             self._send(200, "ok", "text/plain")
         else:
