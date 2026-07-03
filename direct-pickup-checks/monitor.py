@@ -257,14 +257,16 @@ def _check_run_crashes(prev_alerted: list) -> tuple[list, list]:
 
 
 def cmd_summary() -> None:
-    dp_body, tagged, dp_failed = _section_direct_pickup()
-    tr_body, tr_crashed = _section_tesla_reconcile()
-    body = (f"Server daily digest — {time.strftime('%Y-%m-%d %H:%M')}\n\n"
-            f"{dp_body}\n\n{tr_body}\n")
-    subj = f"[server] pickup: {tagged} tagged"
-    if dp_failed:
-        subj += f", {dp_failed} failed"
-    subj += " | reconcile: " + ("OK" if not tr_crashed else f"{tr_crashed} CRASHED")
+    # Simple daily digest: just the total VINs marked by each pipeline in the last 24h.
+    # (Liveness/crash alerts are handled separately by cmd_health, not here.)
+    since = time.time() - 86400
+    with db.connect() as c:
+        direct = c.execute("SELECT count(*) FROM tags WHERE tagged_at>=?", (since,)).fetchone()[0]
+    reconcile = sum(_parse_reconcile(f)["marked"] for f in _recent_logs("reconcile_"))
+    body = (f"Daily VIN digest — {time.strftime('%Y-%m-%d')}\n\n"
+            f"  Direct pickup   : {direct} VIN(s) marked\n"
+            f"  Tesla reconcile : {reconcile} VIN(s) marked\n")
+    subj = f"[server] VINs marked — direct {direct}, reconcile {reconcile}"
     _send_email(subj, body)
     print("SUBJECT:", subj)
     print(body)

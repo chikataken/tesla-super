@@ -87,6 +87,9 @@ def normalize_order(o: dict) -> dict:
         # which loadboard tab the scrape found it on ("posted"/"accepted"); the
         # scan stamps this — the API status field alone doesn't distinguish them.
         "loadboard_status": o.get("loadboard_status"),
+        # When the car was actually delivered (delivery.completed_at; falls back to the
+        # order's last status change). Used to dedup recently-delivered VINs.
+        "delivered_at": ((o.get("delivery") or {}).get("completed_at") or o.get("changed_at")),
     }
 
 
@@ -105,12 +108,17 @@ def _is_auth_error(e: Exception) -> bool:
     return " -> 401:" in s or " -> 403:" in s or "credential" in s.lower()
 
 
-def find_orders_for_vins(vins, *, throttle_s: float = DEFAULT_THROTTLE_S, sd=sd_api) -> ConsolidationResult:
+def find_orders_for_vins(vins, *, throttle_s: float = DEFAULT_THROTTLE_S,
+                         batch_size: int = 0, batch_pause_s: float = 0.0,
+                         sd=sd_api) -> ConsolidationResult:
     """Discover every existing order the given VINs sit on.
 
     - Per-run cache keyed by GUID: a shared order is fetched once.
-    - Throttled loop (configurable). Auth errors (401/403) stop the run; a VIN with
-      no order is normal; any other per-VIN error is recorded and the run continues.
+    - Pacing: `throttle_s` sleeps between EVERY VIN (legacy). `batch_size`/`batch_pause_s`
+      instead sleep `batch_pause_s` once every `batch_size` VINs — far faster for big lists
+      (SD served ~8 calls/s with no throttle in testing) while staying polite; the HTTP
+      layer also self-throttles on 429. Auth errors (401/403) stop the run; a VIN with no
+      order is normal; any other per-VIN error is recorded and the run continues.
     `sd` is injectable so the HTTP layer can be mocked in tests.
     """
     res = ConsolidationResult()
@@ -125,6 +133,10 @@ def find_orders_for_vins(vins, *, throttle_s: float = DEFAULT_THROTTLE_S, sd=sd_
         res.checked_vins += 1
         if not first and throttle_s:
             time.sleep(throttle_s)
+        # Self-imposed batch limit: pause every `batch_size` VINs (e.g. 2s every 80).
+        if (not first and batch_size and batch_pause_s
+                and (res.checked_vins - 1) % batch_size == 0):
+            time.sleep(batch_pause_s)
         first = False
         try:
             shorts = sd.find_by_vin(vin)

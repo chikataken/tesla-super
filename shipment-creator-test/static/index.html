@@ -33,6 +33,11 @@
   .board-detail{flex:0 0 0;min-width:0;min-height:0;overflow:hidden;overscroll-behavior:contain;
     transition:flex-basis 440ms var(--ease)}
   .board.split .board-detail{flex-basis:var(--detail-w);overflow-y:auto;overflow-x:hidden}
+  /* While the post-upload SD dedup scan is running, gray + lock the board cards so you can't
+     interact with already-posted units before the scan removes them (scroll still works). */
+  .board.scanning #list{opacity:.55;filter:grayscale(45%)}
+  .board.scanning #list > *{pointer-events:none}
+  .board.scanning #detail{opacity:.55;filter:grayscale(45%);pointer-events:none}
   .detail-inner{width:calc(var(--detail-w) - 24px);margin-left:24px;padding-bottom:24px}
   /* hide all scrollbars (scrolling still works) */
   #list,.board-detail,.navrail,#terminals.panel.active,#users.panel.active{scrollbar-width:none;-ms-overflow-style:none}
@@ -136,7 +141,7 @@
   .rec-table td{padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.05);vertical-align:top}
   .rec-table tr:hover td{background:var(--card2)}
   .rec-table .rnum{font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap}
-  .rec-table .rroute{color:var(--text)}
+  .rec-table .rroute{color:var(--text);min-width:240px;white-space:nowrap}
   .rec-table .rroute .arr{color:var(--muted);padding:0 4px}
   .rec-table .rdate{color:var(--muted);white-space:nowrap}
   .rec-table .vin{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;
@@ -535,8 +540,29 @@
   .reviewhdr{font-size:12px;font-weight:700;color:var(--warn);padding:8px 12px;
     border-bottom:1px solid rgba(224,163,65,.3)}
   .reviewsec .lrow:hover{background:rgba(224,163,65,.10)}
-  .dupcount{color:var(--bad);font-weight:600}
-  .dupcount:empty{display:none}
+  /* duplicate-VINs-removed: thin red slice above the cards -> focused route view */
+  .dupslice{display:block;width:100%;box-sizing:border-box;margin:0 0 8px;padding:6px 12px;
+    border-radius:8px;border:0;background:var(--bad);color:#fff;font-weight:600;font-size:12.5px;
+    line-height:1.2;text-align:left;cursor:pointer}
+  .dupslice:hover{filter:brightness(1.08)}
+  .dupslice.active{box-shadow:inset 0 0 0 2px rgba(0,0,0,.18);filter:brightness(.95)}
+  /* focused dup view: one bubble per route — basic route title + embedded VIN bubbles */
+  .dup-detail-h{font-weight:700;color:var(--bad);font-size:13px;margin:2px 0 10px}
+  .duproute{border:1px solid var(--bd,rgba(0,0,0,.14));border-radius:10px;padding:8px 10px;
+    margin:0 0 12px;background:var(--card,#fff)}
+  .duproute-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px;margin:0 0 6px}
+  .duproute-title .dr-n{margin-left:auto;font-weight:600;font-size:11px;color:var(--muted);
+    background:rgba(0,0,0,.06);border-radius:10px;padding:1px 8px}
+  .dupvin{display:flex;align-items:stretch;margin:5px 0;border-radius:8px;overflow:hidden;
+    border:1px solid var(--bd,rgba(0,0,0,.14))}
+  .dupvin .v{flex:0 0 80%;display:flex;align-items:center;padding:8px 10px;
+    font-family:ui-monospace,Menlo,monospace;font-size:12.5px;letter-spacing:.2px;
+    background:var(--card2,#f6f8fa);color:var(--text,#1f2328)}
+  .dupvin .cp{flex:0 0 20%;border:0;border-left:1px solid var(--bd,rgba(0,0,0,.14));
+    background:var(--acc,#0969da);color:#fff;font-weight:700;font-size:11px;cursor:pointer;
+    white-space:nowrap;padding:0 4px}
+  .dupvin .cp:hover{filter:brightness(1.1)}
+  .dupvin .cp.ok{background:var(--ok,#1a7f37)}
   .srcbadge.bol{color:#fff;background:var(--bad);border-color:var(--bad)}
   /* Terminals tab */
   .term-main{padding:16px 20px;max-width:980px;margin:0 auto;width:100%}
@@ -691,6 +717,7 @@
     <button class="tab navitem" data-tab="recorded">Recorded</button>
     <div id="recNav" class="recnav" hidden></div>
     <button class="tab navitem" data-tab="terminals">Terminals</button>
+    <button class="tab navitem" data-tab="app">App</button>
     <button class="tab navitem" data-tab="users">Settings</button>
   </nav>
   <div class="appmain">
@@ -711,7 +738,6 @@
         <input id="q" type="search" placeholder="Filter by city, state, or VIN…">
         <button class="btn ghost" onclick="clearBoard()">Clear shipments</button>
         <span class="count" id="count"></span>
-        <span class="count dupcount" id="dupcount"></span>
       </div>
     </div>
     <div id="ht-recorded" class="ht-group" hidden>
@@ -797,6 +823,10 @@
       </aside>
     </div>
   </div>
+  <div class="panel" id="app">
+    <iframe src="/app/" title="Tesla delivery service"
+            style="flex:1;width:100%;height:100%;border:0;background:#fff"></iframe>
+  </div>
 </div>
   </div><!-- /appmain -->
 </div><!-- /appshell -->
@@ -843,6 +873,7 @@ const LOCK='<svg width="9" height="11" viewBox="0 0 9 11" aria-hidden="true" sty
 let ORDERS = [];
 let UNPOSTABLE = [];             // Excel VINs Tesla had no BOL for — shown grayed at top
 let DUP_REMOVED = [];            // VINs dropped from the board for already being live on SD
+let DUP_DETAIL = {};            // vin -> route info for the focused 'duplicates removed' view
 let SPARES = [];                 // set-aside VINs (the third column), off the board
 let PENDING = null;              // a spare VIN being placed (click-to-place flow)
 let CSEARCH = {orders:[]};       // last Super Dispatch VIN-search payload
@@ -916,9 +947,11 @@ async function loadRecorded(silent){
   $('#rstats').textContent = orders.length + ' shown' + (data.total? (' of '+data.total+' recorded'):'');
   if(!orders.length){ $('#rlist').innerHTML = '<div class="rec-empty">No recorded shipments yet. Run: <code>python recorder_backfill.py</code></div>'; return; }
   const rows = orders.map(o=>{
-    const route = recEsc((o.pickup_city||'')+', '+(o.pickup_state||'')+' '+(o.pickup_zip||'')) +
+    // Route shows just "City, ST → City, ST" (no zip); ST is already a 2-letter code.
+    const loc = (c,st)=>[(c||'').trim(),(st||'').trim()].filter(Boolean).join(', ');
+    const route = recEsc(loc(o.pickup_city,o.pickup_state)) +
                   ' <span class="arr">→</span> ' +
-                  recEsc((o.delivery_city||'')+', '+(o.delivery_state||'')+' '+(o.delivery_zip||''));
+                  recEsc(loc(o.delivery_city,o.delivery_state));
     const vins = (o.vins||[]).map(v=>'<span class="vin">'+recEsc(v)+'</span>').join(' ');
     const dates = recEsc((o.pickup_date||'')+(o.delivery_date?(' → '+o.delivery_date):''));
     return `<tr>
@@ -950,7 +983,18 @@ function renderRecNav(counts, total){
   for(const s of order) html += item(s, s.replace('_',' '), counts[s]);
   $('#recNav').innerHTML = html;
 }
-function recSetStatus(s){ REC.status = s; loadRecorded(); }
+function recSetStatus(s){
+  REC.status = s;
+  // The status buttons sit in the top bar and are reachable from any tab; clicking one
+  // should JUMP to the Recorded tab with that filter applied — not silently filter in the
+  // background. Switch tabs if needed (the tab handler then loads with REC.status set).
+  const rec = document.getElementById('recorded');
+  if(rec && !rec.classList.contains('active')){
+    const b = document.querySelector('.navitem[data-tab="recorded"]');
+    if(b){ b.click(); return; }
+  }
+  loadRecorded();
+}
 
 function money(p){ return p==null?'—':'$'+Number(p).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtDate(iso){ const d=new Date(iso+'T00:00:00'); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
@@ -970,6 +1014,57 @@ function sdLegWindow(leg){ if(!leg) return '—';
 function venue(v){ return v||{}; }
 function esc(s){ return String(s).replace(/'/g,"\\'"); }
 function escHtml(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+// ---- Duplicate-VINs-removed: thin slice above the cards -> focused route view ----
+// Thin clickable slice rendered at the top of the list. Clicking it opens the focused
+// detail (master-detail) just like a route card, showing the removed VINs grouped by route.
+function dupSlice(){
+  if(!DUP_REMOVED.length) return '';
+  const n=DUP_REMOVED.length;
+  return `<div class="dupslice${SELECTED_DUP?' active':''}" id="dupslice" onclick="selectDup()">`+
+    `${n} Duplicate VIN${n===1?'':'s'} Removed</div>`;
+}
+function selectDup(){
+  if(SELECTED_DUP){ closeDetail(); return; }   // re-click closes
+  SELECTED_NUM=null; SELECTED_ROUTE=null; SELECTED_DUP=true;
+  document.querySelectorAll('#list .lrow.selected').forEach(e=>e.classList.remove('selected'));
+  const sl=$('#dupslice'); if(sl) sl.classList.add('active');
+  renderDupDetail(true);
+  const bd=$('#board'); if(bd) bd.classList.add('split');
+}
+// The focused 'duplicates removed' detail: removed VINs grouped by route, each route a single
+// bubble with BASIC route info (no contacts / carrier notes) and the VINs embedded inside it.
+function renderDupDetail(animate){
+  const d=$('#detail'); if(!d) return;
+  if(!DUP_REMOVED.length){ closeDetail(); return; }
+  const det=DUP_DETAIL||{};
+  const groups=new Map();
+  for(const e of DUP_REMOVED){
+    const vin = typeof e==='string' ? e : ((e&&e.vin)||'');
+    const i = det[vin]||{};
+    const lbl = `${[i.pickup_city,i.pickup_state].filter(Boolean).join(', ')||'?'} → `
+              + `${[i.delivery_city,i.delivery_state].filter(Boolean).join(', ')||'?'}`;
+    if(!groups.has(lbl)) groups.set(lbl, []);
+    groups.get(lbl).push(vin);
+  }
+  const cards=[...groups.entries()].map(([lbl,vins])=>{
+    const rows=vins.map(v=>`<div class="dupvin"><span class="v">${escHtml(v)}</span>`+
+      `<button class="cp" type="button" onclick="copyVin('${esc(v)}',this)">Copy</button></div>`).join('');
+    return `<div class="duproute"><div class="duproute-title">${escHtml(lbl)}`+
+      `<span class="dr-n">${vins.length}</span></div>${rows}</div>`;
+  }).join('');
+  d.innerHTML=`<div class="detail-inner${animate?' opening':''}">
+    <div class="detail-head"><button class="btn ghost detail-x" onclick="closeDetail()">✕ Close</button></div>
+    <div class="dup-detail-h">${DUP_REMOVED.length} duplicate VIN${DUP_REMOVED.length===1?'':'s'} removed</div>
+    ${cards}</div>`;
+  d.setAttribute('aria-hidden','false');
+}
+async function copyVin(vin, btn){
+  try{ await navigator.clipboard.writeText(vin); }
+  catch(_){ const t=document.createElement('textarea'); t.value=vin; document.body.appendChild(t);
+    t.select(); try{ document.execCommand('copy'); }catch(__){} t.remove(); }
+  if(btn){ btn.textContent='✓'; btn.classList.add('ok');
+    setTimeout(()=>{ btn.textContent='Copy'; btn.classList.remove('ok'); }, 900); }
+}
 function addr(v){
   const cs=[v.city, [v.state,v.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
   return [v.address, cs].filter(Boolean).join(', ') || '—';
@@ -1542,17 +1637,16 @@ function renderList(){
   const review=sorted.filter(hasExcelStop), rest=sorted.filter(o=>!hasExcelStop(o));
   const total=sorted.length+ghosts.length;
   $('#count').textContent=total+' shipment'+(total===1?'':'s');
-  const dc=$('#dupcount'); if(dc) dc.textContent = DUP_REMOVED.length
-    ? `${DUP_REMOVED.length} duplicate VIN${DUP_REMOVED.length===1?'':'s'} removed` : '';
   const reviewHtml = review.length
     ? `<div class="reviewsec"><div class="reviewhdr">⚠ Review — ${review.length} shipment${review.length===1?'':'s'} with `
       +`Excel-only terminal info (no DB match — open to verify)</div>${review.map(listRow).join('')}</div>`
     : '';
-  $('#list').innerHTML=unpostableSection()+reviewHtml+(rest.length||ghosts.length
+  $('#list').innerHTML=dupSlice()+unpostableSection()+reviewHtml+(rest.length||ghosts.length
     ? rest.map(listRow).join('')+ghosts.map(consolGhostRow).join('')
     : (review.length ? '' : '<div class="empty">No staged shipments. Click <b>Excel +</b> (top bar) to choose a sheet and start.</div>'));
   // keep the detail open as long as its route still has a board order OR a posted/accepted match
   if(SELECTED_ROUTE && !ORDERS.some(o=>routeKey(o)===SELECTED_ROUTE) && !matchesForRoute(SELECTED_ROUTE).length) closeDetail();
+  if(SELECTED_DUP) renderDupDetail(false);     // refresh the focused dup view in place
   updateSortUI(); updateBar();
 }
 // VINs Tesla had no BOL for — pinned at the very top, grayed and non-interactive (can't be
@@ -1601,11 +1695,14 @@ function vtRender(name, fn){
 let SELECTED_NUM=null;       // the clicked order (drives the list highlight)
 let SELECTED_ROUTE=null;     // the route the detail is showing — keyed on the ROUTE, not the
                              // order, so the detail survives the order being emptied/removed
+let SELECTED_DUP=false;      // the focused detail is showing the 'duplicates removed' view
 function selectCard(ev, number){
   const row=ev&&ev.currentTarget;
   if(SELECTED_NUM===number){ closeDetail(); return; }   // re-click closes
   const o=ORDERS.find(x=>x.number===number); if(!o) return;
   SELECTED_NUM=number; SELECTED_ROUTE=routeKey(o);
+  SELECTED_DUP=false;                                  // leaving the focused dup view
+  const sl=$('#dupslice'); if(sl) sl.classList.remove('active');
   document.querySelectorAll('#list .lrow.selected').forEach(e=>e.classList.remove('selected'));
   if(row) row.classList.add('selected');
   renderDetail(true);                       // animate on open only
@@ -1646,12 +1743,13 @@ function updateDetailActions(){
   const cb=$('#vaCombine'); if(cb) cb.disabled=n<2;
 }
 function closeDetail(){
-  SELECTED_NUM=null; SELECTED_ROUTE=null;
+  SELECTED_NUM=null; SELECTED_ROUTE=null; SELECTED_DUP=false;
   const bd=$('#board'); if(bd) bd.classList.remove('split');
   document.querySelectorAll('#list .lrow.selected').forEach(e=>e.classList.remove('selected'));
+  const sl=$('#dupslice'); if(sl) sl.classList.remove('active');
   const d=$('#detail'); if(d) d.setAttribute('aria-hidden','true');
 }
-document.addEventListener('keydown', e=>{ if(e.key==='Escape' && SELECTED_ROUTE) closeDetail(); });
+document.addEventListener('keydown', e=>{ if(e.key==='Escape' && (SELECTED_ROUTE||SELECTED_DUP)) closeDetail(); });
 function openRoute(number){
   const o=ORDERS.find(x=>x.number===number); if(!o) return;
   VIEW={mode:'route', key:routeKey(o), label:routeLabel(o)};
@@ -1687,6 +1785,7 @@ async function load(){
     ]);
     ORDERS=od.orders||[]; UNPOSTABLE=od.unpostable||[]; SPARES=(sp&&sp.spares)||[];
     DUP_REMOVED=od.duplicates_removed||[];          // VINs dropped for already being live on SD
+    DUP_DETAIL=od.duplicates_removed_detail||{};    // vin -> route info (for the focused view)
     CSEARCH=(cm&&cm.search)||{orders:[]}; CMATCHES=CSEARCH.orders||[]; CSTAGED=(cm&&cm.staged)||[];
     pruneRead(new Set(ORDERS.map(o=>o.number)));   // forget read-state for posted/removed shipments
     render(); syncTally();
@@ -1848,7 +1947,7 @@ async function saveSettings(){
   try{
     const r=await api('/api/settings', body);
     $('#setMsg').textContent='Saved.'; $('#set_secret').value='';
-    $('#env').textContent='SD_ENV: prod v2.1';
+    $('#env').textContent='SD_ENV: prod v2.3';
     await loadSettings();
     toast('Settings saved');
   }catch(e){ $('#setMsg').textContent='Save failed.'; }
@@ -2135,6 +2234,9 @@ async function syncTally(){
   try{ s=await fetch('/api/run/status').then(r=>r.json()); }catch(e){ s={running:false}; }
   const hasBoard = !!(t && t.total);
   const running = !!(s && s.running);
+  // While the run/SD scan is in progress, gray out + lock the board cards (see CSS .scanning)
+  // so already-posted units can't be touched before the dedup scan removes them.
+  const _bd=$('#board'); if(_bd) _bd.classList.toggle('scanning', running);
 
   // Excel+ is ALWAYS shown. Once a board is loaded it grays out (but stays clickable) —
   // loading a different Excel clears the current board.
@@ -2402,7 +2504,7 @@ fetch('/api/env').then(r=>r.json()).then(d=>{
     document.body.classList.add('testmode');
     const e=$('#env'); if(e){ e.textContent='TEST SITE — SD disabled'; e.classList.add('testpill'); }
   } else {
-    $('#env').textContent='SD_ENV: prod v2.1';
+    $('#env').textContent='SD_ENV: prod v2.3';
   }
 }).catch(()=>{});
 // restore the active dispatcher FIRST, then open the live stream for its board (so the

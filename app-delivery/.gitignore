@@ -40,3 +40,6 @@ trainer/reviewed.json
 
 # runtime drop-off ledger (local, regenerable)
 dropoffs.db
+
+# operator-managed list of wedged shipments to skip in the Pick Up queue
+skip_pickups.json

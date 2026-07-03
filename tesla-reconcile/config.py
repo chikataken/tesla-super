@@ -93,6 +93,16 @@ BROWSER_CHANNEL = os.getenv("BROWSER_CHANNEL", "").strip()
 
 # --- Portals ---
 SD_BASE = os.getenv("SD_BASE", "https://shipper.superdispatch.com")
+
+# --- SuperDispatch Shipper API (OAuth client-credentials) ---
+# Used to pull delivery-inspection photos via the OFFICIAL API instead of scraping
+# the online BOL. Same generic SUPERDISPATCH_CLIENT_ID/SECRET shipment-creator uses
+# (shared secrets/.env); the base defaults to the PRODUCTION host so we read real
+# delivery photos. Read-only here — reconcile never creates/patches orders.
+SD_API_BASE = os.getenv("SD_API_BASE", "https://api.shipper.superdispatch.com").rstrip("/")
+SD_CLIENT_ID = (os.getenv("SUPERDISPATCH_CLIENT_ID") or "").strip()
+SD_CLIENT_SECRET = (os.getenv("SUPERDISPATCH_CLIENT_SECRET") or "").strip()
+
 TESLA_BASE = os.getenv("TESLA_BASE", "https://suppliers.teslamotors.com")
 TESLA_FLEET_URL = f"{TESLA_BASE}/logistics/invoicing/regular-fleet"
 TESLA_CLAIMS_LANDING = f"{TESLA_BASE}/logistics/claims"          # has the Filed card

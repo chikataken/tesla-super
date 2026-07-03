@@ -102,6 +102,91 @@ async def _capture_profile(request: Request):
 
 app = FastAPI(title="Shipment Creator", dependencies=[Depends(_capture_profile)])
 
+# ---- driver_marks: OPEN (no-auth) intake for the Tesla-portal Chrome extension ----------
+# Stores "driver_marked" events into app-delivery/dropoffs.db driver_marks (the same DB the
+# App-tab dashboard reads), so they can be correlated to our own drop-offs. OPEN for now —
+# add a shared-secret header later (see driver-marks-extension-prompt.md).
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+app.add_middleware(CORSMiddleware, allow_origins=["https://suppliers.teslamotors.com"],
+                   allow_methods=["POST", "OPTIONS"], allow_headers=["Content-Type"])
+
+_DROPOFFS_DB = os.getenv("DROPOFFS_DB",
+                         os.path.join(_HERE, "..", "app-delivery", "dropoffs.db"))
+
+
+def _order_base(s: str) -> str:
+    """7-char Tesla order base: drop a 'SHPxxxx-' prefix + leading junk, first 7 alnum chars."""
+    if not s:
+        return ""
+    s = re.sub(r"^SHP\w*-", "", s.strip(), flags=re.I)
+    m = re.search(r"[A-Za-z0-9]+", s)
+    return m.group(0)[:7].upper() if m else ""
+
+
+@app.post("/api/driver-marks")
+def api_driver_marks(body: dict = Body(...)):
+    import sqlite3 as _sq
+    import datetime as _dt
+    con = _sq.connect(_DROPOFFS_DB, timeout=10)
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS driver_marks(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, mark_id TEXT UNIQUE, vin TEXT,
+            order_name TEXT, order_base TEXT, order_guid TEXT, marked_at TEXT,
+            status TEXT, source TEXT, raw TEXT, received_at TEXT,
+            matched_guid TEXT, matched_ok INTEGER)""")
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        con.execute(
+            "INSERT OR IGNORE INTO driver_marks"
+            "(mark_id,vin,order_name,order_base,order_guid,marked_at,status,source,raw,received_at)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (body.get("mark_id"), (body.get("vin") or "").upper().strip(),
+             body.get("order_name"), _order_base(body.get("order_name")),
+             body.get("order_guid"), body.get("marked_at"),
+             body.get("status") or "driver_marked", body.get("source") or "tesla-portal-ext",
+             json.dumps(body), now))
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True}
+
+
+@app.post("/api/tesla-status")
+def api_tesla_status(body: dict = Body(...)):
+    """OPEN (no-auth) intake for the dispatch-dashboard extension's 'Pull 2 weeks' button.
+    Upserts the CURRENT Tesla dispatch status per (vin, order_base) into
+    app-delivery/dropoffs.db, so the App-tab delivered list can overlay it (delivered->marked,
+    tendered/transit pass through, at_destination ignored). Body:
+    {"records":[{"vin","order_name","status","eta"}, ...]}; status in
+    tendered|transit|at_destination|delivered."""
+    import sqlite3 as _sq
+    import datetime as _dt
+    recs = body.get("records") or []
+    con = _sq.connect(_DROPOFFS_DB, timeout=10)
+    stored = 0
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS tesla_dispatch_status(
+            vin TEXT, order_base TEXT, shipment TEXT, status TEXT, eta TEXT, updated_at TEXT,
+            PRIMARY KEY(vin, order_base))""")
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        for r in recs:
+            vin = (r.get("vin") or "").upper().strip()
+            if not vin:
+                continue
+            shipment = r.get("order_name") or ""
+            con.execute(
+                "INSERT INTO tesla_dispatch_status(vin,order_base,shipment,status,eta,updated_at)"
+                " VALUES(?,?,?,?,?,?)"
+                " ON CONFLICT(vin,order_base) DO UPDATE SET"
+                "   shipment=excluded.shipment, status=excluded.status,"
+                "   eta=excluded.eta, updated_at=excluded.updated_at",
+                (vin, _order_base(shipment), shipment,
+                 (r.get("status") or "").lower().strip(), r.get("eta"), now))
+            stored += 1
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "stored": stored}
+
 
 def _staged_files() -> list[str]:
     return sorted(glob.glob(os.path.join(_orders_dir(), "*.json")),
@@ -192,7 +277,8 @@ def api_orders(file: Optional[str] = None):
     for o in orders:
         _annotate_dates(o)
     return {"file": os.path.basename(path), "count": len(orders), "orders": orders,
-            "unpostable": _unpostable_vins(), "duplicates_removed": dups_removed}
+            "unpostable": _unpostable_vins(), "duplicates_removed": dups_removed,
+            "duplicates_removed_detail": _load_json(_dups_removed_detail_path(), {})}
 
 
 def _z5(z) -> str:
@@ -217,17 +303,65 @@ def _route_endpoint_matches(broute, routes) -> bool:
     return False
 
 
+COMPLETED_WINDOW_DAYS = 31    # "within a month": a recently-completed car re-appearing = dup
+# Post-delivery statuses — a car here was delivered (and possibly billed). Recently-completed
+# = duplicate; older than the window = a legitimate later re-ship, so it passes through.
+COMPLETED_STATUSES = ("delivered", "invoiced", "paid")
+
+
+def _parse_sd_ts(ts):
+    """Parse an SD timestamp ('2026-06-28T11:10:49.000+0000', '+00:00', or 'Z') to an aware
+    datetime, or None."""
+    import datetime as _dt
+    import re as _re
+    s = str(ts or "").strip()
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    s = _re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", s)        # +0000 -> +00:00
+    try:
+        return _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _completed_within_month(o) -> bool:
+    """True if the order is DELIVERED / INVOICED / PAID and its delivered_at is within
+    COMPLETED_WINDOW_DAYS of now. Recently-completed cars count as live for the dup check;
+    older ones pass through (a genuine later re-ship of the same car isn't blocked)."""
+    import datetime as _dt
+    if (o.get("status") or "").strip().lower() not in COMPLETED_STATUSES:
+        return False
+    d = _parse_sd_ts(o.get("delivered_at"))
+    if not d:
+        return False
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=_dt.timezone.utc)
+    return (_dt.datetime.now(_dt.timezone.utc) - d).days <= COMPLETED_WINDOW_DAYS
+
+
 def _sd_live_vin_routes() -> dict:
     """For each VIN already on a POSTED/ACCEPTED/PENDING/PICKED-UP SuperDispatch order —
     taken from the latest loadboard scan, which is enriched from the API (get_order) so
     EVERY VIN on a multi-car order is included, not just the one shown in the '+N' card
     preview — the set of (pickup_zip5, delivery_zip5) routes that order runs.
 
-    posted/accepted/pending are live on the loadboard (is_posted_to_loadboard=True). A
-    PICKED-UP car is off the loadboard (loadboard_status is null) but still in transit on its
-    route — re-posting it would duplicate a car already being delivered, so it's treated as
-    live too. The scrape stamps loadboard_status='picked_up'; the API-direct path leaves
-    loadboard_status null but carries the lifecycle status='picked_up' — accept either.
+    An order counts as live if EITHER its loadboard_status OR its lifecycle status is one of
+    new/posted/accepted/pending/picked_up. 'new' = created but not yet posted to the
+    loadboard (a draft order already on SD) — re-creating the same VIN+route is a duplicate,
+    so it's included. This matters because once a carrier ACCEPTS an order (or the car is
+    PICKED UP) SuperDispatch clears loadboard_status to null — the live state then lives ONLY
+    in the lifecycle `status`. An order is ALSO live if is_posted_to_loadboard is True — the
+    most reliable signal: SD marks 'new' orders that are posted-but-not-yet-accepted this way
+    (status='new' + is_posted_to_loadboard=True), which the website shows as posted. Checking
+    only loadboard_status (as we used to) let an already-ACCEPTED or posted-'new' VIN re-post
+    as a duplicate.
+
+    Recently-COMPLETED orders also count as live: status delivered/invoiced/paid whose
+    delivered_at is within ~a month. A car delivered (or delivered+billed) weeks ago that
+    re-appears on the board is almost certainly a duplicate; an OLD completed order (>1mo)
+    passes through so a legitimate later re-ship of the same car isn't blocked. canceled is
+    never live.
 
     A board VIN is a duplicate when its route shares an endpoint with one of these — same
     origin OR same destination (see _route_endpoint_matches). A VIN whose board route shares
@@ -236,9 +370,7 @@ def _sd_live_vin_routes() -> dict:
     search = _load_json(_search_path(), {})
     out: dict[str, set] = {}
     for o in (search.get("orders") or []):
-        lb = (o.get("loadboard_status") or "").strip().lower()
-        life = (o.get("status") or "").strip().lower()
-        if lb not in ("posted", "accepted", "pending", "picked_up") and life != "picked_up":
+        if not _order_is_live(o):
             continue
         route = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                  _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
@@ -249,8 +381,60 @@ def _sd_live_vin_routes() -> dict:
     return out
 
 
+_LIVE_STATUSES = ("new", "posted", "accepted", "pending", "picked_up")
+
+
+def _order_is_live(o) -> bool:
+    """Whether an SD order should block a re-post: it's actually on the loadboard right now
+    (is_posted_to_loadboard — true even for 'new' orders posted-but-not-yet-accepted), OR its
+    lifecycle status is active (new/posted/accepted/pending/picked_up), OR it was completed
+    (delivered/invoiced/paid) within the last month. canceled / old-completed are NOT live."""
+    lb = (o.get("loadboard_status") or "").strip().lower()
+    life = (o.get("status") or "").strip().lower()
+    return (lb in _LIVE_STATUSES or life in _LIVE_STATUSES
+            or bool(o.get("is_posted_to_loadboard")) or _completed_within_month(o))
+
+
+def _sd_live_vin_numbers() -> dict:
+    """Per VIN, the set of order NUMBERS (shipment names) it sits on among live SD orders. A
+    board VIN whose order number matches one of these is the SAME shipment already on SD — a
+    duplicate even if the route zips differ slightly (e.g. the terminal resolved to a nearby
+    address, so the endpoint match misses it). Order-number match is route-independent."""
+    search = _load_json(_search_path(), {})
+    out: dict[str, set] = {}
+    for o in (search.get("orders") or []):
+        if not _order_is_live(o):
+            continue
+        num = str(o.get("number") or "").strip().upper()
+        if not num:
+            continue
+        for v in (o.get("vehicles") or []):
+            vin = (v.get("vin") or "").strip().upper()
+            if vin:
+                out.setdefault(vin, set()).add(num)
+    return out
+
+
+def _shipment_name_matches(board_num: str, sd_numbers) -> bool:
+    """True if any of the VIN's live SD order numbers STARTS WITH the board's Excel shipment
+    string — so a hand-edited SD name keeps matching whether the appended suffix has a
+    separator ('A56G063-2', 'A56G063 direct', 'A56G063-1 sac') or not ('A56G0631'). A
+    genuinely different id that diverges (e.g. 'A56G064') is not a prefix, so it doesn't
+    match; nor does a string that merely contains it later ('XA56G063')."""
+    bn = (board_num or "").strip().upper()
+    if not bn:
+        return False
+    return any((n or "").strip().upper().startswith(bn) for n in (sd_numbers or ()))
+
+
 def _dups_removed_path() -> str:
     return os.path.join(_pdir(), "duplicates_removed.json")
+
+
+def _dups_removed_detail_path() -> str:
+    # vin -> {number, pickup_city/state, delivery_city/state}; feeds the focused 'duplicates
+    # removed' view so removed VINs can be grouped by route. Cumulative; cleared on /api/reset.
+    return os.path.join(_pdir(), "duplicates_removed_detail.json")
 
 
 def _auto_remove_sd_duplicates() -> list:
@@ -260,27 +444,42 @@ def _auto_remove_sd_duplicates() -> list:
     Idempotent: once removed, a VIN is off the board, so a second call adds nothing."""
     removed = list(_load_json(_dups_removed_path(), []))
     live_routes = _sd_live_vin_routes()
+    live_numbers = _sd_live_vin_numbers()
     files = _staged_files()
-    if live_routes and files:
+    if (live_routes or live_numbers) and files:
         path = files[0]
         with open(path, encoding="utf-8") as f:
             batch = json.load(f)
         dups: set = set()
+        detail: dict = {}        # vin -> route info, for the focused 'duplicates removed' view
         changed = False
         for o in batch:
-            # this board order's route (origin zip5, dest zip5)
+            # this board order's route (origin zip5, dest zip5) + its shipment number
             broute = (_z5(((o.get("pickup") or {}).get("venue") or {}).get("zip")),
                       _z5(((o.get("delivery") or {}).get("venue") or {}).get("zip")))
+            bnum = str(o.get("number") or "").strip().upper()
             kept = []
             for v in (o.get("vehicles") or []):
                 vin = (v.get("vin") or "").strip().upper()
                 routes = live_routes.get(vin)
-                # Drop when SD already has this VIN posted on a route sharing an ENDPOINT with
-                # this one — same origin OR same destination (positional). A route that shares
-                # NEITHER endpoint passes through, so a genuine chained re-delivery (A->B then
-                # B->C: B sits in different positions, so no endpoint matches) can still post.
-                if vin and routes and _route_endpoint_matches(broute, routes):
+                numbers = live_numbers.get(vin)
+                # Drop when SD already has this VIN live on a matching shipment, by EITHER:
+                #  (a) ROUTE — same origin OR same destination zip (positional). A route that
+                #      shares NEITHER endpoint passes (a genuine chained re-delivery A->B->C).
+                #  (b) SHIPMENT NAME — the board's Excel shipment string appears UNBROKEN in a
+                #      live SD order number the VIN sits on (so a hand-edited 'A56G063-2' /
+                #      'A56G063 direct' still matches 'A56G063'). Catches same-shipment dups
+                #      whose zips drifted slightly (terminal resolved to a nearby address),
+                #      which the route check misses.
+                dup_route = bool(vin and routes and _route_endpoint_matches(broute, routes))
+                dup_name = bool(vin and numbers and _shipment_name_matches(bnum, numbers))
+                if dup_route or dup_name:
                     dups.add(vin)
+                    pv = (o.get("pickup") or {}).get("venue") or {}
+                    dv = (o.get("delivery") or {}).get("venue") or {}
+                    detail[vin] = {"vin": vin, "number": o.get("number"),
+                                   "pickup_city": pv.get("city"), "pickup_state": pv.get("state"),
+                                   "delivery_city": dv.get("city"), "delivery_state": dv.get("state")}
                 else:
                     kept.append(v)
             if len(kept) != len(o.get("vehicles") or []):
@@ -297,6 +496,11 @@ def _auto_remove_sd_duplicates() -> list:
                     removed.append(d)
                     seen.add(d)
             _save_json(_dups_removed_path(), removed)
+            det = _load_json(_dups_removed_detail_path(), {})
+            if not isinstance(det, dict):
+                det = {}
+            det.update(detail)
+            _save_json(_dups_removed_detail_path(), det)
     return removed
 
 
@@ -770,9 +974,9 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
     with open(dest, "wb") as f:
         f.write(data)
 
-    # Reject (and delete) any sheet without a NeedByDate column — every shipment needs a
-    # need-by for transit windows, and cache-resolved ones can't fall back to the dashboard.
-    # The ALL profile is exempt: it's just feeding terminals, so any sheet is fine.
+    # NeedByDate is OPTIONAL — a sheet without it still runs; need_by is used when present
+    # (it drives transit windows) and skipped when absent. We still read the sheet to reject
+    # non-spreadsheets and to learn its header row.
     import excel_ingest
     try:
         _, report = excel_ingest.read_rows(dest)
@@ -780,11 +984,6 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read that spreadsheet: {e}")
-    if not _skip_needby_requirement() and "need_by" not in report.column_mapping:
-        try: os.remove(dest)
-        except OSError: pass
-        raise HTTPException(400, "This Excel has no NeedByDate column. Add a "
-                                 "'NeedByDate' column and re-upload.")
     # Remember this sheet's header row so DATA-only pasted rows can reuse it later.
     try:
         _save_json(_last_headers_path(), excel_ingest.read_headers(dest))
@@ -839,11 +1038,6 @@ def api_upload_paste(body: dict = Body(...)):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read those rows: {e}")
-    if not _skip_needby_requirement() and "need_by" not in report.column_mapping:
-        try: os.remove(dest)
-        except OSError: pass
-        raise HTTPException(400, "These rows have no NeedByDate column. Include a "
-                                 "'NeedByDate' column (paste the header row once to teach it).")
     return {"path": dest, "name": "pasted.xlsx", "rows": len(data)}
 
 
@@ -875,7 +1069,7 @@ def api_reset():
         except OSError:
             pass
     for p in (_active_excel_path(), _spares_path(), _search_path(), _consol_path(),
-              _dups_removed_path()):
+              _dups_removed_path(), _dups_removed_detail_path()):
         try:
             if os.path.exists(p):
                 os.remove(p)
@@ -1727,13 +1921,19 @@ def api_recorded(status: Optional[str] = None, q: Optional[str] = None,
         con = rdb.connect()
     except Exception as e:                                   # noqa: BLE001
         return {"orders": [], "total": 0, "counts": {}, "error": str(e)}
+    # Restrict to the active dispatcher's pickup states so a user only sees their own
+    # shipments — same filter the board uses, resolved per-request via _pid() (X-Profile
+    # header) so each browser sees its own selection. Empty (Didi/bypass, or no states
+    # set) = all.
+    import profiles
+    states = profiles.allowed_states(profiles.get_profile(_pid()))
     try:
         return {
             "orders": rdb.list_orders(con, status=status, q=q,
                                       limit=min(limit, 2000), offset=offset,
-                                      sort=sort, direction=dir),
-            "total": rdb.total(con),
-            "counts": rdb.counts_by_status(con),
+                                      sort=sort, direction=dir, states=states),
+            "total": rdb.total(con, states=states),
+            "counts": rdb.counts_by_status(con, states=states),
             "meta": _recorded_meta(con),
         }
     finally:

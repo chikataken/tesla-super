@@ -113,30 +113,42 @@ def main() -> None:
         shutil.copy2(paths[sel.picks[slot]], os.path.join(sides_d, f"{order_i}_{slot}.jpg"))
         sides.append(slot)
 
-    # VIN plate: the single best on-device OCR match. key = the same photo. If OCR
-    # matched nothing, fall back to a photo of the REAR (then front) so the section's
-    # min-1 can still be met (flagged).
+    # Key candidate FIRST (so the VIN slot can fall back to it): the most-confident
+    # white/black key photo, or None if none was positively identified.
+    ki, kcls, kp = pst.best_key(sel.scores)
+
+    # VIN plate: the single best on-device OCR match. If OCR matched nothing, fall back
+    # (min-1 must still be met, flagged) in this order:
+    #   1) the KEY photo, if a key was positively identified,
+    #   2) else the REAR (then front) photo,
+    #   3) else the top side.
     best = ocr_res.get("best")
     vin_fallback = False
+    vin_fallback_source = None
     if not best:
-        ri, fi = sel.picks.get("rear", -1), sel.picks.get("front", -1)
-        idx = ri if ri >= 0 else fi
-        if idx >= 0:
-            best = paths[idx]
-            vin_fallback = True
-        elif chosen:
-            best = os.path.join(sides_d, f"0_{chosen[0]}.jpg")
-            vin_fallback = True
+        vin_fallback = True
+        if ki is not None:                                  # no VIN plate -> use the key photo
+            best = paths[ki]
+            vin_fallback_source = "key"
+        else:
+            ri, fi = sel.picks.get("rear", -1), sel.picks.get("front", -1)
+            idx = ri if ri >= 0 else fi
+            if idx >= 0:
+                best = paths[idx]
+                vin_fallback_source = "rear" if ri >= 0 else "front"
+            elif chosen:
+                best = os.path.join(sides_d, f"0_{chosen[0]}.jpg")
+                vin_fallback_source = chosen[0]
     vin_plate = []
     if best:
         shutil.copy2(best, os.path.join(vin_d, "vin.jpg"))
         vin_plate = [os.path.basename(best)]
 
-    # Key: the most-confident key photo (white/black); else the VIN photo; else rear
-    # (best already encodes VIN-then-rear). Only ONE key photo is used.
-    ki, kcls, kp = pst.best_key(sel.scores)
+    # Key: the most-confident key photo (white/black) if identified; else the VIN photo
+    # (which itself may be the rear fallback). Only ONE key photo is used.
     key_src = paths[ki] if ki is not None else best
-    key_used = f"{kcls} ({kp})" if ki is not None else ("vin_plate" if ocr_res.get("best") else "rear")
+    key_used = (f"{kcls} ({kp})" if ki is not None
+                else "vin_plate" if ocr_res.get("best") else (vin_fallback_source or "rear"))
     key = []
     if key_src:
         shutil.copy2(key_src, os.path.join(key_d, "key.jpg"))
@@ -145,13 +157,14 @@ def main() -> None:
     pst._annotated_sheet(paths, sel, os.path.join(dest, "picks.png"))
     manifest = {"vin": vin, "shipment": info, "sides": sides, "vin_plate": vin_plate,
                 "key": key, "key_source": key_used, "n_sides": len(sides),
-                "vin_plate_found": bool(ocr_res.get("best")), "vin_fallback": vin_fallback}
+                "vin_plate_found": bool(ocr_res.get("best")), "vin_fallback": vin_fallback,
+                "vin_fallback_source": vin_fallback_source}
     json.dump(manifest, open(os.path.join(dest, "manifest.json"), "w"), indent=2)
 
     # ---- report ----
     print(f"\n=== {vin} -> {dest} ===")
     print(f"  sides ({len(sides)}/4): {sides}")
-    print(f"  vin_plate: {vin_plate or '— none —'}" + ("  (FALLBACK: no VIN plate -> rear)" if vin_fallback else ""))
+    print(f"  vin_plate: {vin_plate or '— none —'}" + (f"  (FALLBACK: no VIN plate -> {vin_fallback_source})" if vin_fallback else ""))
     print(f"  key:       {key or '— none —'}  (source: {key_used})")
     if len(sides) < 4:
         print(f"  ⚠ only {len(sides)} sides — model found fewer than 4 of the priority corners.")

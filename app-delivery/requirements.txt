@@ -30,3 +30,6 @@ uvicorn[standard]>=0.27 # serves the labeler
 # --- alt selector: Claude vision (photo_select.py) ---
 anthropic>=0.40         # only needed if you use the Claude vision option
 requests>=2.31          # (optional) fetch SD photos by URL when not given local files
+
+# Persistent UI-dump server (warm ~0.13s vs ~2.1s for shell `uiautomator dump`).
+uiautomator2>=3.0

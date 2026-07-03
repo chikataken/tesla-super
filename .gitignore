@@ -13,6 +13,12 @@ active_profile.json
 **/data/recorder.db
 **/data/recorder.db-*
 
+# ───── SQLite WAL / shared-memory sidecars — transient, regenerated at runtime ─────
+*.db-shm
+*.db-wal
+**/*.db-shm
+**/*.db-wal
+
 # ───── customer data: input sheets + staged output (PII) ─────
 *.xlsx
 *.xls
