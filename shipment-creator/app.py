@@ -957,6 +957,19 @@ def api_login(body: dict = Body(default=None)):
     return {"ok": True, "opened": opened}
 
 
+def _headers_usable(headers) -> bool:
+    """True if `headers` actually work as a header row — i.e. excel_ingest can map at
+    least the VIN column from them. Gate every write to the remembered-headers cache
+    with this: a data row mistaken for headers (it happened — a malformed VIN cell
+    defeated the VIN tell) poisons every later data-only paste for that dispatcher."""
+    import excel_ingest
+    try:
+        mapping, _ = excel_ingest._map_columns([str(h) for h in headers])
+        return "vin" in mapping
+    except Exception:
+        return False
+
+
 @app.post("/api/upload")
 async def api_upload(request: Request, name: str = "upload.xlsx"):
     """Receive an Excel chosen in the CLIENT's browser (raw file bytes in the POST body)
@@ -984,9 +997,12 @@ async def api_upload(request: Request, name: str = "upload.xlsx"):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read that spreadsheet: {e}")
-    # Remember this sheet's header row so DATA-only pasted rows can reuse it later.
+    # Remember this sheet's header row so DATA-only pasted rows can reuse it later
+    # (only if it maps as real headers — never cache a junk row).
     try:
-        _save_json(_last_headers_path(), excel_ingest.read_headers(dest))
+        hdrs = excel_ingest.read_headers(dest)
+        if _headers_usable(hdrs):
+            _save_json(_last_headers_path(), hdrs)
     except Exception:
         pass
     return {"path": dest, "name": safe}
@@ -1007,12 +1023,14 @@ def api_upload_paste(body: dict = Body(...)):
     if not rows:
         raise HTTPException(400, "No rows found in the pasted text.")
     # A data row always carries a 17-char VIN; a header row doesn't — that's the tell.
-    VIN = _re.compile(r"^[A-HJ-NPR-Z0-9]{17}$")
-    is_header = lambda r: not any(VIN.match((c or "").strip().upper()) for c in r)
-    if is_header(rows[0]):
+    # Match the VIN anywhere in the cell (not the whole cell): a copy artifact like
+    # "7SAYGDED0TA646937600" (VIN with the rate glued on) must still read as DATA —
+    # an exact-match here once mis-filed a dispatcher's data row as her headers.
+    VIN = _re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+    is_header = lambda r: not any(VIN.search((c or "").strip().upper()) for c in r)
+    pasted_own_headers = is_header(rows[0]) and _headers_usable(rows[0])
+    if pasted_own_headers:
         headers, data = rows[0], rows[1:]
-        try: _save_json(_last_headers_path(), [str(h) for h in headers])
-        except Exception: pass
     else:
         headers = _load_json(_last_headers_path(), None)
         if not headers:
@@ -1028,7 +1046,10 @@ def api_upload_paste(body: dict = Body(...)):
     width = len(headers)
     for r in data:
         ws.append([str(r[i]) if i < len(r) else "" for i in range(width)])
-    dest = paths.data_path("uploads", "pasted.xlsx")
+    # Per-dispatcher file: everyone pasting into one shared pasted.xlsx let a later
+    # paste on another profile overwrite the sheet a run was about to read.
+    fname = f"pasted-{_pid() or 'shared'}.xlsx"
+    dest = paths.data_path("uploads", fname)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     wb.save(dest)
     import excel_ingest
@@ -1038,7 +1059,23 @@ def api_upload_paste(body: dict = Body(...)):
         try: os.remove(dest)
         except OSError: pass
         raise HTTPException(400, f"Couldn't read those rows: {e}")
-    return {"path": dest, "name": "pasted.xlsx", "rows": len(data)}
+    # Alignment sanity: at least one row must carry a valid VIN under these headers.
+    # Zero means the pasted columns are in a DIFFERENT ORDER than the headers we glued
+    # on (e.g. remembered headers from a raw-export layout vs data copied from the
+    # canonical sheet) — running it would quietly stage an empty board.
+    if not report.good_rows:
+        try: os.remove(dest)
+        except OSError: pass
+        raise HTTPException(400, "Those rows don't line up with the remembered column "
+                                 "order — no valid VIN landed in the VIN column. Copy the "
+                                 "header row together with the data once (I'll re-learn "
+                                 "the layout), then data-only pastes will work again.")
+    # Only cache pasted headers once they've PROVEN they align with the data —
+    # remembering a plausible-but-wrong layout poisons every later data-only paste.
+    if pasted_own_headers:
+        try: _save_json(_last_headers_path(), [str(h) for h in headers])
+        except Exception: pass
+    return {"path": dest, "name": fname, "rows": len(data)}
 
 
 @app.post("/api/run/terminate")
