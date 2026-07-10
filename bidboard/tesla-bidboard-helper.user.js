@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.20.0
+// @version      0.21.0
 // @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -16,7 +16,7 @@
  *   Left half : route list (origin -> destination), each expanded with its VINs / list price / existing counter.
  *   Right half: one focused card per route — route, recommended-ETA date picker, and price box(es). CT and CAB
  *               (Cybercab, VIN starts 5YJA) each get their own box; one price -> every VIN in that subset.
- *   Submit    : Enter only sends boxes you've TYPED into; pickup = today/tomorrow (2:45 PM cutoff) at 16:00Z, USD.
+ *   Submit    : Enter only sends boxes you've TYPED into; pickup = next weekday at 16:00Z, USD (ETA skips weekends too).
  *               Card turns green "✓ sent N" on success (HTTP 200), red on failure. Only sent VINs are committed.
  *   Note      : the panel is a snapshot loaded once (+ Reload). After bidding, hit Reload to see updated counters.
  *
@@ -108,23 +108,30 @@
   const fullyPriced = (subset) => subset.length > 0 && subset.every((b) => b.carrierCounter && b.carrierCounter.bidAmount != null);
 
   // --- Pickup + recommended ETA ---------------------------------------------
-  // Pickup is always 16:00Z (4 PM), USD. Pickup DATE = today if local clock < 2:45 PM, else tomorrow.
-  function pickupDate() { const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes(); const d = new Date(now); d.setHours(0, 0, 0, 0); if (mins >= 14 * 60 + 45) d.setDate(d.getDate() + 1); return d; }
+  // Pickup is always 16:00Z (4 PM), USD. Pickup DATE = the NEXT WEEKDAY (tomorrow, or Monday if that
+  // falls on a weekend). Pickup and ETA are never Sat/Sun; there is no time-of-day cutoff.
+  const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;   // 0 = Sun, 6 = Sat
+  // Advance `n` BUSINESS days from `d` (n may be negative), skipping Sat/Sun — weekends never count
+  // toward n, and the result is always a weekday when `d` is a weekday.
+  function addBusinessDays(d, n) { const x = new Date(d); const step = n < 0 ? -1 : 1; let rem = Math.abs(n); while (rem > 0) { x.setDate(x.getDate() + step); if (!isWeekend(x)) rem--; } return x; }
+  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); return addBusinessDays(d, 1); }   // next weekday
   const iso16 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T16:00:00.000Z`;
-  // ETA = pickup date + transit days; transit scales with origin->destination distance
+  // transitDays scales with origin->destination distance
   // (US state centroids): <500mi:7  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 7).
   // Longer hauls lean a day later than the raw average (they ran ~1 day short vs actual bids).
   const STC = {AL:[32.8,-86.8],AZ:[34.3,-111.7],AR:[34.9,-92.4],CA:[37.2,-119.3],CO:[39.0,-105.5],CT:[41.6,-72.7],DE:[39.0,-75.5],FL:[28.6,-82.4],GA:[32.6,-83.4],ID:[44.2,-114.5],IL:[40.0,-89.2],IN:[39.9,-86.3],IA:[42.0,-93.5],KS:[38.5,-98.4],KY:[37.5,-85.3],LA:[31.0,-92.0],ME:[45.4,-69.2],MD:[39.0,-76.8],MA:[42.3,-71.8],MI:[44.3,-85.4],MN:[46.3,-94.3],MS:[32.7,-89.7],MO:[38.4,-92.5],MT:[47.0,-109.6],NE:[41.5,-99.8],NV:[39.3,-116.6],NH:[43.7,-71.6],NJ:[40.2,-74.7],NM:[34.4,-106.1],NY:[42.9,-75.5],NC:[35.6,-79.4],ND:[47.5,-100.3],OH:[40.3,-82.8],OK:[35.6,-97.5],OR:[43.9,-120.6],PA:[40.9,-77.8],RI:[41.7,-71.6],SC:[33.9,-80.9],SD:[44.4,-100.2],TN:[35.9,-86.4],TX:[31.5,-99.3],UT:[39.3,-111.7],VT:[44.1,-72.7],VA:[37.5,-78.9],WA:[47.4,-120.5],WV:[38.6,-80.6],WI:[44.6,-89.9],WY:[43.0,-107.6]};
   function milesBetween(a, b) { if (!a || !b) return null; const R = 3959, dLat = (b[0]-a[0])*Math.PI/180, dLon = (b[1]-a[1])*Math.PI/180, la1 = a[0]*Math.PI/180, la2 = b[0]*Math.PI/180; const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.sqrt(h)); }
   function transitDays(g) { const d = milesBetween(STC[stOf(g.origin && g.origin.name)], STC[stOf(g.destination && g.destination.name)]); if (d == null) return 7; if (d < 500) return 7; if (d < 1000) return 9; if (d < 2000) return 11; return 12; }
-  function recommendedEta(g) { const t = pickupDate(); t.setDate(t.getDate() + transitDays(g)); return t; }
-  function selectedEta(g) { const t = recommendedEta(g); t.setDate(t.getDate() + (state.dates[legKey(g)] || 0)); return t; }
+  // ETA = pickup + transitDays BUSINESS days (pickup day NOT counted); weekends are skipped so the
+  // ETA is always a weekday. The manual stepper offset is likewise counted in business days.
+  function recommendedEta(g) { return addBusinessDays(pickupDate(), transitDays(g)); }
+  function selectedEta(g) { return addBusinessDays(recommendedEta(g), state.dates[legKey(g)] || 0); }
   // Stepper picker: the CENTER box is always the selected date (highlighted); the flanking days step
   // the selection one day earlier/later and become the new center, so any date is reachable.
   function dateBoxesFromBase(base, off) {
-    const sel = new Date(base); sel.setDate(base.getDate() + off);
-    const before = new Date(sel); before.setDate(sel.getDate() - 1);
-    const after = new Date(sel); after.setDate(sel.getDate() + 1);
+    const sel = addBusinessDays(base, off);          // selected = recommended + off BUSINESS days
+    const before = addBusinessDays(sel, -1);         // flanks are the adjacent weekdays (skip Sat/Sun)
+    const after = addBusinessDays(sel, 1);
     return `<button class="dbox flank" data-dir="-1">${before.getDate()}</button>`
       + `<button class="dbox sel" data-dir="0">${sel.getDate()}</button>`
       + `<button class="dbox flank" data-dir="1">${after.getDate()}</button>`;
