@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.25.2
+// @version      0.25.5
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -17,7 +17,7 @@
  *   Right half: one focused card per route — route, recommended-ETA date picker, and price box(es). CT and CAB
  *               (Cybercab, VIN starts 5YJA) each get their own box; one price -> every VIN in that subset.
  *   Submit    : Enter only sends boxes you've TYPED into; pickup = next weekday at 16:00Z, USD (ETA counts calendar days, may be a weekend).
- *               Card turns green "✓ sent N" on success (HTTP 200), red on failure. Only sent VINs are committed.
+ *               Card stays green on success (HTTP 200), red on failure. Only sent VINs are committed.
  *   Note      : the panel is a snapshot loaded once (+ Reload). After bidding, hit Reload to see updated counters.
  *
  * Data model (see findings.md): POST {skip,take} -> { data:{ items:Group[], totalRecords }, success }
@@ -148,6 +148,20 @@
   // POST {base}/BidBoard/{bidId}/UpdateOffer  {CurrencyCode, BidAmount, EstimatedShipDate, NeededByDate, OfferExpiryDate}
   // verb: MakeOffer for a VIN with no offer yet, UpdateOffer to change an existing one (same id + payload).
   const writeUrl = (bidId, verb) => state.endpoint.replace(/groups(\?.*)?$/i, '') + bidId + '/' + verb;
+  const MIN_BID = 50;
+  const typedPriceInputs = (cardEl) => [...cardEl.querySelectorAll('.price:not([readonly])')].filter((i) => (i.value || '').trim() !== '');
+  const bidValue = (value) => Number(String(value || '').replace(/[$,\s]/g, ''));
+  function validateCardBids(cardEl, focusInvalid = false) {
+    const bad = typedPriceInputs(cardEl).find((i) => {
+      const n = bidValue(i.value);
+      return !Number.isFinite(n) || n < MIN_BID;
+    });
+    if (!bad) { cardEl.classList.remove('bid-invalid'); return true; }
+    cardEl.classList.remove('submitted', 'sending');
+    cardEl.classList.add('bid-invalid');
+    if (focusInvalid) { bad.focus({ preventScroll: true }); if (bad.select) bad.select(); }
+    return false;
+  }
   function bidsForKey(key) {
     const sep = key.lastIndexOf('|'), leg = key.slice(0, sep), variant = key.slice(sep + 1);
     const g = state.groups.find((x) => legKey(x) === leg); if (!g) return { g: null, vins: [] };
@@ -164,22 +178,32 @@
   }
   // Send every TYPED box in a card; each box's price -> every VIN in its subset. Pickup/ETA per the rules.
   async function submitCard(cardEl) {
-    const inputs = [...cardEl.querySelectorAll('.price:not([readonly])')].filter((i) => (i.value || '').trim() !== '');
+    if (!validateCardBids(cardEl, true)) return false;
+    const inputs = typedPriceInputs(cardEl);
     if (!inputs.length) return;
-    cardEl.classList.remove('submitted', 'submit-err'); cardEl.classList.add('sending');
+    const oldTag = cardEl.querySelector('.subtag'); if (oldTag) oldTag.remove();
+    cardEl.classList.remove('submitted', 'submit-err', 'bid-invalid'); cardEl.classList.add('sending');
     let sent = 0, failed = 0;
     for (const inp of inputs) {
       const { g, vins } = bidsForKey(inp.dataset.key); if (!g) continue;
-      const body = { CurrencyCode: 'USD', BidAmount: String(inp.value.trim()), EstimatedShipDate: iso16(pickupDate()), NeededByDate: iso16(selectedEta(g)), OfferExpiryDate: null };
+      const body = { CurrencyCode: 'USD', BidAmount: String(bidValue(inp.value)), EstimatedShipDate: iso16(pickupDate()), NeededByDate: iso16(selectedEta(g)), OfferExpiryDate: null };
       for (const b of vins) { const verb = (b.carrierCounter && b.carrierCounter.bidAmount != null) ? 'UpdateOffer' : 'MakeOffer'; try { await postOffer(b.bidId, verb, body); sent++; } catch (e) { failed++; console.warn('[bidpanel] bid FAILED for', b.vin, '—', e && e.message); } }
     }
     cardEl.classList.remove('sending'); cardEl.classList.add(failed ? 'submit-err' : 'submitted');
-    let tag = cardEl.querySelector('.subtag'); if (!tag) { tag = document.createElement('div'); tag.className = 'subtag'; cardEl.appendChild(tag); }
-    tag.textContent = failed ? `⚠ sent ${sent} · ${failed} failed` : `✓ sent ${sent} offer${sent === 1 ? '' : 's'}`;
+    if (failed) {
+      const tag = document.createElement('div'); tag.className = 'subtag'; cardEl.appendChild(tag);
+      tag.textContent = `⚠ ${failed} offer${failed === 1 ? '' : 's'} failed`;
+    }
+    return failed === 0;
   }
 
   // ---- 3) Panel -------------------------------------------------------------
   let host, root, body, rafPending = 0, toastTimer = 0;
+  let leftSelectionLockRi = null, leftSelectionUnlockTimer = 0;
+  function armLeftSelectionUnlock() {
+    clearTimeout(leftSelectionUnlockTimer);
+    leftSelectionUnlockTimer = setTimeout(() => { leftSelectionLockRi = null; }, 220);
+  }
   function showToast(msg) {
     if (!root) return;
     let t = root.querySelector('.toast');
@@ -210,8 +234,9 @@
         .todobtn:hover{background:#dcdfe2}
         .todobtn.on{background:#3457d5;color:#fff;border-color:#3457d5}
         .fcard.sending{border-color:#3457d5;opacity:.85}
-        .fcard.submitted{border-color:#0a7d33;box-shadow:0 0 0 2px rgba(10,125,51,.18)}
-        .fcard.submit-err{border-color:#c0392b;box-shadow:0 0 0 2px rgba(192,57,43,.18)}
+        .fcard.submitted,.fcard.submitted.active{border-color:#0a7d33;box-shadow:0 0 0 2px rgba(10,125,51,.18)}
+        .fcard.submit-err,.fcard.submit-err.active{border-color:#c0392b;box-shadow:0 0 0 2px rgba(192,57,43,.18)}
+        .fcard.bid-invalid,.fcard.bid-invalid.active{border-color:#c0392b;background:#fff7f6;box-shadow:0 0 0 3px rgba(192,57,43,.22)}
         .subtag{margin-top:10px;font-size:12px;font-weight:800;color:#0a7d33}
         .fcard.submit-err .subtag{color:#c0392b}
         .bodywrap{display:flex;flex:1;overflow:hidden}
@@ -254,7 +279,7 @@
         .pin.filled .cur{opacity:1}
         .pin input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-size:16px;font-weight:700;color:#0a7d33;padding:0}
         .pin input::placeholder{color:#0a7d33;opacity:.45}
-        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:16px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
+        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
         .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
       </style>
       <div class="panel">
@@ -267,7 +292,13 @@
     body = { sub: document.createElement('span'), left: root.getElementById('left'), right: root.getElementById('right'), filter: root.getElementById('filter') };
     body.filter.addEventListener('input', () => { state.filter = body.filter.value.trim().toLowerCase(); render(); });
     root.getElementById('todo').addEventListener('click', (e) => { state.todoOnly = !state.todoOnly; e.target.textContent = state.todoOnly ? 'TO-DO' : 'ALL'; e.target.classList.toggle('on', state.todoOnly); render(); });
-    body.right.addEventListener('scroll', () => { if (rafPending) return; rafPending = requestAnimationFrame(() => { rafPending = 0; syncFromRight(); }); });
+    body.right.addEventListener('scroll', () => {
+      // A left-card click locks that selection while the right pane smooth-scrolls past intermediate cards.
+      // Normal user scrolling has no lock, so the left pane continues following the focused card.
+      if (leftSelectionLockRi != null) armLeftSelectionUnlock();
+      if (rafPending) return;
+      rafPending = requestAnimationFrame(() => { rafPending = 0; syncFromRight(); });
+    });
     body.right.addEventListener('input', (e) => { const t = e.target; if (t.classList && t.classList.contains('price')) { state.prices[t.dataset.key] = t.value; const pin = t.closest('.pin'); if (pin) pin.classList.toggle('filled', t.value.trim() !== ''); } });
     body.right.addEventListener('click', (e) => {
       const db = e.target.closest && e.target.closest('.dbox');
@@ -280,6 +311,8 @@
       if (e.key !== 'Enter' || !(e.target.classList && e.target.classList.contains('price'))) return;
       e.preventDefault();
       const curCard = e.target.closest('.fcard');
+      // Never send or advance while any typed price on this card is below the minimum.
+      if (curCard && !validateCardBids(curCard, true)) return;
       const inputs = [...body.right.querySelectorAll('.price')];
       let i = inputs.indexOf(e.target) + 1;
       while (i < inputs.length && inputs[i].dataset.priced === '1') i++;   // skip already-priced shipments
@@ -411,7 +444,9 @@
 
   function nowHHMM() {
     const d = new Date();
-    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+    const suffix = d.getHours() >= 12 ? 'PM' : 'AM';
+    const hour = d.getHours() % 12 || 12;
+    return hour + ':' + String(d.getMinutes()).padStart(2, '0') + ' ' + suffix;
   }
 
   function render() {
@@ -446,7 +481,13 @@
       const vins = (g.bids && g.bids.items) || [];
       const cnt = (g.bids && g.bids.totalRecords) || vins.length;
       const grp = document.createElement('div'); grp.className = 'grp'; grp.dataset.ri = ri;
-      grp.addEventListener('click', () => { const fc = body.right.querySelector(`.fcard[data-ri="${ri}"]`); if (fc) centerInPane(body.right, fc, true); selectRi(ri); });   // whole card selects
+      grp.addEventListener('click', () => {
+        const fc = body.right.querySelector(`.fcard[data-ri="${ri}"]`);
+        leftSelectionLockRi = ri;
+        armLeftSelectionUnlock();
+        selectRi(ri, false);                 // lock the clicked left card in place
+        if (fc) centerInPane(body.right, fc, true); // only the focused-card pane moves
+      });   // whole card selects
       const row = document.createElement('div'); row.className = 'row';
       row.innerHTML = `<div class="leg"><span class="o">${shortLoc(g.origin && g.origin.name)}</span><span class="arrow">→</span><span class="d">${shortLoc(g.destination && g.destination.name)}</span></div>`
         + `<div class="cnt">${cnt} VIN${cnt === 1 ? '' : 's'}</div>`;
@@ -496,6 +537,15 @@
   function syncFromRight() {
     if (!body) return;
     const cards = body.right.querySelectorAll('.fcard'); if (!cards.length) return;
+    if (leftSelectionLockRi != null) {
+      const locked = body.right.querySelector(`.fcard[data-ri="${leftSelectionLockRi}"]`);
+      if (locked) {
+        cards.forEach((c) => c.classList.toggle('active', c === locked));
+        highlightLeft(leftSelectionLockRi, false);
+        return;
+      }
+      leftSelectionLockRi = null;
+    }
     const pr = body.right.getBoundingClientRect(), cy = pr.top + pr.height / 2;
     let best = null, bd = Infinity;
     cards.forEach((c) => { const r = c.getBoundingClientRect(); const d = Math.abs((r.top + r.height / 2) - cy); if (d < bd) { bd = d; best = c; } });
@@ -503,12 +553,12 @@
     cards.forEach((c) => c.classList.toggle('active', c === best));
     highlightLeft(+best.dataset.ri);
   }
-  function highlightLeft(ri) {
+  function highlightLeft(ri, center = true) {
     body.left.querySelectorAll('.grp.sel').forEach((e) => e.classList.remove('sel'));
     const lg = body.left.querySelector(`.grp[data-ri="${ri}"]`);
-    if (lg) { lg.classList.add('sel'); centerInPane(body.left, lg); }
+    if (lg) { lg.classList.add('sel'); if (center) centerInPane(body.left, lg); }
   }
-  function selectRi(ri) { body.right.querySelectorAll('.fcard').forEach((c) => c.classList.toggle('active', +c.dataset.ri === ri)); highlightLeft(ri); }
+  function selectRi(ri, centerLeft = true) { body.right.querySelectorAll('.fcard').forEach((c) => c.classList.toggle('active', +c.dataset.ri === ri)); highlightLeft(ri, centerLeft); }
 
   window.__bidpanelState = state; window.__bidpanelRender = render; window.__bidpanelLoadAll = loadAll;
 
