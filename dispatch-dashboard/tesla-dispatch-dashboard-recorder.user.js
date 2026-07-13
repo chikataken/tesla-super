@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.9.0
-// @description  Bottom-right "Cleaner/Marker" pill expands an upward action menu (uniform-width buttons). "Clean Pickups": scans the board for the Pickup Date Today alert, shows the count ("N → date · Confirm?"), and on confirm bulk-moves ALL those pickups to the next day 16:00Z (reason 4) via updateestimatedshipdate. "Pull red VINs to mark": re-query the App-tab Unmarked (red) VINs on Tesla and POST fresh status. Buttons are tap-to-confirm (yellow) then green ✓. Also piggybacks the page's own GetCarrierDispatchShipment calls; auto-send (default on, toggle in Tampermonkey menu) POSTs searched VINs to shipments.wastake.com/api/tesla-status. Clean ETA is a stub.
+// @version      0.10.0
+// @description  Bottom-right "Cleaner/Marker" pill expands an upward action menu (uniform-width buttons). "Clean Pickups": scans the board for Pickup Date Late and Pickup Date Today alerts, shows the count ("N → date · Confirm?"), and on confirm bulk-moves ALL those pickups to the next weekday at 16:00Z (reason 4) via updateestimatedshipdate. "Pull red VINs to mark": re-query the App-tab Unmarked (red) VINs on Tesla and POST fresh status. Buttons are tap-to-confirm (yellow) then green ✓. Also piggybacks the page's own GetCarrierDispatchShipment calls; auto-send (default on, toggle in Tampermonkey menu) POSTs searched VINs to shipments.wastake.com/api/tesla-status. Clean ETA is a stub.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -301,14 +301,15 @@
   }
 
   // ---- pickup-date cleaner (write) -------------------------------------------
-  // Next day at 16:00Z from an ISO pickup date (current pickup date + 1 day). Copies the recorded
-  // format exactly ("YYYY-MM-DDT16:00:00Z"). Falls back to tomorrow if the input is unparseable.
-  function nextDay16(iso) {
-    const datePart = String(iso || '').split('T')[0];
-    let d = datePart ? new Date(datePart + 'T00:00:00Z') : new Date();
-    if (isNaN(d)) d = new Date();
-    d.setUTCDate(d.getUTCDate() + 1);
-    return d.toISOString().slice(0, 10) + 'T16:00:00Z';
+  // Next weekday from the day the button is pressed, at the exact recorded 16:00Z format.
+  // Friday, Saturday, and Sunday all roll forward to Monday.
+  function nextWeekday16(now = new Date()) {
+    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    do { d.setDate(d.getDate() + 1); } while (d.getDay() === 0 || d.getDay() === 6);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}T16:00:00Z`;
   }
   // Batch pickup-date write — the exact contract we recorded. items = [{stopId, estimateShipDate}].
   async function updatePickups(items) {
@@ -324,35 +325,35 @@
     }
     return ok;
   }
-  // Scan the board for stops flagged "Pickup Date Today" (alert id 7).
-  async function scanPickupsToday() {
+  // Scan the board for stops flagged "Pickup Date Late" (id 1) or "Pickup Date Today" (id 7).
+  async function scanPickupAlerts() {
     if (!apiAuth || !apiUrl) throw new Error('search the dashboard once');
     const end = new Date(), start = new Date(end.getTime() - 90 * 86400000);
-    const body = { skip: 0, take: 5000, stopStatusIds: [9, 6, 12], selectedDispatchAlertIds: [7],
+    const body = { skip: 0, take: 5000, stopStatusIds: [9, 6, 12], selectedDispatchAlertIds: [1, 7],
       createdDateStart: start.toISOString(), createdDateEnd: end.toISOString(), carrierId: null };
     const res = await fetch(apiUrl, { method: 'POST',
       headers: { 'Authorization': apiAuth, 'Content-Type': 'application/json', 'Accept': 'application/json', 'x-selectedCarrierId': apiCarrier || '' },
       body: JSON.stringify(body) });
     if (!res.ok) throw new Error('scan HTTP ' + res.status);
     const j = await res.json();
-    const targets = [];
+    const targets = [], targetDate = nextWeekday16();
     ((j.data && j.data.shipmentList) || []).forEach(s => (s.stops || []).forEach(st => {
-      if ((st.dispatchAlertIds || []).includes(7))
-        targets.push({ stopId: st.stopId, estimateShipDate: nextDay16(st.estimatedShipDate) });
+      if ((st.dispatchAlertIds || []).some(id => id === 1 || id === 7))
+        targets.push({ stopId: st.stopId, estimateShipDate: targetDate });
     }));
     return targets;
   }
   // Clean Pickups: prep() scans (read, shows the count in the Confirm? label); run() does the write.
   async function prepCleanPickups(setStatus) {
-    setStatus('scanning Pickup Date Today…');
-    const targets = await scanPickupsToday();
-    if (!targets.length) return { count: 0, emptyMsg: 'none today ✓' };
+    setStatus('scanning late + today pickups…');
+    const targets = await scanPickupAlerts();
+    if (!targets.length) return { count: 0, emptyMsg: 'no late/today pickups ✓' };
     return { count: targets.length, confirmMsg: targets.length + ' → ' + targets[0].estimateShipDate.slice(0, 10) + ' 4PM · Confirm?', data: targets };
   }
   async function runCleanPickups(setStatus, prep) {
     setStatus('moving ' + prep.data.length + ' pickups…');
     const ok = await updatePickups(prep.data);
-    return ok + ' → next day 4PM';
+    return ok + ' → next weekday 4PM';
   }
 
   // ---- UI: bottom-right pill + upward-expanding action menu ------------------
@@ -397,7 +398,7 @@
     root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style'); style.textContent = CSS; root.appendChild(style);
     const menu = document.createElement('div'); menu.className = 'menu'; menu.id = 'ddmenu';
-    menu.appendChild(actionButton('Clean Pickups', 'move Pickup-Date-Today → next day 4PM', runCleanPickups, prepCleanPickups));
+    menu.appendChild(actionButton('Clean Pickups', '[next weekday] 4PM', runCleanPickups, prepCleanPickups));
     menu.appendChild(actionButton('Clean ETA', 'not wired yet', null));
     menu.appendChild(actionButton('Pull red VINs to mark', 'tap to confirm', runPullRed));  // nearest the pill
     root.appendChild(menu);

@@ -30,17 +30,18 @@ Tampermonkey menu: *Toggle recorder panel*, *Clear recorded data*.
 Tampermonkey ▸ install `tesla-dispatch-dashboard-recorder.user.js` (auto-update wired to the
 GitHub raw URL; bump `@version` to push updates).
 
-## "Clean Pickups" (v0.9.0) — bulk pickup-date write
-**Clean Pickups** (scan-first, tap-to-confirm): scans the board for the **Pickup Date Today**
-alert (id 7) across all non-delivered stops, shows the count (`N → date · Confirm?`), and on
-confirm bulk-moves **all** of them to the **next day at 16:00Z (4 PM)** with **reason 4** — the
+## "Clean Pickups" (v0.10.0) — bulk pickup-date write
+**Clean Pickups** (scan-first, tap-to-confirm): scans the board for both **Pickup Date Late**
+(id 1) and **Pickup Date Today** (id 7) across all non-delivered stops, shows the count
+(`N → date · Confirm?`), and on confirm bulk-moves **all** of them to the **next weekday at
+16:00Z (4 PM)** with **reason 4** — the
 exact contract we recorded: `POST …/updateestimatedshipdate?dateTrackingSource=3` with
 `{updateEstimatedShipDateList:[{updateReasonId:4, estimateShipDate, stopId}]}` (chunked 100).
-Verified live (read-only): the alert-7 scan returned 403 targets, dates computed correctly.
+The target is based on the day the button is pressed. Friday through Sunday roll to Monday.
 Bounds: 90-day SHP-create-date window + `take:5000` (no pagination).
 
 Note: `updateReasonId:4` is copied verbatim from the recorded manual edit. Change it (and the
-`16:00` time / next-day rule) at the top of `updatePickups`/`nextDay16` if the desired reason changes.
+`16:00` time / next-weekday rule) at the top of `updatePickups`/`nextWeekday16` if the desired reason changes.
 
 ## "Pull red VINs to mark" (v0.6.0) — targeted reconciliation
 Menu button that re-checks **only** the App-tab **Unmarked (red)** VINs on Tesla, instead of
