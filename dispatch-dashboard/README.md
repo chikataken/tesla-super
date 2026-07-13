@@ -30,18 +30,66 @@ Tampermonkey menu: *Toggle recorder panel*, *Clear recorded data*.
 Tampermonkey ▸ install `tesla-dispatch-dashboard-recorder.user.js` (auto-update wired to the
 GitHub raw URL; bump `@version` to push updates).
 
-## "Clean Pickups" (v0.10.0) — bulk pickup-date write
+## Default Search By: VINs (v0.16.0)
+Whenever Dispatch Dashboard 2.0 is entered, the userscript defaults searches to VINs without
+opening or clicking Tesla's dropdown. The page's own `GetCarrierDispatchShipment` request is
+intercepted before send and only its search field is translated from `shipmentNumbers:[...]` to
+`vins:[...]`; the same translation applies to the dashboard's Excel download request. Alerts,
+dates, statuses, carrier, and paging are left unchanged. The displayed
+selector and neighboring placeholder are kept at **VINs** / **Enter VINs** so the UI matches the
+actual request. A deliberate manual choice of **Shipment Numbers** disables the translation for
+the rest of that dashboard visit; leaving and re-entering restores the VIN default.
+
+## Deliver / Andrew Enkh control (v0.13.1)
+On every rendered Dispatch Dashboard shipment card, the userscript visually replaces Tesla's
+**License Plate** label and its input/save controls with a matching **Deliver** label and
+**Andrew Enkh** action. Both replacement elements are deep clones of that card's native Driver
+label and selector—not approximated CSS—so their font, height, border, arrow, spacing, and vertical
+position are inherited directly from Tesla. Tesla's original Angular controls are hidden rather than deleted, which
+keeps framework change detection intact. A MutationObserver reapplies the replacement after
+searches, pagination, and SPA re-renders.
+
+The button resolves the visible shipment number against the shipment metadata already captured
+from `GetCarrierDispatchShipment`, then immediately assigns **Andrew Enkh** (`driverId:136062`)
+with the recorded single-shipment contract: `POST …/AssignDrivertoShipment` and
+`{shipmentId,driverId:136062,carrierId,driverJobStatus:"PENDING",source:"TVP"}`. The carrier ID
+comes from that shipment, falling back to the selected-carrier request header. The button shows
+yellow while assigning, green only after Tesla returns a successful response, and red/retry on
+HTTP or `success:false` errors. It does not reload the dashboard.
+
+## "Clean Pickups" (v0.12.0) — pickup dates + Driver Needed assignment
 **Clean Pickups** (scan-first, tap-to-confirm): scans the board for both **Pickup Date Late**
 (id 1) and **Pickup Date Today** (id 7) across all non-delivered stops, shows the count
-(`N → date · Confirm?`), and on confirm bulk-moves **all** of them to the **next weekday at
+(`N pickups · M drivers · date · Confirm?`), and on confirm bulk-moves **all** of them to the **next weekday at
 16:00Z (4 PM)** with **reason 4** — the
 exact contract we recorded: `POST …/updateestimatedshipdate?dateTrackingSource=3` with
 `{updateEstimatedShipDateList:[{updateReasonId:4, estimateShipDate, stopId}]}` (chunked 100).
 The target is based on the day the button is pressed. Friday through Sunday roll to Monday.
+The idle button caption displays that calculated weekday (for example, `Monday 4PM`) and refreshes whenever the menu opens.
 Bounds: 90-day SHP-create-date window + `take:5000` (no pagination).
+
+The preview also independently scans **Driver Needed** (id 2), deduplicates matches by
+`shipmentId`, and on the same confirmation assigns **JESSICA TFI** (`driverId:67651`) only to
+those shipments. It uses the recorded mass endpoint
+`POST …/UpdateShipmentsDriverAndLicensePlate`, groups requests by the carrier ID returned by
+Tesla (falling back to the selected-carrier header), chunks shipment IDs 100 at a time, and sends
+`{shipmentIds,driverId:67651,carrierId,driverJobStatus:"PENDING",source:"TVP",truckLicensePlate:""}`.
+The button turns green only after every applicable pickup and driver response passes HTTP and
+`success:false` validation. If driver assignment fails after pickup dates succeeded, the red
+error state explicitly reports that the pickup updates already landed.
 
 Note: `updateReasonId:4` is copied verbatim from the recorded manual edit. Change it (and the
 `16:00` time / next-weekday rule) at the top of `updatePickups`/`nextWeekday16` if the desired reason changes.
+
+## "Clean ETA" (v0.11.0) — bulk ETA write
+**Clean ETA** uses the same scan-first, tap-to-confirm flow. It runs independent scans for
+**Late ETA** (id 3) and **ETA Today** (id 6), verifies those alert ids on every returned stop,
+merges duplicate `stopId` values, and moves all matches to the **next calendar day**, including
+Saturday and Sunday, with a **4 PM ETA window**. Its idle caption and confirmation preview use
+the same next-day calculation. The recorded write contract is `POST …/updateStopEta` with an array of:
+`{StopId, EtaUpdateSourceId:3, EstimatedDeliveryDate, EtaTimeWindowEndInHours:16,
+EtaUpdateReasonId:4}`. Writes are chunked 100 and HTTP-200 responses containing
+`success:false` are treated as failures.
 
 ## "Pull red VINs to mark" (v0.6.0) — targeted reconciliation
 Menu button that re-checks **only** the App-tab **Unmarked (red)** VINs on Tesla, instead of

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.25.5
-// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
+// @version      0.27.0
+// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -227,10 +227,11 @@
         .toast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%) translateY(8px);background:#171a20;color:#fff;padding:9px 18px;border-radius:9px;font-size:13px;font-weight:800;letter-spacing:.02em;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:6}
         .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
         .tools{display:flex;flex-direction:column;gap:8px;padding:8px 12px;border-bottom:1px solid #eee}
-        .trow{display:flex;align-items:center;gap:10px}
-        .tools input{width:50%;padding:6px 8px;border:1px solid #d0d3d6;border-radius:6px;font-size:13px}
+        /* trow spans the left 50% (symmetric 12px padding cancels out), so the filter's right edge lands on the middle divider */
+        .trow{display:flex;align-items:center;gap:10px;width:50%}
+        .tools input{flex:1;min-width:0;padding:6px 8px;border:1px solid #d0d3d6;border-radius:6px;font-size:13px}
         .tools label{font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;color:#5c5e62}
-        .todobtn{background:#e6e8ea;color:#3a3f49;border:1px solid #cfd3d7;border-radius:6px;padding:6px 18px;font-size:12px;font-weight:700;cursor:pointer;font-family:Arial,Helvetica,sans-serif;letter-spacing:.04em}
+        .todobtn{background:#e6e8ea;color:#3a3f49;border:1px solid #cfd3d7;border-radius:6px;padding:6px 0;min-width:82px;text-align:center;font-size:12px;font-weight:700;cursor:pointer;font-family:Arial,Helvetica,sans-serif;letter-spacing:.04em}
         .todobtn:hover{background:#dcdfe2}
         .todobtn.on{background:#3457d5;color:#fff;border-color:#3457d5}
         .fcard.sending{border-color:#3457d5;opacity:.85}
@@ -239,9 +240,9 @@
         .fcard.bid-invalid,.fcard.bid-invalid.active{border-color:#c0392b;background:#fff7f6;box-shadow:0 0 0 3px rgba(192,57,43,.22)}
         .subtag{margin-top:10px;font-size:12px;font-weight:800;color:#0a7d33}
         .fcard.submit-err .subtag{color:#c0392b}
-        .bodywrap{display:flex;flex:1;overflow:hidden}
-        .left{width:50%;overflow:auto;padding:6px;border-right:1px solid #e6e8ea}
-        .right{width:50%;overflow:auto;padding:43vh 18px;background:#f6f7f9}
+        .bodywrap{display:flex;flex-direction:row-reverse;flex:1;overflow:hidden}
+        .left{width:50%;overflow:auto;padding:6px}
+        .right{width:50%;overflow:auto;padding:43vh 18px;background:#f6f7f9;border-right:1px solid #e6e8ea}
         .grp{border:1px solid #eceef0;border-radius:8px;margin:6px 4px;overflow:hidden;cursor:pointer}
         .grp:hover{background:#fafbfc}
         .grp.sel{border-color:#3457d5;box-shadow:0 0 0 3px rgba(52,87,213,.18)}.grp.sel>.row{background:#eaf0ff}
@@ -281,6 +282,9 @@
         .pin input::placeholder{color:#0a7d33;opacity:.45}
         .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
         .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
+        /* text-shimmer (loading-ui style): a light band sweeps across the letters */
+        .empty.shimmer{font-size:29px;font-weight:800;color:transparent;background:linear-gradient(90deg,#c2c5c9 0%,#c2c5c9 40%,#3a3f49 50%,#c2c5c9 60%,#c2c5c9 100%);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:bpshimmer 1.6s linear infinite}
+        @keyframes bpshimmer{0%{background-position:200% center}100%{background-position:-200% center}}
       </style>
       <div class="panel">
         <div class="tools"><div class="trow"><button id="todo" class="todobtn">ALL</button><input id="filter" placeholder="Filter…" /></div></div>
@@ -456,7 +460,13 @@
     body.sub.textContent = state.loading ? 'loading…' : state.error ? '' : `· ${state.groups.length} routes · ${totalVins} VINs`;
 
     if (state.error) { body.left.innerHTML = `<div class="empty err">Error: ${state.error}</div>`; body.right.innerHTML = ''; return; }
-    if (state.loading && !state.groups.length) { body.left.innerHTML = `<div class="empty">Loading routes…</div>`; body.right.innerHTML = ''; return; }
+    if (state.loading && !state.groups.length) {
+      // Panes are flipped (row-reverse): body.right renders LEFT. Put the shimmer center-left,
+      // matching the "Nothing to Bid" position.
+      body.left.classList.add('center-empty'); body.right.classList.add('center-empty');
+      body.right.innerHTML = `<div class="empty shimmer">Scanning…</div>`; body.left.innerHTML = '';
+      return;
+    }
 
     const gs = currentGroups();
     if (!gs.length) {
@@ -464,8 +474,10 @@
         // Genuinely nothing left to bid: center "Nothing to Bid" on the left, show the current time
         // (green) on the right, and drop the panes' scroll/padding.
         body.left.classList.add('center-empty'); body.right.classList.add('center-empty');
-        body.left.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
-        body.right.innerHTML = `<div class="empty done clock">${nowHHMM()}</div>`;
+        // Panes are visually flipped (row-reverse): body.right renders LEFT, body.left renders RIGHT.
+        // So "Nothing to Bid" -> body.right (left), the clock -> body.left (right).
+        body.right.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
+        body.left.innerHTML = `<div class="empty done clock">${nowHHMM()}</div>`;
         showToast('Nothing to Bid');
       } else {
         // A filter (in TO-DO or ALL) that matched nothing, or no routes captured yet — default message.
