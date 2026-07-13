@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Regular Fleet — SuperDispatch Recolor
 // @namespace    wastake.regularfleet
-// @version      0.17.0
+// @version      0.18.0
 // @description  Shades Regular Fleet rows by SuperDispatch delivery status. Pulls every VIN off the page, looks each up in SuperDispatch (your own API creds), and matches by DELIVERY DATE: if any of the VIN's SD orders was delivered within 3 days of the Tesla delivery date -> green; else picked up/accepted/pending -> yellow; else (incl. no match) -> red. Results cached per day. Hover a VIN to see its SuperDispatch order card(s).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/regular-fleet/tesla-regular-fleet-recolor.user.js
@@ -49,9 +49,8 @@
  *   Hovering a VIN cell pops up ONE SuperDispatch order card (the order matching the delivery-date
  *   window, else the in-transit / first one) to the top-right of the VIN: order #, status pill,
  *   pickup->delivery route, the hovered VIN's vehicle ("+N more" for others on the order), and the
- *   DISPATCHER responsible for the VIN (by pickup state, mirroring shipment-creator/profiles.json;
- *   DC routed by ZIP). Over-long venue names are capped. Read from the cache -> instant, no API call.
- *   (Carrier name is NOT shown — the SuperDispatch Shipper API doesn't expose the booked carrier.)
+ *   PER-UNIT CARRIER COST (order price divided by the number of VINs, rounded to a whole dollar).
+ *   Over-long venue names are capped. Read from the cache -> instant, no API call on hover.
  */
 
 (function () {
@@ -63,6 +62,7 @@
   const CONCURRENCY = 4;          // parallel SD lookups
   const REQ_GAP_MS = 120;         // small pause between a worker's calls (be nice to the API)
   const DELIVERY_WINDOW_DAYS = 3; // SD delivery date must be within this many days of Tesla's
+  const CACHE_VERSION = 2;        // bump whenever the cached hover-card shape changes
 
   const COLORS = {
     green:  'rgba(35, 160, 70, 0.28)',
@@ -142,44 +142,11 @@
     return 'gray';
   }
 
-  // --- dispatcher by PICKUP state (mirrors shipment-creator/profiles.json) ---
-  // Each dispatcher owns a set of pickup states; a state belongs to exactly one. DC is routed by ZIP
-  // (prefixes 200/202/203/204/205) to whoever owns "DC" (Kelly), overriding the state text — a DC
-  // origin is sometimes typed as "Washington". Didi is the bypass profile and owns no states. If the
-  // shipment-creator profiles change, update DISPATCHER_STATES below.
-  const DISPATCHER_STATES = {
-    Soyo:  ['CT', 'WI', 'UT', 'IL', 'IN', 'OH', 'MI', 'KY', 'TN', 'MS', 'AL', 'SC', 'NC', 'NJ', 'RI', 'MA', 'NH', 'VT', 'ME', 'NY', 'PA'],
-    Kelly: ['VA', 'MD', 'GA', 'FL', 'DE', 'WV', 'DC'],
-    Duka:  ['CA'],
-    Burte: ['NV', 'AZ', 'NM', 'CO', 'ID', 'WY', 'MT', 'ND', 'SD', 'NE', 'KS', 'OK', 'MO', 'IA', 'MN', 'AR', 'LA', 'TX', 'OR', 'WA'],
-  };
-  const STATE_DISPATCHER = {};
-  for (const name in DISPATCHER_STATES) for (const st of DISPATCHER_STATES[name]) STATE_DISPATCHER[st] = name;
-  const DC_ZIP3 = { '200': 1, '202': 1, '203': 1, '204': 1, '205': 1 };   // 201xx is VA (Dulles), excluded
-  const STATE_NAME_TO_CODE = {
-    alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA', colorado: 'CO',
-    connecticut: 'CT', delaware: 'DE', 'district of columbia': 'DC', florida: 'FL', georgia: 'GA',
-    hawaii: 'HI', idaho: 'ID', illinois: 'IL', indiana: 'IN', iowa: 'IA', kansas: 'KS', kentucky: 'KY',
-    louisiana: 'LA', maine: 'ME', maryland: 'MD', massachusetts: 'MA', michigan: 'MI', minnesota: 'MN',
-    mississippi: 'MS', missouri: 'MO', montana: 'MT', nebraska: 'NE', nevada: 'NV', 'new hampshire': 'NH',
-    'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND',
-    ohio: 'OH', oklahoma: 'OK', oregon: 'OR', pennsylvania: 'PA', 'rhode island': 'RI', 'south carolina': 'SC',
-    'south dakota': 'SD', tennessee: 'TN', texas: 'TX', utah: 'UT', vermont: 'VT', virginia: 'VA',
-    washington: 'WA', 'west virginia': 'WV', wisconsin: 'WI', wyoming: 'WY',
-  };
-  function isDcZip(zip) {
-    const z = String(zip || '').replace(/\D/g, '');
-    return z.length >= 3 && Object.prototype.hasOwnProperty.call(DC_ZIP3, z.slice(0, 3));
-  }
-  function normUsState(s) {
-    s = String(s || '').trim();
-    if (!s) return '';
-    return s.length === 2 ? s.toUpperCase() : (STATE_NAME_TO_CODE[s.toLowerCase()] || s.toUpperCase());
-  }
-  // Dispatcher responsible for a VIN, by its PICKUP location (DC ZIP wins over state text).
-  function dispatcherFor(state, zip) {
-    const region = isDcZip(zip) ? 'DC' : normUsState(state);
-    return STATE_DISPATCHER[region] || '';
+  function perUnitCost(order) {
+    const price = Number(order && order.price);
+    const units = order && Array.isArray(order.vehicles) ? order.vehicles.length : 0;
+    if (!Number.isFinite(price) || order.price == null || units < 1) return '';
+    return '$' + Math.round(price / units);
   }
 
   // Compact display record for one SD order (what the hover panel renders).
@@ -190,7 +157,7 @@
     return {
       number: o.number || o.order_number || '',
       status: normStatus(o.status),
-      dispatcher: dispatcherFor(pv.state, pv.zip),
+      unitCost: perUnitCost(o),
       pickup: { line: cityLine(pv), name: pv.name || '', date: fmtDate(stopDate(o.pickup)) },
       delivery: {
         line: cityLine(dv), name: dv.name || '',
@@ -305,7 +272,7 @@
 
   // Full order object (find_by_vin summaries can be thin — fetch the detail for the hover card).
   async function fullOrder(o) {
-    const detailed = o && o.pickup && o.delivery && Array.isArray(o.vehicles);
+    const detailed = o && o.pickup && o.delivery && Array.isArray(o.vehicles) && o.price != null;
     if (detailed) return o;
     if (o && o.guid) { try { return await getOrder(o.guid); } catch (_) {} }
     return o || {};
@@ -345,10 +312,13 @@
   // ============================ daily cache ================================
   function loadCache() {
     let c = GM_getValue('sd_cache', null);
-    if (!c || c.day !== today()) { c = { day: today(), vins: {} }; GM_setValue('sd_cache', c); }
+    if (!c || c.day !== today() || c.version !== CACHE_VERSION) {
+      c = { version: CACHE_VERSION, day: today(), vins: {} };
+      GM_setValue('sd_cache', c);
+    }
     return c;
   }
-  function saveCache(c) { c.day = today(); GM_setValue('sd_cache', c); }
+  function saveCache(c) { c.version = CACHE_VERSION; c.day = today(); GM_setValue('sd_cache', c); }
 
   // ============================ the check pass =============================
   function scheduleCheck() {
@@ -580,8 +550,8 @@
     '#sd-hover .sd-pill.green{background:#e6f4ea;color:#1e7b34;}',
     '#sd-hover .sd-pill.yellow{background:#fbefc9;color:#8a6a00;}',
     '#sd-hover .sd-pill.gray{background:#eee;color:#666;}',
-    // right column stretches to the left column's height so the dispatcher name (margin-top:auto)
-    // drops to the bottom, in line with the destination row — the spot the carrier used to hold.
+    // The right column stretches to the left column's height so the per-unit carrier cost
+    // drops to the bottom, in line with the destination row.
     '#sd-hover .sd-body{display:flex;gap:37px;align-items:stretch;}',
     '#sd-hover .sd-col{flex:0 0 auto;white-space:nowrap;}',
     '#sd-hover .sd-right{display:flex;flex-direction:column;min-width:150px;}',
@@ -597,7 +567,7 @@
     '#sd-hover .sd-model{font-weight:700;color:#161616;}',
     '#sd-hover .sd-vin{display:inline-block;background:#fcf3d6;padding:2px 6px;border-radius:4px;margin-top:4px;font-size:14.5px;color:#222;}',
     '#sd-hover .sd-more{color:#9a9a9a;font-size:12px;margin-top:4px;}',
-    '#sd-hover .sd-dispatcher{margin-top:auto;padding-top:14px;color:#161616;font-weight:700;font-size:14.5px;}',
+    '#sd-hover .sd-unit-cost{margin-top:auto;padding-top:14px;color:#161616;font-weight:700;font-size:14.5px;}',
     '.cdk-column-FullVin{cursor:help;}',
   ].join('');
 
@@ -624,7 +594,7 @@
       (hero.label ? '<div class="sd-model">' + esc(hero.label) + '</div>' : '') +
       (hero.vin ? '<div class="sd-vin">' + esc(hero.vin) + '</div>' : '') +
       (others > 0 ? '<div class="sd-more">+' + others + ' more</div>' : '');
-    const dispHtml = c.dispatcher ? '<div class="sd-dispatcher">' + esc(c.dispatcher) + '</div>' : '';
+    const costHtml = c.unitCost ? '<div class="sd-unit-cost">' + esc(c.unitCost) + '</div>' : '';
     const psub = [c.pickup.date, trunc(c.pickup.name, MAX_VENUE)].filter(Boolean).join('  ·  ');
     const dsub = [c.delivery.date, trunc(c.delivery.name, MAX_VENUE)].filter(Boolean).join('  ·  ');
     return '<div class="sd-card">' +
@@ -639,7 +609,7 @@
               '<div class="sd-city">' + esc(c.delivery.line || '—') + '</div>' +
               '<div class="sd-sub">' + esc(dsub) + '</div></div>' +
           '</div></div>' +
-          '<div class="sd-col sd-right"><div class="sd-veh">' + vehHtml + '</div>' + dispHtml + '</div>' +
+          '<div class="sd-col sd-right"><div class="sd-veh">' + vehHtml + '</div>' + costHtml + '</div>' +
         '</div></div>';
   }
 
@@ -711,7 +681,7 @@
   // ============================ menu commands =============================
   GM_registerMenuCommand('Set SuperDispatch credentials', () => { promptCreds(); });
   GM_registerMenuCommand('Re-scan now (clear today\'s cache)', () => {
-    GM_setValue('sd_cache', { day: today(), vins: {} });
+    GM_setValue('sd_cache', { version: CACHE_VERSION, day: today(), vins: {} });
     document.querySelectorAll('tr[data-sd-color]').forEach((tr) => { tr.style.removeProperty('background-color'); delete tr.dataset.sdColor; });
     scheduleCheck();
   });
@@ -725,5 +695,5 @@
   hookApply();
   startHover();
   reapply();     // paint on initial load too, in case rows are already present
-  LOG('installed (v0.17.0)');
+  LOG('installed (v0.18.0)');
 })();
