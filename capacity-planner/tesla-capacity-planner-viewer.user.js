@@ -1,346 +1,313 @@
 // ==UserScript==
-// @name         Tesla Capacity Planner — Viewer (read-only)
+// @name         Tesla Capacity Planner — Requested History
 // @namespace    wastake.capacityplanner
-// @version      0.1.0
-// @description  Read-only popup for the Tesla Capacity Planner tab. Adds a launcher button; the popup shows EVERYTHING the page has — every origin → destination-group lane, each day's Confirmed / Scheduled / Requested capacity, conflict flags and last-requested time — in one formatted, scrollable grid. Nothing is editable; it only reads the portal's own two API responses (captured live).
+// @version      0.3.0
+// @description  Persistently tracks Tesla Requested-capacity changes. Changed / Y values are marked red directly on Capacity Planner and show their previous value and delta on hover. No launcher or popup panel.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
 // @match        https://suppliers.teslamotors.com/logistics/*
 // @run-at       document-start
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // ==/UserScript==
 
 /*
- * READ-ONLY VIEWER — no writes, no editable fields. It hooks fetch/XHR at document-start and
- * captures the Capacity Planner tab's own two GET responses, then joins + formats them.
+ * READ-ONLY TESLA ACCESS — no writes and no editable fields. It hooks fetch/XHR at document-start,
+ * captures requestcapacity, and stores Requested-value history privately in Tampermonkey.
  *
- * Data model (see findings.md), both GET under …/api/v1/CapacityPlanner/carrier/ :
- *   getcapacityconfirmations -> data.locationCapacities[] = { originLocationId, isOriginGroup,
- *       groupCapacities[] = { destinationGroupId, confirmCapacities[] =
- *           { capacityDate, capacity (=Confirmed), scheduled, isConflict } } }
- *   requestcapacity          -> data.carrierName, locationRequests[] = { originLocationId,
+ * Data model (see findings.md), GET requestcapacity under …/api/v1/CapacityPlanner/carrier/ :
+ *   data = { carrierId, locationRequests[] = { originLocationId,
  *       originLocationName, groupRequests[] = { destinationGroupId, destinationGroupName,
  *           capacityRequests[] = { date, capacity (=Requested), latestRequestDate } } }
- *   Join key = originLocationId + destinationGroupId + date. Names live only in requestcapacity.
+ *   Persistent key = carrierId + originLocationId + destinationGroupId + date.
  */
 
 (function () {
   'use strict';
-  const LOG = (...a) => console.log('%c[cap-viewer]', 'color:#3457d5;font-weight:bold', ...a);
+  const LOG = (...a) => console.log('%c[cap-history]', 'color:#c62828;font-weight:bold', ...a);
   const ROUTE_RE = /\/logistics\/capacity-planner/i;
+  const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) ? unsafeWindow : window;
+  const REQUEST_HISTORY_KEY = 'cp_requested_history_v1';
+  const HISTORY_LIMIT = 25;
 
-  const state = {
-    conf: null,      // parsed getcapacityconfirmations JSON
-    req: null,       // parsed requestcapacity JSON
-    endpoints: {},   // name -> { url, headers } for Reload replay
-    loading: false,
-    error: null,
-    filter: '',
-    open: false,
-  };
+  const state = { req: null };
 
-  // ---- 1) Capture the two GET responses (and their request headers) ---------
-  function classify(url) {
-    if (!url) return null;
-    if (/getcapacityconfirmations/i.test(url)) return 'conf';
-    if (/requestcapacity/i.test(url)) return 'req';
-    return null;
+  // Persistent per carrier + origin + destination-group + date history. The first value is
+  // a baseline; only a later different Requested value creates a change and a red marker.
+  let requestedHistory = loadRequestedHistory();
+  function loadRequestedHistory() {
+    try {
+      let value = GM_getValue(REQUEST_HISTORY_KEY, null);
+      if (typeof value === 'string') value = JSON.parse(value);
+      if (value && value.entries && typeof value.entries === 'object') return value;
+    } catch (_) {}
+    return { version: 1, entries: {} };
   }
-  function ingest(name, url, headers, text) {
+  function saveRequestedHistory() {
+    try { GM_setValue(REQUEST_HISTORY_KEY, requestedHistory); } catch (_) {}
+  }
+  function historyKey(carrierId, originId, groupId, date) {
+    return [carrierId, originId, groupId, date].join('|');
+  }
+  function trackRequested(json) {
+    const data = json && json.data;
+    if (!data || !Array.isArray(data.locationRequests)) return;
+    const observedAt = new Date().toISOString();
+    const carrierId = data.carrierId == null ? '' : String(data.carrierId);
+    let touched = false, changed = 0;
+    data.locationRequests.forEach((location) => {
+      (location.groupRequests || []).forEach((group) => {
+        (group.capacityRequests || []).forEach((request) => {
+          const date = dayKey(request.date);
+          const value = Number(request.capacity);
+          if (!date || !Number.isFinite(value)) return;
+          const key = historyKey(carrierId, location.originLocationId, group.destinationGroupId, date);
+          let entry = requestedHistory.entries[key];
+          if (!entry) {
+            entry = requestedHistory.entries[key] = {
+              carrierId,
+              originId: location.originLocationId,
+              originName: location.originLocationName || '',
+              groupId: group.destinationGroupId,
+              laneName: group.destinationGroupName || '',
+              date,
+              current: value,
+              previous: null,
+              firstSeen: observedAt,
+              lastSeen: observedAt,
+              changedAt: null,
+              changes: [],
+            };
+          } else {
+            entry.originName = location.originLocationName || entry.originName || '';
+            entry.laneName = group.destinationGroupName || entry.laneName || '';
+            entry.lastSeen = observedAt;
+            if (Number(entry.current) !== value) {
+              const previous = Number(entry.current);
+              entry.previous = Number.isFinite(previous) ? previous : null;
+              entry.current = value;
+              entry.changedAt = observedAt;
+              if (!Array.isArray(entry.changes)) entry.changes = [];
+              entry.changes.push({ from: entry.previous, to: value, at: observedAt });
+              if (entry.changes.length > HISTORY_LIMIT) entry.changes.splice(0, entry.changes.length - HISTORY_LIMIT);
+              changed++;
+            }
+          }
+          entry.latestRequestDate = request.latestRequestDate || entry.latestRequestDate || null;
+          touched = true;
+        });
+      });
+    });
+    if (touched) saveRequestedHistory();
+    if (changed) LOG('requested capacity changes detected', changed);
+    scheduleRequestedAnnotations();
+  }
+
+  // ---- capture requestcapacity ----------------------------------------------
+  function classify(url) {
+    return url && /requestcapacity/i.test(url) ? 'req' : null;
+  }
+  function ingest(text) {
     try {
       const j = JSON.parse(text);
       if (!j || !j.data) return;
-      state[name] = j;
-      state.endpoints[name] = { url, headers: headers || {} };
-      LOG('captured', name);
-      if (state.open) render();
-      ensureLauncher();
+      state.req = j;
+      trackRequested(j);
+      LOG('captured requestcapacity');
     } catch (_) {}
   }
 
   // fetch hook
-  const oFetch = window.fetch;
+  const oFetch = PAGE.fetch;
   if (oFetch) {
-    window.fetch = function (input, init) {
+    PAGE.fetch = function (input, init) {
       const url = (input && input.url) || input;
       const name = classify(url);
-      const headers = name ? extractHeaders((init && init.headers) || (input && input.headers)) : null;
       const p = oFetch.apply(this, arguments);
-      if (name) p.then((r) => { r.clone().text().then((t) => ingest(name, url, headers, t)).catch(() => {}); }).catch(() => {});
+      if (name) p.then((r) => { r.clone().text().then(ingest).catch(() => {}); }).catch(() => {});
       return p;
     };
   }
-  function extractHeaders(h) {
-    const out = {};
-    if (!h) return out;
-    try {
-      if (typeof Headers !== 'undefined' && h instanceof Headers) h.forEach((v, k) => { out[k] = v; });
-      else if (Array.isArray(h)) h.forEach(([k, v]) => { out[k] = v; });
-      else for (const k of Object.keys(h)) out[k] = h[k];
-    } catch (_) {}
-    return out;
-  }
 
   // XHR hook
-  const X = window.XMLHttpRequest;
-  const oOpen = X.prototype.open, oSend = X.prototype.send, oSetH = X.prototype.setRequestHeader;
-  X.prototype.open = function (m, u) { this.__cp = { url: u, headers: {} }; return oOpen.apply(this, arguments); };
-  X.prototype.setRequestHeader = function (k, v) { if (this.__cp) this.__cp.headers[k] = v; return oSetH.apply(this, arguments); };
+  const X = PAGE.XMLHttpRequest;
+  const oOpen = X.prototype.open, oSend = X.prototype.send;
+  X.prototype.open = function (m, u) { this.__cpHistoryUrl = u; return oOpen.apply(this, arguments); };
   X.prototype.send = function () {
     const xhr = this;
-    if (xhr.__cp) {
-      const name = classify(xhr.__cp.url);
-      if (name) xhr.addEventListener('load', function () { try { ingest(name, xhr.__cp.url, xhr.__cp.headers, xhr.responseText); } catch (_) {} });
-    }
+    if (classify(xhr.__cpHistoryUrl)) xhr.addEventListener('load', function () { try { ingest(xhr.responseText); } catch (_) {} });
     return oSend.apply(this, arguments);
   };
-
-  // ---- 2) Reload = replay the captured GETs with their captured headers -----
-  const HEADER_DENY = new Set(['cookie', 'content-length', 'host', 'connection', 'accept-encoding', 'user-agent']);
-  function replayHeaders(h) { const out = { 'Accept': 'application/json' }; if (h) for (const k of Object.keys(h)) if (!HEADER_DENY.has(k.toLowerCase())) out[k] = h[k]; return out; }
-  async function reload() {
-    const names = Object.keys(state.endpoints);
-    if (!names.length) { state.error = 'Nothing captured yet — open the Capacity Planner tab so its data loads, then reopen.'; render(); return; }
-    state.loading = true; state.error = null; render();
-    try {
-      await Promise.all(names.map(async (name) => {
-        const ep = state.endpoints[name];
-        const r = await fetch(ep.url, { method: 'GET', headers: replayHeaders(ep.headers), credentials: 'omit' });
-        if (!r.ok) throw new Error(name + ' HTTP ' + r.status);
-        const j = await r.json();
-        if (j && j.data) state[name] = j;
-      }));
-    } catch (e) { state.error = 'Reload failed (' + (e && e.message || e) + '). The passively-captured data is still shown; refresh the portal page for the latest.'; }
-    state.loading = false; render();
-  }
 
   // ---- helpers --------------------------------------------------------------
   const dayKey = (s) => String(s || '').slice(0, 10);            // "2026-07-10"
   function parseDay(k) { const p = k.split('-'); return new Date(+p[0], +p[1] - 1, +p[2]); }   // local midnight
-  const WD = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  function fmtCol(k) { const d = parseDay(k); return { wd: WD[d.getDay()], md: (d.getMonth() + 1) + '/' + d.getDate(), we: d.getDay() === 0 || d.getDay() === 6 }; }
-  const todayKey = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
-  function fmtStamp(s) { if (!s) return ''; const d = new Date(s); return isNaN(d) ? String(s) : d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
   const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 
-  // ---- 3) Build the joined model -------------------------------------------
-  // origins: [{ id, name, groups:[{ id, name, cells:{ dayKey:{c,s,r,conflict,lr} } }] }], dates:[dayKey…]
-  function buildModel() {
-    const req = state.req && state.req.data, conf = state.conf && state.conf.data;
-    if (!req && !conf) return null;
-    const dates = new Set();
-    const originMap = new Map();   // id -> { id, name, groupMap: Map(id -> {id,name,cells}) }
-    const getOrigin = (id, name) => {
-      let o = originMap.get(id);
-      if (!o) { o = { id, name: name || ('Origin ' + id), groupMap: new Map() }; originMap.set(id, o); }
-      else if (name && (!o.name || /^Origin /.test(o.name))) o.name = name;
-      return o;
-    };
-    const getGroup = (o, id, name) => {
-      let g = o.groupMap.get(id);
-      if (!g) { g = { id, name: name || ('Group ' + id), cells: {} }; o.groupMap.set(id, g); }
-      else if (name && (!g.name || /^Group /.test(g.name))) g.name = name;
-      return g;
-    };
-
-    // requests carry the names + Requested + last-requested time
-    (req && req.locationRequests || []).forEach((L) => {
-      const o = getOrigin(L.originLocationId, L.originLocationName);
-      (L.groupRequests || []).forEach((G) => {
-        const g = getGroup(o, G.destinationGroupId, G.destinationGroupName);
-        (G.capacityRequests || []).forEach((c) => {
-          const k = dayKey(c.date); dates.add(k);
-          const cell = g.cells[k] || (g.cells[k] = {});
-          cell.r = c.capacity; cell.lr = c.latestRequestDate;
+  // ---- persistent Requested-change markers on Tesla's own grid ------------
+  const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  let requestedAnnotationTimer = null, requestedObserver = null, requestedTip = null;
+  const normName = (s) => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  function dateKeyFromLocal(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  function visibleWeekStart() {
+    const chip = [...document.querySelectorAll('tsl-chip span')].find((el) =>
+      /^[A-Za-z]{3}\s+\d{1,2}\s*-\s*[A-Za-z]{3}\s+\d{1,2}\s+\d{4}$/.test(el.textContent.trim()));
+    if (!chip) return null;
+    const match = chip.textContent.trim().match(/^([A-Za-z]{3})\s+(\d{1,2})\s*-\s*([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4})$/);
+    if (!match) return null;
+    const startMonth = MONTHS[match[1].toLowerCase()], endMonth = MONTHS[match[3].toLowerCase()];
+    if (startMonth == null || endMonth == null) return null;
+    const endYear = Number(match[5]);
+    const startYear = startMonth > endMonth ? endYear - 1 : endYear;
+    return new Date(startYear, startMonth, Number(match[2]));
+  }
+  function requestLaneIndex() {
+    const data = state.req && state.req.data, index = new Map();
+    if (!data) return index;
+    (data.locationRequests || []).forEach((location) => {
+      (location.groupRequests || []).forEach((group) => {
+        index.set(normName(location.originLocationName) + '|' + normName(group.destinationGroupName), {
+          carrierId: data.carrierId == null ? '' : String(data.carrierId),
+          originId: location.originLocationId,
+          groupId: group.destinationGroupId,
         });
       });
     });
-    // confirmations carry Confirmed + Scheduled + conflict flag
-    (conf && conf.locationCapacities || []).forEach((L) => {
-      const o = getOrigin(L.originLocationId, null);
-      (L.groupCapacities || []).forEach((G) => {
-        const g = getGroup(o, G.destinationGroupId, null);
-        (G.confirmCapacities || []).forEach((c) => {
-          const k = dayKey(c.capacityDate); dates.add(k);
-          const cell = g.cells[k] || (g.cells[k] = {});
-          cell.c = c.capacity; cell.s = c.scheduled; cell.conflict = !!c.isConflict;
-        });
-      });
-    });
-
-    const origins = [...originMap.values()].map((o) => ({ id: o.id, name: o.name, groups: [...o.groupMap.values()] }));
-    return {
-      carrierName: (req && req.carrierName) || (state.req && state.req.data && state.req.data.carrierName) || '',
-      origins,
-      dates: [...dates].sort(),
-    };
+    return index;
   }
-
-  // ---- 4) Panel -------------------------------------------------------------
-  let host, root, body, launcher;
-
-  function ensureLauncher() {
-    if (launcher || !document.body) return;
-    launcher = document.createElement('button');
-    launcher.id = 'cap-launcher';
-    launcher.textContent = 'Capacity Planner';
-    // Matches the repo's bottom-right pill convention (see dispatch-dashboard .launch).
-    launcher.style.cssText = 'position:fixed;bottom:12px;right:12px;z-index:2147483647;background:#111;color:#fff;font:12px/1.3 system-ui,Segoe UI,Arial,sans-serif;padding:6px 10px;border:0;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.35);opacity:.92;cursor:pointer;transition:opacity .15s;';
-    launcher.addEventListener('mouseenter', () => launcher.style.opacity = '1');
-    launcher.addEventListener('mouseleave', () => launcher.style.opacity = '.92');
-    launcher.addEventListener('click', () => { state.open ? hidePanel() : showPanel(); });
-    document.body.appendChild(launcher);
-    applyRouteVisibility();
-  }
-
-  function showPanel() { ensurePanel(); state.open = true; host.style.display = ''; if (launcher) launcher.style.opacity = '1'; render(); }
-  function hidePanel() { state.open = false; if (host) host.style.display = 'none'; if (launcher) launcher.style.opacity = '.92'; }
-
-  function ensurePanel() {
-    if (host || !document.documentElement) return;
-    host = document.createElement('div');
-    host.id = 'cap-viewer-host';
-    const navW = 210, pw = Math.min(1320, window.innerWidth * 0.96);
-    let left = navW + (window.innerWidth - navW - pw) / 2;
-    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-    host.style.cssText = `position:fixed;top:52px;left:${Math.round(left)}px;width:${Math.round(pw)}px;height:86vh;z-index:2147483647;`;
-    root = host.attachShadow({ mode: 'open' });
-    root.innerHTML = `
-      <style>
-        *{box-sizing:border-box;font-family:Inter,system-ui,Arial,sans-serif}
-        .panel{position:relative;display:flex;flex-direction:column;height:100%;background:#fff;color:#171a20;border:1px solid #d0d3d6;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);overflow:hidden}
-        .hd{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#171a20;color:#fff;cursor:move;user-select:none}
-        .hd .ttl{font-weight:700;font-size:14px}.hd .sub{font-size:12px;opacity:.7;font-weight:500;flex:1}
-        .hd .roflag{font-size:11px;font-weight:800;color:#7fd18b;letter-spacing:.06em;white-space:nowrap}
-        .hd button{background:#2b2f37;color:#fff;border:0;border-radius:6px;padding:4px 9px;font-size:13px;cursor:pointer}.hd button:hover{background:#3a3f49}
-        .tools{display:flex;align-items:center;gap:12px;padding:8px 12px;border-bottom:1px solid #eee;flex-wrap:wrap}
-        .tools input{width:220px;padding:6px 8px;border:1px solid #d0d3d6;border-radius:6px;font-size:13px}
-        .legend{display:flex;gap:14px;align-items:center;font-size:12px;color:#5c5e62;flex-wrap:wrap}
-        .legend b{color:#171a20;font-variant-numeric:tabular-nums}
-        .legend b.big{font-size:14px;font-weight:800}
-        .legend i{font-style:normal;color:#8a8d92;margin-left:1px}
-        .swatch{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin-right:3px}
-        .bodywrap{flex:1;overflow:auto;padding:0}
-        table{border-collapse:separate;border-spacing:0;font-size:12px;width:max-content;min-width:100%}
-        th,td{padding:4px 7px;border-bottom:1px solid #eef0f2;border-right:1px solid #f2f3f5;white-space:nowrap;text-align:center}
-        thead th{position:sticky;top:0;background:#f6f7f9;z-index:3;font-weight:700;color:#5c5e62;border-bottom:1px solid #d8dbde}
-        thead th.we{background:#eef1f6}
-        thead th .md{font-weight:800;color:#171a20}
-        thead th.today{background:#eaf0ff;color:#3457d5}
-        th.lane,td.lane{position:sticky;left:0;background:#fff;z-index:2;text-align:left;min-width:150px;font-weight:600;border-right:1px solid #e2e4e7}
-        thead th.lane{z-index:4}
-        tr.orow td,tr.orow th{background:#171a20;color:#fff;font-weight:700;border-bottom:1px solid #171a20}
-        tr.orow th.lane{background:#171a20;color:#fff;font-size:13px}
-        tr.orow td .c{color:#fff}tr.orow td .sr{color:#c7cbd1}
-        td.cell{font-variant-numeric:tabular-nums}
-        td.cell.we{background:#fafbfc}
-        td.cell.cf{background:#fff1f0}
-        td.cell.cf .c{color:#c0392b}
-        td.cell.empty{color:#c8cbcf}
-        .c{display:block;font-size:14px;font-weight:800;line-height:1.1}
-        .sr{display:block;font-size:10px;color:#8a8d92;line-height:1.15;margin-top:1px;white-space:nowrap}
-        .sr i{font-style:normal;opacity:.55;margin-left:1px}
-        td.lane.grp{padding-left:16px;font-weight:500;color:#33363b}
-        .empty-msg{padding:26px;text-align:center;color:#9a9da1;font-size:13px}
-        .empty-msg.err{color:#c0392b}
-      </style>
-      <div class="panel">
-        <div class="hd" id="hd">
-          <div class="ttl">Capacity Planner</div><div class="sub" id="sub"></div>
-          <span class="roflag">● READ-ONLY</span>
-          <button id="reload">Reload</button><button id="close">×</button>
-        </div>
-        <div class="tools">
-          <input id="filter" placeholder="Filter lane / origin…" />
-          <div class="legend">
-            <span><b class="big">3</b> Confirmed — capacity you've committed</span>
-            <span><b>3</b><i>s</i> Scheduled — loads actually booked</span>
-            <span><b>3</b><i>r</i> Requested — capacity Tesla asked for</span>
-            <span><span class="swatch" style="background:#fff1f0;border:1px solid #f3c4c0"></span>conflict (mismatch — needs review)</span>
-            <span><span class="swatch" style="background:#eef1f6;border:1px solid #dfe3ea"></span>weekend</span>
-          </div>
-        </div>
-        <div class="bodywrap" id="bodywrap"></div>
-      </div>`;
-    document.documentElement.appendChild(host);
-    body = { sub: root.getElementById('sub'), wrap: root.getElementById('bodywrap'), filter: root.getElementById('filter') };
-    root.getElementById('close').addEventListener('click', hidePanel);
-    root.getElementById('reload').addEventListener('click', reload);
-    body.filter.addEventListener('input', () => { state.filter = body.filter.value.trim().toLowerCase(); render(); });
-    makeDraggable(root.getElementById('hd'), host);
-  }
-
-  function makeDraggable(handle, target) {
-    let sx, sy, ox, oy, drag = false;
-    handle.addEventListener('mousedown', (e) => { if (e.target.tagName === 'BUTTON') return; drag = true; sx = e.clientX; sy = e.clientY; const r = target.getBoundingClientRect(); ox = r.left; oy = r.top; target.style.left = ox + 'px'; target.style.top = oy + 'px'; e.preventDefault(); });
-    window.addEventListener('mousemove', (e) => { if (!drag) return; target.style.left = (ox + e.clientX - sx) + 'px'; target.style.top = (oy + e.clientY - sy) + 'px'; });
-    window.addEventListener('mouseup', () => { drag = false; });
-  }
-
-  // ---- 5) Render ------------------------------------------------------------
-  function cellHtml(cell, we) {
-    if (!cell || (cell.c == null && cell.s == null && cell.r == null)) return `<td class="cell empty${we ? ' we' : ''}">·</td>`;
-    const c = cell.c != null ? cell.c : 0, s = cell.s != null ? cell.s : 0, r = cell.r != null ? cell.r : 0;
-    const cls = 'cell' + (cell.conflict ? ' cf' : '') + (we ? ' we' : '');
-    const title = `Confirmed ${c} · Scheduled ${s} · Requested ${r}` + (cell.lr ? ` · last requested ${fmtStamp(cell.lr)}` : '') + (cell.conflict ? ' · CONFLICT' : '');
-    return `<td class="${cls}" title="${esc(title)}"><span class="c">${c}</span><span class="sr">${s}<i>s</i> ${r}<i>r</i></span></td>`;
-  }
-  function originSummaryCell(groups, k, we) {
-    let c = 0, s = 0, r = 0, has = false;
-    groups.forEach((g) => { const cell = g.cells[k]; if (cell) { has = true; if (cell.c != null) c += cell.c; if (cell.s != null) s += cell.s; if (cell.r != null) r += cell.r; } });
-    if (!has) return `<td class="${we ? 'we' : ''}">·</td>`;
-    return `<td class="${we ? 'we' : ''}"><span class="c">${c}</span><span class="sr">${s}<i>s</i> ${r}<i>r</i></span></td>`;
-  }
-
-  function render() {
-    if (!root) return;
-    const model = buildModel();
-    if (state.error) { body.sub.textContent = ''; body.wrap.innerHTML = `<div class="empty-msg err">${esc(state.error)}</div>`; return; }
-    if (state.loading) { body.sub.textContent = 'reloading…'; }
-    if (!model) { body.sub.textContent = ''; body.wrap.innerHTML = `<div class="empty-msg">Waiting for the Capacity Planner data to load…<br>(open / refresh the Capacity Planner tab)</div>`; return; }
-
-    const tk = todayKey();
-    let origins = model.origins;
-    if (state.filter) {
-      const f = state.filter;
-      origins = origins.map((o) => {
-        const oMatch = o.name.toLowerCase().includes(f);
-        const groups = oMatch ? o.groups : o.groups.filter((g) => g.name.toLowerCase().includes(f));
-        return groups.length ? { ...o, groups } : null;
-      }).filter(Boolean);
+  function ensureRequestedUi() {
+    if (!document.getElementById('cp-requested-history-style')) {
+      const style = document.createElement('style');
+      style.id = 'cp-requested-history-style';
+      style.textContent = `
+        .cp-request-changed{display:inline-flex!important;align-items:center!important;gap:4px!important;background:transparent!important;
+          color:transparent!important;border:0!important;padding:0!important;margin-left:2px!important;font-size:0!important;cursor:help!important}
+        .cp-request-changed::before{content:'/';color:#171a20;font-size:14px;font-weight:400;line-height:1.25}
+        .cp-request-changed::after{content:attr(data-cp-current);display:inline-block;background:#c62828;color:#fff;
+          border:1px solid #9d1717;border-radius:4px;padding:2px 6px;font-size:14px;font-weight:700;line-height:1.25;
+          box-shadow:0 1px 3px rgba(120,0,0,.25)}
+        #cp-request-history-tip{position:fixed;display:none;z-index:2147483647;width:292px;padding:12px 13px;
+          background:#171a20;color:#fff;border:1px solid #34383f;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);
+          font:13px/1.35 system-ui,Segoe UI,Arial,sans-serif;pointer-events:none}
+        #cp-request-history-tip .cp-tip-title{font-weight:800;font-size:13px;color:#ff9b95;margin-bottom:5px}
+        #cp-request-history-tip .cp-tip-route{font-weight:650;white-space:normal;margin-bottom:2px}
+        #cp-request-history-tip .cp-tip-date{font-size:12px;color:#b9bec6;margin-bottom:10px}
+        #cp-request-history-tip .cp-tip-values{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+        #cp-request-history-tip .cp-tip-values span{display:block;color:#aeb4bd;font-size:10px;text-transform:uppercase;letter-spacing:.04em}
+        #cp-request-history-tip .cp-tip-values b{display:block;color:#fff;font-size:18px;margin-top:1px}
+        #cp-request-history-tip .cp-tip-values b.delta-up{color:#ff9089}
+        #cp-request-history-tip .cp-tip-values b.delta-down{color:#8fc4ff}
+        #cp-request-history-tip .cp-tip-observed{margin-top:9px;padding-top:8px;border-top:1px solid #34383f;color:#b9bec6;font-size:11px}
+      `;
+      (document.head || document.documentElement).appendChild(style);
     }
-
-    const nOrigins = model.origins.length;
-    const nGroups = model.origins.reduce((s, o) => s + o.groups.length, 0);
-    body.sub.textContent = `· ${model.carrierName || ''} · ${nOrigins} origin${nOrigins === 1 ? '' : 's'} · ${nGroups} lanes · ${model.dates.length} days`;
-
-    if (!origins.length) { body.wrap.innerHTML = `<div class="empty-msg">No lane matches “${esc(state.filter)}”.</div>`; return; }
-
-    const cols = model.dates.map(fmtCol);
-    let thead = `<tr><th class="lane">Lane</th>` + model.dates.map((k, i) => {
-      const c = cols[i], today = k === tk;
-      return `<th class="${c.we ? 'we' : ''}${today ? ' today' : ''}"><div>${c.wd}</div><div class="md">${c.md}</div></th>`;
-    }).join('') + `</tr>`;
-
-    let rows = '';
-    origins.forEach((o) => {
-      // origin roll-up row
-      rows += `<tr class="orow"><th class="lane">${esc(o.name)}</th>` + model.dates.map((k, i) => originSummaryCell(o.groups, k, cols[i].we)).join('') + `</tr>`;
-      // one row per destination group
-      o.groups.forEach((g) => {
-        rows += `<tr><td class="lane grp">${esc(g.name)}</td>` + model.dates.map((k, i) => cellHtml(g.cells[k], cols[i].we)).join('') + `</tr>`;
+    if (!requestedTip) {
+      requestedTip = document.createElement('div');
+      requestedTip.id = 'cp-request-history-tip';
+      document.documentElement.appendChild(requestedTip);
+    }
+  }
+  function scheduleRequestedAnnotations() {
+    if (!ROUTE_RE.test(location.pathname)) return;
+    clearTimeout(requestedAnnotationTimer);
+    requestedAnnotationTimer = setTimeout(applyRequestedAnnotations, 80);
+  }
+  function applyRequestedAnnotations() {
+    if (!ROUTE_RE.test(location.pathname) || !state.req) return;
+    ensureRequestedUi();
+    const start = visibleWeekStart();
+    if (!start) return;
+    const lanes = requestLaneIndex();
+    let currentOrigin = '';
+    document.querySelectorAll('.grid-row.region-background, .grid-row.white-background').forEach((row) => {
+      const nameNode = row.querySelector('.region-name span');
+      const name = nameNode ? nameNode.textContent.trim() : '';
+      if (row.classList.contains('region-background')) {
+        currentOrigin = name;
+        return;
+      }
+      if (!row.classList.contains('white-background') || !currentOrigin || !name) return;
+      const lane = lanes.get(normName(currentOrigin) + '|' + normName(name));
+      if (!lane) return;
+      row.querySelectorAll('.region-cell').forEach((cell, index) => {
+        const flag = cell.querySelector('.demand .demand-flag');
+        if (!flag) return;
+        const date = new Date(start.getFullYear(), start.getMonth(), start.getDate() + index);
+        const key = historyKey(lane.carrierId, lane.originId, lane.groupId, dateKeyFromLocal(date));
+        const entry = requestedHistory.entries[key];
+        const changed = entry && Array.isArray(entry.changes) && entry.changes.length > 0;
+        flag.classList.toggle('cp-request-changed', !!changed);
+        if (changed) {
+          flag.dataset.cpHistoryKey = key;
+          flag.dataset.cpCurrent = entry.current;
+          flag.setAttribute('aria-label', `Requested capacity changed from ${entry.previous} to ${entry.current}`);
+        } else {
+          delete flag.dataset.cpHistoryKey;
+          delete flag.dataset.cpCurrent;
+          flag.removeAttribute('aria-label');
+        }
       });
     });
-
-    body.wrap.innerHTML = `<table><thead>${thead}</thead><tbody>${rows}</tbody></table>`;
+  }
+  function showRequestedTip(target) {
+    const entry = requestedHistory.entries[target.dataset.cpHistoryKey];
+    if (!entry || !entry.changes || !entry.changes.length) return;
+    ensureRequestedUi();
+    const latest = entry.changes[entry.changes.length - 1];
+    const delta = Number(latest.to) - Number(latest.from);
+    const deltaText = (delta > 0 ? '+' : '') + delta;
+    const date = parseDay(entry.date);
+    const dateText = isNaN(date) ? entry.date : date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
+    const observed = new Date(latest.at);
+    requestedTip.innerHTML = `
+      <div class="cp-tip-title">Requested capacity changed</div>
+      <div class="cp-tip-route">${esc(entry.originName)} → ${esc(entry.laneName)}</div>
+      <div class="cp-tip-date">${esc(dateText)}</div>
+      <div class="cp-tip-values">
+        <div><span>Previous</span><b>${esc(latest.from)}</b></div>
+        <div><span>Current</span><b>${esc(latest.to)}</b></div>
+        <div><span>Change</span><b class="${delta > 0 ? 'delta-up' : delta < 0 ? 'delta-down' : ''}">${esc(deltaText)}</b></div>
+      </div>
+      <div class="cp-tip-observed">Detected ${esc(isNaN(observed) ? latest.at : observed.toLocaleString())}</div>`;
+    requestedTip.style.display = 'block';
+    const targetRect = target.getBoundingClientRect(), tipRect = requestedTip.getBoundingClientRect();
+    let left = targetRect.right + 10;
+    if (left + tipRect.width > window.innerWidth - 8) left = targetRect.left - tipRect.width - 10;
+    let top = targetRect.top - 8;
+    top = Math.max(8, Math.min(top, window.innerHeight - tipRect.height - 8));
+    requestedTip.style.left = Math.max(8, left) + 'px';
+    requestedTip.style.top = top + 'px';
+  }
+  function hideRequestedTip() { if (requestedTip) requestedTip.style.display = 'none'; }
+  function installRequestedTrackingUi() {
+    ensureRequestedUi();
+    if (!requestedObserver) {
+      requestedObserver = new MutationObserver(scheduleRequestedAnnotations);
+      requestedObserver.observe(document.documentElement, { childList: true, subtree: true });
+      document.addEventListener('mouseover', (event) => {
+        const target = event.target && event.target.closest && event.target.closest('.cp-request-changed');
+        if (target) showRequestedTip(target);
+      }, true);
+      document.addEventListener('mouseout', (event) => {
+        const target = event.target && event.target.closest && event.target.closest('.cp-request-changed');
+        if (target && (!event.relatedTarget || !target.contains(event.relatedTarget))) hideRequestedTip();
+      }, true);
+      PAGE.addEventListener('scroll', hideRequestedTip, true);
+    }
+    scheduleRequestedAnnotations();
   }
 
-  // ---- 6) Show launcher/panel only on the Capacity Planner route ------------
+  // ---- activate only on the Capacity Planner route --------------------------
   function applyRouteVisibility() {
     const on = ROUTE_RE.test(location.pathname);
-    if (launcher) launcher.style.display = on ? '' : 'none';
-    if (!on && state.open) hidePanel();
+    if (on) installRequestedTrackingUi();
+    else hideRequestedTip();
   }
   function setupNav() {
     ['pushState', 'replaceState'].forEach((m) => { const o = history[m]; history[m] = function () { const r = o.apply(this, arguments); applyRouteVisibility(); return r; }; });
@@ -350,10 +317,20 @@
     setInterval(() => { if (location.href !== last) { last = location.href; applyRouteVisibility(); } }, 300);
   }
 
-  function boot() { ensureLauncher(); setupNav(); }
+  function boot() { setupNav(); applyRouteVisibility(); }
   if (document.body) boot();
   else document.addEventListener('DOMContentLoaded', boot, { once: true });
 
-  window.__capViewer = { state, render, reload, buildModel };
-  LOG('installed (read-only). Waiting for Capacity Planner data…');
+  try {
+    GM_registerMenuCommand('Clear Capacity Planner requested history', () => {
+      if (!PAGE.confirm('Clear all locally recorded Requested-capacity history?')) return;
+      requestedHistory = { version: 1, entries: {} };
+      try { GM_deleteValue(REQUEST_HISTORY_KEY); } catch (_) {}
+      hideRequestedTip();
+      applyRequestedAnnotations();
+    });
+  } catch (_) {}
+
+  PAGE.__capRequestedHistory = { state, requestedHistory: () => requestedHistory, applyRequestedAnnotations };
+  LOG('installed (read-only Tesla access + local Requested history). Waiting for Capacity Planner data…');
 })();
