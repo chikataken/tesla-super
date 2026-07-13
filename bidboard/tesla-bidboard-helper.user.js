@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.25.1
+// @version      0.25.2
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -295,6 +295,7 @@
   }
 
   // ---- Placement: embed into Tesla's own layout, or fall back to a fixed overlay --------------
+  const PANEL_GAP = 10;
   let hiddenEl = null, observedParent = null, mo = null, moScheduled = false;
 
   // The board content is the tall, wide sibling of the left nav inside its parent (`.main`).
@@ -324,8 +325,8 @@
     if (host.parentElement !== parent || host.nextElementSibling !== content) parent.insertBefore(host, content);
     const flexRow = /flex/.test(getComputedStyle(parent).display);
     host.style.cssText = flexRow
-      ? 'z-index:2147483647;flex:1 1 0%;min-width:0;align-self:stretch;display:block;'
-      : `z-index:2147483647;display:block;width:${boxW};height:${boxH};`;
+      ? `z-index:2147483647;flex:1 1 0%;min-width:0;align-self:stretch;display:block;padding-left:${PANEL_GAP}px;box-sizing:border-box;`
+      : `z-index:2147483647;display:block;width:${boxW};height:${boxH};padding-left:${PANEL_GAP}px;box-sizing:border-box;`;
     state.embedded = true;
     ensureObserver(parent);
     return true;
@@ -350,7 +351,7 @@
     const nav = document.querySelector('tsl-nav, nav.main-nav, [class*="main-nav"]');
     let left = 210, top = 56;
     if (nav) { const r = nav.getBoundingClientRect(); if (r.width > 40 && r.height > 200) { left = Math.max(0, Math.round(r.right)); top = Math.max(0, Math.round(r.top)); } }
-    host.style.cssText = `position:fixed;z-index:2147483647;left:${left}px;top:${top}px;right:auto;transform:none;width:${Math.max(360, window.innerWidth - left)}px;height:${Math.max(240, window.innerHeight - top)}px;`;
+    host.style.cssText = `position:fixed;z-index:2147483647;left:${left}px;top:${top}px;right:auto;transform:none;width:${Math.max(360, window.innerWidth - left)}px;height:${Math.max(240, window.innerHeight - top)}px;padding-left:${PANEL_GAP}px;box-sizing:border-box;`;
   }
 
   // Prefer embedding; if the container isn't there, use the overlay so the panel never vanishes.
