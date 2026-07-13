@@ -10,6 +10,8 @@ from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
 import config
@@ -20,9 +22,9 @@ from models import OrderRow, OrderDetail, Vehicle
 VIN_RE = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b")          # 17-char VIN (no I/O/Q)
 ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
 
-# Order delivery photos oldest-first so the batched VIN scan (scan_for_vin_lazy) reads
-# the door-jamb VIN sticker — shot first, so it's among the OLDEST photos — in its first
-# batch and can skip the rest of a huge section. Set False to try newest-first instead.
+# Order delivery photos oldest-first so the VIN scan reaches the door-jamb VIN sticker
+# — shot first, so it's among the OLDEST photos — early: scan_for_vin short-circuits on
+# a full VIN read and skips OCR of everything after it. Set False for newest-first.
 PHOTOS_OLDEST_FIRST = True
 
 
@@ -382,6 +384,18 @@ def get_delivery_photos_api(vins: list[str], order_guid: str | None = None) -> l
     return sections
 
 
+# One pooled session for all photo downloads: reuse the TCP+TLS connection to GCS
+# instead of a fresh handshake per photo (which costs about as much as the download
+# itself), and retry transient failures — the caller skips failed URLs silently, so
+# without retries a network blip DROPS a photo, and a dropped door-jamb shot becomes
+# a false "No VIN photo". GETs are idempotent, so retrying is safe. The read timeout
+# (30s) also bounds the stall if a pooled connection died silently (NAT drop).
+_photo_session = requests.Session()
+_photo_session.mount("https://", HTTPAdapter(
+    max_retries=Retry(total=2, connect=2, read=2, backoff_factor=0.5,
+                      status_forcelist=[500, 502, 503, 504])))
+
+
 def fetch_images_http(urls: list[str]) -> list[bytes]:
     """Download photo bytes straight from the public GCS URLs over plain HTTP — no
     browser tab needed (the API photo path has no bol_page to fetch through). Mirrors
@@ -390,7 +404,7 @@ def fetch_images_http(urls: list[str]) -> list[bytes]:
     out = []
     for u in urls:
         try:
-            r = requests.get(u, timeout=60)
+            r = _photo_session.get(u, timeout=(5, 30))
             if r.ok:
                 out.append(r.content)
         except Exception:

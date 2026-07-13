@@ -1,0 +1,31 @@
+# systemd USER unit for the shared CDP Chrome (127.0.0.1:9222).
+# The one logged-in automation Chrome (tesla-reconcile/.auth profile) that
+# shipment-creator, terminals-sync, the direct-pickup worker and cleaner flows
+# all attach to over CDP. Previously hand-started; this keeps it up across
+# reboots (with linger enabled) and restarts it if it dies.
+#
+# Install (no sudo):
+#   ln -sf "$PWD/chrome-cdp.service" ~/.config/systemd/user/chrome-cdp.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now chrome-cdp.service
+#
+# Watch / control:
+#   journalctl --user -u chrome-cdp -f
+#   systemctl --user restart chrome-cdp
+#
+# NOTE: needs a graphical session to exist (GUI Chrome). With linger but no
+# login it will retry until the session appears.
+
+[Unit]
+Description=Shared CDP Chrome on :9222 (tesla-reconcile .auth profile)
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/projects/tesla-super/tesla-reconcile
+ExecStart=%h/projects/tesla-super/tesla-reconcile/run_chrome_cdp.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

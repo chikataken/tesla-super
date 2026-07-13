@@ -207,10 +207,11 @@ def _photo_check(ctx_pages, row, detail, vins, dry_run, skip_vision=False):
             # section, so we don't send another vehicle's photos for this VIN.
             sec = _section_for_vin(sections, vin, idx, len(vins))
             urls = sec["urls"] if sec else [u for s in sections for u in s["urls"]]
-            # Newest-first batched scan: downloads + OCRs ~20 photos at a time and stops
-            # as soon as one reads the full VIN, so huge sections don't pull every photo.
-            # If no full read is found it scans the whole section, so nothing is missed.
-            images, cand = ocr.scan_for_vin_lazy(sd.fetch_images_http, urls, vin)
+            # Download the whole section up front (pooled HTTP session keeps this
+            # cheap), then OCR it. scan_for_vin still short-circuits the moment a
+            # photo reads the full VIN, so ordering (oldest-first) still pays off.
+            images = sd.fetch_images_http(urls)
+            cand = ocr.scan_for_vin(images, vin)
             if not cand:
                 print(f"    {vin}: no VIN found in its {len(urls)}-photo section "
                       f"-> No VIN photo")

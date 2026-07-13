@@ -332,34 +332,6 @@ def scan_for_vin(images: list[bytes], expected_vin: str,
     return []
 
 
-def scan_for_vin_lazy(fetch, urls: list[str], expected_vin: str,
-                      batch_size: int = 20, max_send: int = 10,
-                      debug: bool = False) -> tuple[list[bytes], list[int]]:
-    """Batched variant of scan_for_vin that DOWNLOADS photos on demand.
-
-    `urls` must be ordered so the photos most likely to show the VIN come FIRST (see
-    get_delivery_photos_api — the door-jamb VIN sticker is usually shot first, so the
-    section is ordered oldest-first). We fetch + scan just the first `batch_size`
-    photos; if scan_for_vin finds any VIN candidate there, we use it and the older
-    photos are never downloaded or OCR'd. ONLY if the first batch yields nothing do we
-    fetch the rest and scan the whole section, so a VIN is never missed. `fetch(list)
-    -> list[bytes]` downloads a batch of urls.
-
-    Returns (images, indices) — the scan_for_vin contract, so the caller does
-    `sent = [images[i] for i in indices]`. Sections <= batch_size behave EXACTLY like
-    scan_for_vin (one scan over everything); the savings (download + OCR + peak memory)
-    come entirely from the few huge sections whose VIN is found in the first batch."""
-    head = fetch(urls[:batch_size])
-    cand = scan_for_vin(head, expected_vin, max_send=max_send, debug=debug)
-    if cand or len(urls) <= batch_size:
-        return head, cand                        # found it (or there is no "rest")
-    # Nothing in the first batch -> pull the rest and scan the whole section, exactly
-    # as the non-lazy path would (the first batch is re-OCR'd, but only in this rarer
-    # fall-through case, where we were going to fetch everything anyway).
-    images = head + fetch(urls[batch_size:])
-    return images, scan_for_vin(images, expected_vin, max_send=max_send, debug=debug)
-
-
 # --------- Delivered ZIP from the Super Dispatch footer stamp ---------
 # Every photo taken in the Super Dispatch carrier app carries a translucent
 # black band at the very bottom with white text:
