@@ -309,6 +309,28 @@ def current_focus():
     return shell("dumpsys window | grep -E 'mCurrentFocus'")
 
 
+def _shade_open(foc=None) -> bool:
+    """True when the Android notification shade / quick-settings panel is pulled down
+    over the app (an accidental top-edge swipe opens it). Focus then sits on
+    NotificationShade, so every tap lands on the shade — the worker spins forever
+    unless it's collapsed first."""
+    foc = current_focus() if foc is None else foc
+    return "NotificationShade" in foc or "StatusBar" in foc
+
+
+def close_shade() -> bool:
+    """Collapse the notification shade / quick settings. `cmd statusbar collapse` is
+    the clean path; if focus still shows the shade (older Androids / QS half-state),
+    fall back to swiping up. Returns True once the shade is gone."""
+    log("  notification shade is open — collapsing it")
+    shell("cmd statusbar collapse")
+    time.sleep(1.2)
+    if not _shade_open():
+        return True
+    swipe(360, 1400, 360, 100, ms=250, pause=1.2)      # swipe the panel back up
+    return not _shade_open()
+
+
 def ensure_emulator():
     """Make sure an emulator is connected and fully booted. If adb sees no device
     (host reboot, emulator crash, never started), boot the AVD via start_emulator.sh
@@ -331,8 +353,13 @@ def ensure_emulator():
 
 def ensure_app(pause=4.0):
     """Keep us in the Tesla Logistics app. Relaunch if some other app/launcher is
-    foreground; a permission dialog (permissioncontroller) over our app is fine."""
+    foreground; a permission dialog (permissioncontroller) over our app is fine.
+    A pulled-down notification shade is collapsed FIRST — relaunching does not close
+    it, so without this the shade eats every tap and the worker wedges."""
     foc = current_focus()
+    if _shade_open(foc):
+        close_shade()
+        foc = current_focus()
     if APP in foc or "permission" in foc.lower():
         return
     log("  not in Tesla Logistics — launching it")
