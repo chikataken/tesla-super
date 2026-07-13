@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      1.0.0
+// @version      1.0.2
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -200,6 +200,10 @@
   // ---- 3) Panel -------------------------------------------------------------
   let host, root, body, rafPending = 0, toastTimer = 0;
   let leftSelectionLockRi = null, leftSelectionUnlockTimer = 0;
+  // "Nothing to Bid" toast is edge-triggered: shown ONCE when the TO-DO list empties (you finish
+  // bidding), not on every render/view-toggle. Starts true so it stays silent until there's
+  // something to bid; reset to false whenever an un-priced VIN exists (view-independent).
+  let nothingShown = true;
   function armLeftSelectionUnlock() {
     clearTimeout(leftSelectionUnlockTimer);
     leftSelectionUnlockTimer = setTimeout(() => { leftSelectionLockRi = null; }, 220);
@@ -395,6 +399,15 @@
   // Prefer embedding; if the container isn't there, use the overlay so the panel never vanishes.
   function applyPlacement() {
     if (!host) return;
+    // Guard the choke point: `resize` and the 500ms interval call this WITHOUT a route check, so a
+    // resize/layout-shift on another logistics page would embed the panel there and hide that page's
+    // content. Off the bid board, always hide + give Tesla its content back instead of embedding.
+    if (!/\/logistics\/bidboard2/i.test(location.pathname)) {
+      host.style.display = 'none';
+      restoreContent();
+      if (host.parentElement && host.parentElement !== document.documentElement) document.documentElement.appendChild(host);
+      return;
+    }
     if (embed()) return;
     state.embedded = false;
     dock();
@@ -457,6 +470,9 @@
   function render() {
     if (!root) return;
     body.left.classList.remove('center-empty'); body.right.classList.remove('center-empty');
+    // If ANY route still has an un-priced VIN (regardless of TO-DO/ALL/filter), we're not done —
+    // re-arm the "Nothing to Bid" toast so it can fire once when the list next empties.
+    if (state.groups.some((g) => ((g.bids && g.bids.items) || []).some((b) => !(b.carrierCounter && b.carrierCounter.bidAmount != null)))) nothingShown = false;
     const totalVins = state.groups.reduce((s, g) => s + ((g.bids && g.bids.totalRecords) || 0), 0);
     body.sub.textContent = state.loading ? 'loading…' : state.error ? '' : `· ${state.groups.length} routes · ${totalVins} VINs`;
 
@@ -480,7 +496,7 @@
         // So "Nothing to Bid" -> body.right (left), the clock -> body.left (right).
         body.right.innerHTML = `<div class="empty done">✓ Nothing to Bid</div>`;
         body.left.innerHTML = `<div class="empty done clock">${nowHHMM()}</div>`;
-        showToast('Nothing to Bid');
+        if (!nothingShown) { showToast('Nothing to Bid'); nothingShown = true; }
       } else {
         // A filter (in TO-DO or ALL) that matched nothing, or no routes captured yet — default message.
         body.left.innerHTML = `<div class="empty">No routes${state.filter ? ' match the filter' : ' captured yet'}.</div>`;
