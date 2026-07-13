@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.22.0
-// @description  Split panel for the Tesla bid board. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
+// @version      0.25.0
+// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: every route + its VINs (from the API). Right: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -33,6 +33,8 @@
   const state = {
     endpoint: null, headers: null, groups: [], total: 0, loading: false, error: null,
     filter: '', sortByCount: false, prices: {}, dates: {}, todoOnly: false,
+    floating: false,   // true once the user drags the panel off its docked position (overlay fallback only)
+    embedded: false,   // true when the panel is spliced into Tesla's own layout (in-flow, not overlaid)
   };
 
   // ---- 1) Capture the groups POST (endpoint + auth) by hooking XHR ----------
@@ -189,27 +191,21 @@
     if (host || !document.documentElement) return;
     host = document.createElement('div');
     host.id = 'bidpanel-host';
-    // Default position: centered in the window but shifted RIGHT of the portal's left nav column,
-    // clamped on-screen. Explicit px `left` (not a transform) so clicking the header never makes it jump.
-    const navW = 210, pw = Math.min(1280, window.innerWidth * 0.96);
-    let left = navW + (window.innerWidth - navW - pw) / 2;
-    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-    host.style.cssText = `position:fixed;top:56px;left:${Math.round(left)}px;width:${Math.round(pw)}px;height:86vh;z-index:2147483647;`;
+    // Placement is applied by setupNav()/applyPlacement(): the panel is spliced INTO Tesla's own
+    // layout as an in-flow element that replaces the board (embed), so it reads as part of the page.
+    // If the container can't be found, it falls back to a fixed overlay docked to the content area.
+    host.style.cssText = 'z-index:2147483647;';
     root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `
       <style>
         *{box-sizing:border-box;font-family:Inter,system-ui,Arial,sans-serif}
-        .panel{position:relative;display:flex;flex-direction:column;height:100%;background:#fff;color:#171a20;border:1px solid #d0d3d6;border-radius:10px;box-shadow:0 8px 28px rgba(0,0,0,.18);overflow:hidden}
+        .panel{position:relative;display:flex;flex-direction:column;height:100%;background:#fff;color:#171a20;border:0;border-radius:0;box-shadow:none;overflow:hidden}
         .toast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%) translateY(8px);background:#171a20;color:#fff;padding:9px 18px;border-radius:9px;font-size:13px;font-weight:800;letter-spacing:.02em;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:6}
         .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-        .hd{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#171a20;color:#fff;cursor:move;user-select:none}
-        .hd .ttl{font-weight:700;font-size:14px;flex:1}.hd .sub{font-size:12px;opacity:.7;font-weight:500}
-        .hd button{background:#2b2f37;color:#fff;border:0;border-radius:6px;padding:4px 8px;font-size:13px;cursor:pointer}.hd button:hover{background:#3a3f49}
         .tools{display:flex;flex-direction:column;gap:8px;padding:8px 12px;border-bottom:1px solid #eee}
         .trow{display:flex;align-items:center;gap:10px}
         .tools input{width:50%;padding:6px 8px;border:1px solid #d0d3d6;border-radius:6px;font-size:13px}
         .tools label{font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;color:#5c5e62}
-        .livebadge{font-size:11px;font-weight:800;color:#c0392b;letter-spacing:.06em;white-space:nowrap}
         .todobtn{background:#e6e8ea;color:#3a3f49;border:1px solid #cfd3d7;border-radius:6px;padding:6px 18px;font-size:12px;font-weight:700;cursor:pointer;font-family:Arial,Helvetica,sans-serif;letter-spacing:.04em}
         .todobtn:hover{background:#dcdfe2}
         .todobtn.on{background:#3457d5;color:#fff;border-color:#3457d5}
@@ -262,14 +258,13 @@
         .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
       </style>
       <div class="panel">
-        <div class="hd" id="hd"><div class="ttl">Bid Board <span class="sub" id="sub"></span></div><span class="livebadge">● LIVE</span><button id="min">–</button></div>
         <div class="tools"><div class="trow"><button id="todo" class="todobtn">ALL</button><input id="filter" placeholder="Filter…" /></div></div>
         <div class="bodywrap"><div class="left" id="left"></div><div class="right" id="right"></div></div>
       </div>`;
     document.documentElement.appendChild(host);
 
-    body = { sub: root.getElementById('sub'), left: root.getElementById('left'), right: root.getElementById('right'), filter: root.getElementById('filter') };
-    root.getElementById('min').addEventListener('click', (e) => { const w = root.querySelector('.bodywrap'), t = root.querySelector('.tools'); const h = w.classList.toggle('hidden'); t.classList.toggle('hidden', h); e.target.textContent = h ? '+' : '–'; });
+    // No header bar; `sub` is a throwaway node so render()'s status writes stay harmless.
+    body = { sub: document.createElement('span'), left: root.getElementById('left'), right: root.getElementById('right'), filter: root.getElementById('filter') };
     body.filter.addEventListener('input', () => { state.filter = body.filter.value.trim().toLowerCase(); render(); });
     root.getElementById('todo').addEventListener('click', (e) => { state.todoOnly = !state.todoOnly; e.target.textContent = state.todoOnly ? 'TO-DO' : 'ALL'; e.target.classList.toggle('on', state.todoOnly); render(); });
     body.right.addEventListener('scroll', () => { if (rafPending) return; rafPending = requestAnimationFrame(() => { rafPending = 0; syncFromRight(); }); });
@@ -295,28 +290,97 @@
       if (next) { if (nextCard) centerInPane(body.right, nextCard, true); next.focus({ preventScroll: true }); if (next.select) next.select(); }
       else { e.target.blur(); showToast('Bids Finished'); }   // reached the end of the list
     });
-    makeDraggable(root.getElementById('hd'), host);
+    window.addEventListener('resize', applyPlacement);
     setupNav();
   }
 
-  // Show the panel only on the bid board; hide it the instant the SPA routes elsewhere.
+  // ---- Placement: embed into Tesla's own layout, or fall back to a fixed overlay --------------
+  let hiddenEl = null, observedParent = null, mo = null, moScheduled = false;
+
+  // The board content is the tall, wide sibling of the left nav inside its parent (`.main`).
+  function findContent() {
+    const nav = document.querySelector('tsl-nav, nav.main-nav, [class*="main-nav"]');
+    if (!nav || !nav.parentElement) return null;
+    const parent = nav.parentElement;
+    const sibs = [...parent.children].filter((c) => c !== host && c !== nav);
+    let best = null, bw = 0;
+    for (const c of sibs) { const r = c.getBoundingClientRect(); if (r.height > 200 && r.width > bw) { bw = r.width; best = c; } }
+    best = best || sibs[0] || null;
+    return best ? { parent, nav, content: best } : null;
+  }
+
+  // Splice our panel into the page: hide Tesla's board (never remove it — Angular owns that DOM)
+  // and insert `host` in its slot as a normal in-flow element. Returns false if no container found.
+  function embed() {
+    const f = findContent();
+    if (!f) return false;
+    const { parent, content } = f;
+    if (content === host) return true;
+    const cs = getComputedStyle(content);
+    const boxW = cs.width, boxH = cs.height;                 // measured BEFORE hiding (for non-flex parents)
+    if (hiddenEl && hiddenEl !== content && hiddenEl.style) hiddenEl.style.display = '';   // release a stale one
+    if (content.style.display !== 'none') content.style.display = 'none';
+    hiddenEl = content;
+    if (host.parentElement !== parent || host.nextElementSibling !== content) parent.insertBefore(host, content);
+    const flexRow = /flex/.test(getComputedStyle(parent).display);
+    host.style.cssText = flexRow
+      ? 'z-index:2147483647;flex:1 1 0%;min-width:0;align-self:stretch;display:block;'
+      : `z-index:2147483647;display:block;width:${boxW};height:${boxH};`;
+    state.embedded = true;
+    ensureObserver(parent);
+    return true;
+  }
+  function restoreContent() { if (hiddenEl && hiddenEl.style && hiddenEl.style.display === 'none') hiddenEl.style.display = ''; }
+
+  // Angular re-renders the region; a light observer re-splices us in whenever it does.
+  function ensureObserver(parent) {
+    if (mo && observedParent === parent) return;
+    if (mo) mo.disconnect();
+    observedParent = parent;
+    mo = new MutationObserver(() => {
+      if (!/\/logistics\/bidboard2/i.test(location.pathname)) return;
+      if (moScheduled) return; moScheduled = true;
+      setTimeout(() => { moScheduled = false; applyPlacement(); }, 80);
+    });
+    mo.observe(parent, { childList: true });
+  }
+
+  // Fallback only: fixed overlay filling the content area to the right of the nav.
+  function dock() {
+    const nav = document.querySelector('tsl-nav, nav.main-nav, [class*="main-nav"]');
+    let left = 210, top = 56;
+    if (nav) { const r = nav.getBoundingClientRect(); if (r.width > 40 && r.height > 200) { left = Math.max(0, Math.round(r.right)); top = Math.max(0, Math.round(r.top)); } }
+    host.style.cssText = `position:fixed;z-index:2147483647;left:${left}px;top:${top}px;right:auto;transform:none;width:${Math.max(360, window.innerWidth - left)}px;height:${Math.max(240, window.innerHeight - top)}px;`;
+  }
+
+  // Prefer embedding; if the container isn't there, use the overlay so the panel never vanishes.
+  function applyPlacement() {
+    if (!host) return;
+    if (embed()) return;
+    state.embedded = false;
+    dock();
+  }
+
+  // Show the panel only on the bid board; hide it (and give Tesla its board back) elsewhere.
   function setupNav() {
     const onBidBoard = () => /\/logistics\/bidboard2/i.test(location.pathname);
-    const apply = () => { if (host) host.style.display = onBidBoard() ? '' : 'none'; };
+    const apply = () => {
+      if (!host) return;
+      if (onBidBoard()) { applyPlacement(); host.style.display = ''; }
+      else {
+        host.style.display = 'none';
+        restoreContent();
+        if (host.parentElement && host.parentElement !== document.documentElement) document.documentElement.appendChild(host);
+      }
+    };
     ['pushState', 'replaceState'].forEach((m) => { const o = history[m]; history[m] = function () { const r = o.apply(this, arguments); apply(); return r; }; });
     window.addEventListener('popstate', apply);
     window.addEventListener('hashchange', apply);
     let last = location.href;
     setInterval(() => { if (location.href !== last) { last = location.href; apply(); } }, 300);   // fallback for routers that bypass pushState
+    setInterval(() => { if (host && host.style.display !== 'none') applyPlacement(); }, 500);   // re-splice / re-size after Angular re-renders or nav collapse
     setInterval(() => { const el = root && root.querySelector('.empty.clock'); if (el) el.textContent = nowHHMM(); }, 10000);   // keep the "nothing to bid" clock current
     apply();
-  }
-
-  function makeDraggable(handle, target) {
-    let sx, sy, ox, oy, drag = false;
-    handle.addEventListener('mousedown', (e) => { drag = true; sx = e.clientX; sy = e.clientY; const r = target.getBoundingClientRect(); ox = r.left; oy = r.top; target.style.left = ox + 'px'; target.style.top = oy + 'px'; target.style.right = 'auto'; target.style.transform = 'none'; e.preventDefault(); });
-    window.addEventListener('mousemove', (e) => { if (!drag) return; target.style.left = (ox + e.clientX - sx) + 'px'; target.style.top = (oy + e.clientY - sy) + 'px'; });
-    window.addEventListener('mouseup', () => { drag = false; });
   }
 
   // ---- 4) Render ------------------------------------------------------------
