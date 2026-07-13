@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.27.0
+// @version      0.30.0
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -282,9 +282,10 @@
         .pin input::placeholder{color:#0a7d33;opacity:.45}
         .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
         .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
-        /* text-shimmer (loading-ui style): a light band sweeps across the letters */
-        .empty.shimmer{font-size:29px;font-weight:800;color:transparent;background:linear-gradient(90deg,#c2c5c9 0%,#c2c5c9 40%,#3a3f49 50%,#c2c5c9 60%,#c2c5c9 100%);background-size:200% auto;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:bpshimmer 1.6s linear infinite}
-        @keyframes bpshimmer{0%{background-position:200% center}100%{background-position:-200% center}}
+        /* loading arc (loading-ui style): a rounded gray arc spins */
+        .arc{width:46px;height:46px;animation:bparcspin .9s linear infinite}
+        .arc circle{stroke:#b0b3b7}
+        @keyframes bparcspin{to{transform:rotate(360deg)}}
       </style>
       <div class="panel">
         <div class="tools"><div class="trow"><button id="todo" class="todobtn">ALL</button><input id="filter" placeholder="Filter…" /></div></div>
@@ -464,7 +465,8 @@
       // Panes are flipped (row-reverse): body.right renders LEFT. Put the shimmer center-left,
       // matching the "Nothing to Bid" position.
       body.left.classList.add('center-empty'); body.right.classList.add('center-empty');
-      body.right.innerHTML = `<div class="empty shimmer">Scanning…</div>`; body.left.innerHTML = '';
+      body.right.innerHTML = `<svg class="arc" viewBox="0 0 50 50"><circle cx="25" cy="25" r="20" fill="none" stroke-width="5" stroke-linecap="round" stroke-dasharray="94 32"/></svg>`;
+      body.left.innerHTML = '';
       return;
     }
 
