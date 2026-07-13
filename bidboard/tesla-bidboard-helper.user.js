@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      0.30.0
+// @version      1.0.0
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -32,7 +32,7 @@
 
   const state = {
     endpoint: null, headers: null, groups: [], total: 0, loading: false, error: null,
-    filter: '', sortByCount: false, prices: {}, dates: {}, todoOnly: false,
+    filter: '', sortByCount: false, prices: {}, dates: {}, todoOnly: true,   // TO-DO is the default view
     floating: false,   // true once the user drags the panel off its docked position (overlay fallback only)
     embedded: false,   // true when the panel is spliced into Tesla's own layout (in-flow, not overlaid)
   };
@@ -288,7 +288,7 @@
         @keyframes bparcspin{to{transform:rotate(360deg)}}
       </style>
       <div class="panel">
-        <div class="tools"><div class="trow"><button id="todo" class="todobtn">ALL</button><input id="filter" placeholder="Filter…" /></div></div>
+        <div class="tools"><div class="trow"><button id="todo" class="todobtn on">TO-DO</button><input id="filter" placeholder="Filter…" /></div></div>
         <div class="bodywrap"><div class="left" id="left"></div><div class="right" id="right"></div></div>
       </div>`;
     document.documentElement.appendChild(host);
