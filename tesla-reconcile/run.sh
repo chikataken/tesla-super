@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Setup-once, run-every-time wrapper for tesla-reconcile.
 #
-#   ./run.sh                          -> reconciliation (test_superdispatch.py)
-#   ./run.sh --count 200 --dry-run    -> reconciliation with args
+#   ./run.sh                          -> reconciliation (test_superdispatch.py) in
+#                                        batches of 100; auto-exits when the window
+#                                        is exhausted
+#   ./run.sh --count 200 --dry-run    -> reconciliation with args (one pass)
 #   ./run.sh login                    -> one-time Tesla/SuperDispatch login
 #   ./run.sh cleanup [--apply]        -> Tesla Dispatch Dashboard cleanup
 #   ./run.sh some_script.py [args]    -> run any script in this folder

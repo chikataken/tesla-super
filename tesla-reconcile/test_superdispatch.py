@@ -14,8 +14,9 @@ Flag logic:
     photo is found; location mismatch is flagged for manual review)
 
 Usage:
-    python test_superdispatch.py                 # 1 shipment, full check
-    python test_superdispatch.py --count 5
+    python test_superdispatch.py                 # batches of 100 until the window
+                                                 # is exhausted, then exits
+    python test_superdispatch.py --count 5       # one pass, 5 shipments (0 = all)
     python test_superdispatch.py --skip-vision   # skip the BOL/photo step
     python test_superdispatch.py --dry-run       # decide but don't write tags
 """
@@ -33,11 +34,11 @@ from auth import browser_context
 
 # Delivered-On window. START = the first day of the PREVIOUS month, computed at
 # run time so it rolls forward automatically (June -> May 1; July -> June 1; …),
-# rather than a fixed date. END = today minus 14 days (the lag that lets Tesla post
+# rather than a fixed date. END = today minus 10 days (the lag that lets Tesla post
 # payment before we check a recent delivery).
 _TODAY = dt.date.today()
 WINDOW_START = (_TODAY.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
-WINDOW_END = _TODAY - dt.timedelta(days=14)
+WINDOW_END = _TODAY - dt.timedelta(days=10)
 
 # --troubleshoot: print Claude's short reasoning whenever a VIN doesn't cleanly
 # pass (not found / mismatch / confidence below this). Set in __main__.
@@ -86,11 +87,16 @@ def _section_for_vin(sections, vin, idx, n):
     return None
 
 
-# Recycle the SD tab this often DURING the scan. count=0 (the bare ./run.sh default)
-# scans up to max_pages invoiced-list pages into one renderer; dropping it periodically
+# Recycle the SD tab this often DURING the scan. count=0 (--count 0) scans up to
+# max_pages invoiced-list pages into one renderer; dropping it periodically
 # keeps that renderer well under the OOM/freeze ceiling. Uses the safe close/reopen
 # _recycle_sd_page — NOT a CDP memory purge, which crashes the SuperDispatch renderer.
 SCAN_RECYCLE_EVERY = 30
+
+# Bare ./run.sh (no --count) works in batches of this size: scan until this many
+# qualifying shipments are collected, process them, re-scan, and auto-exit when a
+# pass comes up short (the window is exhausted).
+BATCH_SIZE = 100
 
 
 def collect_qualifying(pages, count, max_pages):
@@ -432,19 +438,26 @@ def main(args):
             input("\nPress Enter to close the browser...")
             return
 
-        # ---- window mode: one pass (default), or --loop forever ----
+        # ---- window mode: batches of BATCH_SIZE with auto-exit (default),
+        # one pass (--count N), or --loop forever ----
         if not args.photos_only:
             tesla.setup_claims_filters(claims_page)     # once per session
             tesla.ensure_approved(tesla_page)
 
+        # Batch mode needs each pass's tags to stick so processed orders drop out
+        # of the next scan — dry-run doesn't write tags, so it would refind the
+        # same batch forever. Dry-run with no --count falls back to one all pass.
+        batch_mode = args.count is None and not args.loop and not args.dry_run
+        count = BATCH_SIZE if batch_mode else (args.count or 0)
+
         pass_no = 0
         while True:
             pass_no += 1
-            limit = "all" if not args.count else args.count
+            limit = "all" if not count else count
             print(f"\n===== pass {pass_no}  {dt.datetime.now():%Y-%m-%d %H:%M} =====")
             print(f"Window {WINDOW_START}..{WINDOW_END}  count={limit}  "
                   f"dry_run={args.dry_run}  skip_vision={args.skip_vision}")
-            orders, pages = collect_qualifying(pages, args.count, args.max_pages)
+            orders, pages = collect_qualifying(pages, count, args.max_pages)
             sd_page, tesla_page, claims_page = pages   # adopt any mid-scan recycled tab
             if not orders:
                 print("No qualifying shipments found.")
@@ -453,6 +466,13 @@ def main(args):
                 pages = _process_orders(pages, orders, args.dry_run, args.skip_vision, args.photos_only)
                 sd_page, tesla_page, claims_page = pages   # adopt any recycled tab
 
+            if batch_mode:
+                if len(orders) < count:
+                    print(f"\nBatch mode: pass {pass_no} found {len(orders)} "
+                          f"qualifying (< {count}) -> window exhausted, done.")
+                    break
+                print(f"\nBatch of {count} complete. Re-scanning for the next batch...")
+                continue
             if not args.loop:
                 break
             print(f"\nPass {pass_no} complete. Sleeping {args.interval} min until the "
@@ -472,8 +492,10 @@ def main(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--count", type=int, default=0,
-                    help="Max qualifying shipments to process; 0 = all (default).")
+    ap.add_argument("--count", type=int, default=None,
+                    help="Max qualifying shipments to process in one pass; 0 = all. "
+                         "Default (no flag): batches of 100, re-scanning between "
+                         "batches, until the window is exhausted.")
     ap.add_argument("--max-pages", type=int, default=80,
                     help="Invoiced-list pages to scan (20 orders each). The window "
                          "can hold ~80 pages, so 80 reaches the recent deliveries.")
