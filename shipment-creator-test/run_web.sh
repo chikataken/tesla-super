@@ -11,6 +11,8 @@ cd "$(dirname "$0")"
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
 export PORT="${PORT:-8001}"          # the cloudflared tunnel (test.wastake.com) targets :8001
 export SC_TEST_MODE=1                 # READ-ONLY test build: all SuperDispatch writes blocked
+# Read the production ledger. The test process never posts, so this is read-only in practice.
+export SC_AUDIT_DB="${SC_AUDIT_DB:-$(cd ../shipment-creator && pwd)/posting_audit.db}"
 # No SC_OPEN_BROWSER -> the server runs headless (never tries to open a desktop browser).
 
 # Pull DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / DBUS etc. from the live graphical user

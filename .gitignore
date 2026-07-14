@@ -12,6 +12,8 @@ active_profile.json
 # ───── local shipment-recorder mirror DB (runtime data, not shared) ─────
 **/data/recorder.db
 **/data/recorder.db-*
+posting_audit.db
+**/posting_audit.db
 
 # ───── SQLite WAL / shared-memory sidecars — transient, regenerated at runtime ─────
 *.db-shm

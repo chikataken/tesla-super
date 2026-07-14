@@ -1212,6 +1212,50 @@ def api_tally():
             "done": total > 0 and (processed + unpostable) >= total}
 
 
+def _audit_safe(fn, *args, default=None, **kwargs):
+    """Audit writes are deliberately fail-open: logging must never block an SD post."""
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:                               # noqa: BLE001
+        print(f"[audit] {getattr(fn, '__name__', 'operation')} failed: {e}", flush=True)
+        return default
+
+
+def _audit_profile(profile: dict | None) -> tuple[str, str]:
+    pid = _pid() or "unknown"
+    return pid, str((profile or {}).get("name") or pid)
+
+
+def _audit_venue(stop: dict | None) -> str:
+    venue = ((stop or {}).get("venue") or {})
+    city_state = ", ".join(str(x) for x in (venue.get("city"), venue.get("state")) if x)
+    return " ".join(str(x) for x in (city_state, venue.get("zip")) if x)
+
+
+def _audit_start_item(audit, run_id, order: dict, *, action: str,
+                      payload: dict | None = None, total=None):
+    if not audit or not run_id:
+        return None
+    source = payload or order
+    vins = [(v.get("vin") or "").strip().upper()
+            for v in (order.get("vehicles") or order.get("add") or []) if v.get("vin")]
+    return _audit_safe(
+        audit.start_item, run_id, action=action,
+        shipment_number=order.get("number"), vins=vins,
+        pickup=_audit_venue(order.get("pickup")),
+        delivery=_audit_venue(order.get("delivery")),
+        price=total, inspection_type=source.get("inspection_type"),
+    )
+
+
+def _audit_sd_guid(response: dict | None) -> str | None:
+    if not isinstance(response, dict):
+        return None
+    data = response.get("data")
+    obj = data.get("object") if isinstance(data, dict) else None
+    return ((obj or {}).get("guid") if isinstance(obj, dict) else None) or response.get("guid")
+
+
 @app.post("/api/post")
 def api_post(body: dict = Body(...)):
     """TEMPLATE — builds the SuperDispatch create payloads for every staged shipment,
@@ -1269,11 +1313,35 @@ def api_post_live(body: dict = Body(...)):
     payload = sd_api.to_sd_order(
         o, total=total,
         dispatcher=profiles.dispatcher_phone_for_order(o, profiles.get_profile(_pid())))
+    profile = profiles.get_profile(_pid())
+    pid, pname = _audit_profile(profile)
+    try:
+        import audit_db as audit
+    except Exception as e:                               # noqa: BLE001
+        print(f"[audit] module unavailable: {e}", flush=True)
+        audit = None
+    units = len(o.get("vehicles") or [])
+    run_id = (_audit_safe(audit.start_run, profile_id=pid, profile_name=pname,
+                          action="single", attempted_orders=1, attempted_units=units,
+                          duplicate_units=0)
+              if audit else None)
+    item_id = _audit_start_item(audit, run_id, o, action="create", payload=payload, total=total)
     try:
         res = sd_api.create_order(payload, dry_run=False)
     except sd_api.SDError as e:
+        if audit and item_id:
+            _audit_safe(audit.finish_item, item_id, status="failed", error=str(e))
+        if audit and run_id:
+            _audit_safe(audit.finish_run, run_id, status="failed", posted_orders=0,
+                        posted_units=0, failed_orders=1)
         raise HTTPException(502, f"SuperDispatch rejected the order: {e}")
-    return {"ok": True, "number": number, "vins": len(o.get("vehicles") or [])}
+    if audit and item_id:
+        _audit_safe(audit.finish_item, item_id, status="success",
+                    sd_guid=_audit_sd_guid(res))
+    if audit and run_id:
+        _audit_safe(audit.finish_run, run_id, status="success", posted_orders=1,
+                    posted_units=units, failed_orders=0)
+    return {"ok": True, "number": number, "vins": units}
 
 
 @app.post("/api/post-all")
@@ -1302,24 +1370,51 @@ def api_post_all(body: dict = Body(default=None)):
         except (OSError, ValueError):
             board = []
 
-    posted_vins, kept_orders, failures = 0, [], []
+    consol = _load_json(_consol_path(), [])
+    duplicate_units = len({str(v).strip().upper()
+                           for v in _load_json(_dups_removed_path(), []) if str(v).strip()})
+    attempted_units = (sum(len(o.get("vehicles") or []) for o in board)
+                       + sum(len(e.get("add") or []) for e in consol))
+    try:
+        import audit_db as audit
+    except Exception as e:                               # noqa: BLE001
+        print(f"[audit] module unavailable: {e}", flush=True)
+        audit = None
+    pid, pname = _audit_profile(_prof)
+    run_id = (_audit_safe(audit.start_run, profile_id=pid, profile_name=pname,
+                          action="post_all", attempted_orders=len(board) + len(consol),
+                          attempted_units=attempted_units,
+                          duplicate_units=duplicate_units)
+              if audit else None)
+
+    posted_vins, posted_orders, kept_orders, failures = 0, 0, [], []
     for o in board:
+        item_id = None
         try:
             total, _per = _effective_prices(o)
             payload = sd_api.to_sd_order(
                 o, total=total, dispatcher=profiles.dispatcher_phone_for_order(o, _prof))
-            sd_api.create_order(payload, dry_run=False)
+            item_id = _audit_start_item(
+                audit, run_id, o, action="create", payload=payload, total=total)
+            res = sd_api.create_order(payload, dry_run=False)
             posted_vins += len(o.get("vehicles") or [])
+            posted_orders += 1
+            if audit and item_id:
+                _audit_safe(audit.finish_item, item_id, status="success",
+                            sd_guid=_audit_sd_guid(res))
         except sd_api.SDError as e:
             kept_orders.append(o)
             failures.append({"number": o.get("number"), "error": str(e)})
+            if audit and item_id:
+                _audit_safe(audit.finish_item, item_id, status="failed", error=str(e))
 
     # Staged consolidations -> ADD the new VIN(s) onto an existing posted order. Only
     # TWO things change: the vehicles list (existing kept with their guids, new VINs
     # appended — no per-VIN price) and the order total. Everything else is left intact.
     kept_consol = []
-    for entry in _load_json(_consol_path(), []):
+    for entry in consol:
         add = entry.get("add") or []
+        item_id = None
         try:
             existing = sd_api.get_order(entry.get("order_guid"))
             new_vehicles = [
@@ -1334,11 +1429,27 @@ def api_post_all(body: dict = Body(default=None)):
                 base = float(existing.get("price") or 0)
                 added = sum(float(a["price"]) for a in add if a.get("price") is not None)
                 merge["price"] = round(base + added, 2)
-            sd_api.patch_order(entry["order_guid"], merge)   # merge-patch: only vehicles + price
+            audit_order = {**entry, "vehicles": add,
+                           "pickup": entry.get("pickup") or existing.get("pickup"),
+                           "delivery": entry.get("delivery") or existing.get("delivery")}
+            item_id = _audit_start_item(
+                audit, run_id, audit_order, action="consolidation", total=merge.get("price"))
+            patched = sd_api.patch_order(
+                entry["order_guid"], merge)   # merge-patch: only vehicles + price
             posted_vins += len(add)
+            posted_orders += 1
+            if audit and item_id:
+                _audit_safe(audit.finish_item, item_id, status="success",
+                            sd_guid=_audit_sd_guid(patched) or entry.get("order_guid"))
         except Exception as e:                          # noqa: BLE001
             kept_consol.append(entry)
             failures.append({"number": entry.get("number"), "error": str(e)})
+            if audit and not item_id:
+                item_id = _audit_start_item(
+                    audit, run_id, {**entry, "vehicles": add},
+                    action="consolidation", total=entry.get("price_override"))
+            if audit and item_id:
+                _audit_safe(audit.finish_item, item_id, status="failed", error=str(e))
 
     # Clear the board (KEEP spares). Failed items are kept so they can be retried.
     if path:
@@ -1371,6 +1482,12 @@ def api_post_all(body: dict = Body(default=None)):
         except OSError:
             pass
         _excel_cache_clear()                            # this dispatcher's board fully posted
+
+    if audit and run_id:
+        run_status = "success" if not failures else ("partial" if posted_vins else "failed")
+        _audit_safe(audit.finish_run, run_id, status=run_status,
+                    posted_orders=posted_orders, posted_units=posted_vins,
+                    failed_orders=len(failures))
 
     return {"ok": True, "posted_vins": posted_vins, "failed": failures}
 
@@ -1940,6 +2057,18 @@ def api_consolidation_price(body: dict = Body(...)):
         entry["price_override"] = price
     _save_json(_consol_path(), staged)
     return {"ok": True, "price_override": entry.get("price_override")}
+
+
+# ---- SuperDispatch posting audit ---------------------------------------------
+@app.get("/api/audit")
+def api_audit(limit: int = 200, offset: int = 0):
+    """Global, read-only posting history across every dispatcher profile."""
+    try:
+        import audit_db
+        return audit_db.list_runs(limit=limit, offset=offset)
+    except Exception as e:                               # noqa: BLE001
+        return {"runs": [], "total": 0, "summary": {},
+                "error": f"audit unavailable: {e}"}
 
 
 # ---- Recorded shipments (the local Super Dispatch mirror) --------------------

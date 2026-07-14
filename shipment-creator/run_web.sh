@@ -10,6 +10,8 @@ cd "$(dirname "$0")"
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
 export PORT="${PORT:-8000}"      # the cloudflared tunnel (shipments.wastake.com) targets :8000
+# One durable ledger for production writes and the read-only test-site Audit tab.
+export SC_AUDIT_DB="${SC_AUDIT_DB:-$PWD/posting_audit.db}"
 # No SC_OPEN_BROWSER -> the server runs headless (never tries to open a desktop browser).
 
 # Pull DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / DBUS etc. from the live graphical user
