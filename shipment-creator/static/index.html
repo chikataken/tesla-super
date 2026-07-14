@@ -40,8 +40,8 @@
   .board.scanning #detail{opacity:.55;filter:grayscale(45%);pointer-events:none}
   .detail-inner{width:calc(var(--detail-w) - 24px);margin-left:24px;padding-bottom:24px}
   /* hide all scrollbars (scrolling still works) */
-  #list,.board-detail,.navrail,#terminals.panel.active,#users.panel.active,#audit.panel.active{scrollbar-width:none;-ms-overflow-style:none}
-  #list::-webkit-scrollbar,.board-detail::-webkit-scrollbar,.navrail::-webkit-scrollbar,#terminals.panel.active::-webkit-scrollbar,#users.panel.active::-webkit-scrollbar,#audit.panel.active::-webkit-scrollbar{display:none}
+  #list,.board-detail,.navrail,#terminals.panel.active,#users.panel.active{scrollbar-width:none;-ms-overflow-style:none}
+  #list::-webkit-scrollbar,.board-detail::-webkit-scrollbar,.navrail::-webkit-scrollbar,#terminals.panel.active::-webkit-scrollbar,#users.panel.active::-webkit-scrollbar{display:none}
   /* a gentle fade on open (the column-grow provides the slide-out); not on drag/refresh */
   .detail-inner.opening{animation:detail-fade 300ms var(--ease) both}
   @keyframes detail-fade{from{opacity:0}to{opacity:1}}
@@ -120,7 +120,7 @@
   .panel{display:none}
   .panel.active{display:flex;flex-direction:column;flex:1;min-height:0}
   /* terminals & users just scroll as one block; the orders panel uses two internal scroll panes */
-  #terminals.panel.active,#users.panel.active,#recorded.panel.active,#audit.panel.active{display:block;overflow:auto;padding-bottom:40px}
+  #terminals.panel.active,#users.panel.active,#recorded.panel.active{display:block;overflow:auto;padding-bottom:40px}
   /* ---- Recorded shipments ---- */
   /* status groups as a sub-list in the dark left nav rail */
   .recnav{display:flex;flex-direction:column;gap:1px;margin:2px 0 6px;
@@ -155,46 +155,6 @@
   .rb-invoiced{background:#f3e8ff;color:#7c3aed}
   .rb-paid{background:#dcfce7;color:#166534}
   .rb-pending,.rb-new,.rb-requests{background:#f1f5f9;color:#475569}
-
-  /* ---- SuperDispatch posting audit ---- */
-  .audit-main{padding:18px 22px 42px;max-width:1180px;margin:0 auto;width:100%}
-  .audit-summary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;margin-bottom:16px}
-  .audit-stat{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px}
-  .audit-stat .alabel{display:block;color:var(--muted);font-size:11.5px;font-weight:600;margin-bottom:4px}
-  .audit-stat .aval{font-size:23px;font-weight:750;font-variant-numeric:tabular-nums;color:var(--text)}
-  .audit-stat.good .aval{color:var(--good)}
-  .audit-stat.warn .aval{color:var(--warn)}
-  .audit-table{width:100%;border-collapse:separate;border-spacing:0;background:var(--card);
-    border:1px solid var(--line);border-radius:9px;overflow:hidden;font-size:13px}
-  .audit-table th{text-align:left;padding:8px 11px;color:var(--muted);font-weight:650;
-    background:var(--card2);border-bottom:1px solid var(--line);white-space:nowrap}
-  .audit-table td{padding:9px 11px;border-bottom:1px solid rgba(0,0,0,.055);vertical-align:middle}
-  .audit-table tbody:last-child tr:last-child td{border-bottom:none}
-  .audit-run{cursor:pointer;transition:background .12s}
-  .audit-run:hover td{background:var(--card2)}
-  .audit-when{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted)}
-  .audit-who{font-weight:700;color:var(--text)}
-  .audit-num{font-weight:750;font-variant-numeric:tabular-nums;text-align:right}
-  .audit-dup{color:var(--warn)}
-  .audit-pill{display:inline-block;border-radius:999px;padding:2px 8px;font-size:11px;
-    font-weight:750;text-transform:capitalize;background:#edf1f5;color:#52606d}
-  .audit-pill.success{background:#e7f6ec;color:#15803d}
-  .audit-pill.partial{background:#fff3d6;color:#9a6700}
-  .audit-pill.failed{background:#fde8e7;color:#b42318}
-  .audit-pill.running{background:#e8f0fe;color:#2563eb}
-  .audit-detail{display:none}
-  .audit-detail.open{display:table-row}
-  .audit-detail>td{padding:0!important;background:var(--card2)}
-  .audit-items{padding:9px 14px 13px 28px}
-  .audit-item{display:grid;grid-template-columns:minmax(110px,1fr) 82px minmax(210px,1.8fr) auto;
-    gap:12px;align-items:start;padding:7px 0;border-bottom:1px solid rgba(0,0,0,.055)}
-  .audit-item:last-child{border-bottom:none}
-  .audit-item .ainum{font-weight:700}
-  .audit-item .aivins{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:var(--muted);word-break:break-word}
-  .audit-item .airoute{font-size:12px;color:var(--muted)}
-  .audit-item .aierr{grid-column:1/-1;color:var(--bad);font-size:12px}
-  .audit-empty{padding:36px;text-align:center;color:var(--muted)}
-  @media(max-width:800px){.audit-summary{grid-template-columns:repeat(2,1fr)}.audit-item{grid-template-columns:1fr 70px}.audit-item .airoute{grid-column:1/-1}}
 
   /* dispatcher "bubble" dropdown (replaces the native select) */
   .profwrap{position:relative}
@@ -758,7 +718,6 @@
     <div id="recNav" class="recnav" hidden></div>
     <button class="tab navitem" data-tab="terminals">Terminals</button>
     <button class="tab navitem" data-tab="app">App</button>
-    <button class="tab navitem" data-tab="audit">Audit</button>
     <button class="tab navitem" data-tab="users">Settings</button>
   </nav>
   <div class="appmain">
@@ -801,10 +760,6 @@
       <button class="btn ghost" onclick="loadTerminals(true)">Refresh</button>
       <span class="count" id="tstats"></span>
     </div>
-    <div id="ht-audit" class="ht-group" hidden>
-      <button class="btn ghost" onclick="loadAudit()">Refresh audit</button>
-      <span class="count" id="astats"></span>
-    </div>
   </div>
   <div class="tabs">
     <div id="tally" class="tally"></div>
@@ -846,14 +801,6 @@
   <div class="panel" id="terminals">
     <div class="term-main">
       <div id="tlist" class="term-list"></div>
-    </div>
-  </div>
-
-  <!-- AUDIT (global SuperDispatch posting ledger) -->
-  <div class="panel" id="audit">
-    <div class="audit-main">
-      <div id="auditSummary" class="audit-summary"></div>
-      <div id="auditList"><div class="audit-empty">Loading audit…</div></div>
     </div>
   </div>
 
@@ -942,80 +889,14 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   const tab=t.dataset.tab;
   t.classList.add('active'); $('#'+tab).classList.add('active');
   if(tab==='terminals') loadTerminals();
-  if(tab==='audit') loadAudit();
   if(tab==='users'){ USERS_EDIT=JSON.parse(JSON.stringify(PROFILES||[]));
     const m=$('#usersMsg'); if(m) m.textContent=''; renderUsersEditor(); }   // Settings = edit users
   const onRecorded = tab==='recorded';
   const rn = $('#recNav'); if(rn) rn.hidden = !onRecorded;   // status groups stay Recorded-only
   // Centered header slot shows ONLY the active tab's own toolbar group.
-  ['orders','recorded','terminals','audit'].forEach(k=>{ const g=$('#ht-'+k); if(g) g.hidden = (k!==tab); });
+  ['orders','recorded','terminals'].forEach(k=>{ const g=$('#ht-'+k); if(g) g.hidden = (k!==tab); });
   if(onRecorded){ loadRecorded(); startRecPoll(); } else { stopRecPoll(); }
 });
-
-// ---- SuperDispatch posting audit -------------------------------------------
-function fmtAuditWhen(iso){
-  if(!iso) return '—';
-  const d=new Date(iso); if(isNaN(d)) return '—';
-  return d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'})
-    +' '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-}
-function toggleAudit(id){ const d=$('#audit-detail-'+id); if(d) d.classList.toggle('open'); }
-function auditItemHtml(it){
-  const vins=(it.vins||[]).map(escHtml).join(', ') || 'No VIN recorded';
-  const route=(it.pickup||it.delivery)
-    ? escHtml(it.pickup||'—')+' → '+escHtml(it.delivery||'—') : 'Route not recorded';
-  const guid=it.sd_guid ? '<span class="guid" title="'+escHtml(it.sd_guid)+'">SD '+escHtml(it.sd_guid)+'</span>' : '';
-  const err=it.error ? '<div class="aierr">'+escHtml(it.error)+'</div>' : '';
-  return '<div class="audit-item">'
-    +'<div><div class="ainum">'+escHtml(it.shipment_number||'Unknown shipment')+'</div>'
-    +'<div class="airoute">'+route+'</div></div>'
-    +'<div><span class="audit-pill '+escHtml(it.status||'')+'">'+escHtml(it.status||'unknown')+'</span></div>'
-    +'<div class="aivins">'+vins+'</div><div>'+guid+'</div>'+err+'</div>';
-}
-async function loadAudit(){
-  const list=$('#auditList'), stats=$('#astats');
-  if(list) list.innerHTML='<div class="audit-empty">Loading audit…</div>';
-  let data;
-  try{
-    const r=await fetch('/api/audit?limit=200');
-    data=await r.json();
-    if(!r.ok) throw new Error(data.error||('HTTP '+r.status));
-  }catch(e){
-    if(list) list.innerHTML='<div class="audit-empty">Could not load the posting audit.</div>';
-    if(stats) stats.textContent='';
-    return;
-  }
-  if(data.error){
-    if(list) list.innerHTML='<div class="audit-empty">'+escHtml(data.error)+'</div>';
-    if(stats) stats.textContent='';
-    return;
-  }
-  const s=data.summary||{}, runs=data.runs||[];
-  if(stats) stats.textContent=(data.total||0)+' posting run'+((data.total||0)===1?'':'s');
-  const summary=$('#auditSummary');
-  if(summary) summary.innerHTML=
-    '<div class="audit-stat"><span class="alabel">Posting runs</span><span class="aval">'+Number(s.runs||0).toLocaleString()+'</span></div>'
-    +'<div class="audit-stat good"><span class="alabel">VINs posted</span><span class="aval">'+Number(s.posted_units||0).toLocaleString()+'</span></div>'
-    +'<div class="audit-stat"><span class="alabel">Dispatchers</span><span class="aval">'+Number(s.dispatchers||0).toLocaleString()+'</span></div>'
-    +'<div class="audit-stat warn"><span class="alabel">Failed orders</span><span class="aval">'+Number(s.failed_orders||0).toLocaleString()+'</span></div>';
-  if(!list) return;
-  if(!runs.length){ list.innerHTML='<div class="audit-empty">No SuperDispatch posts have been recorded yet.</div>'; return; }
-  list.innerHTML='<table class="audit-table"><thead><tr><th>When</th><th>Dispatcher</th>'
-    +'<th style="text-align:right">VINs posted</th><th style="text-align:right">Duplicates removed</th>'
-    +'<th style="text-align:right">Orders</th><th>Result</th></tr></thead><tbody>'
-    +runs.map(r=>{
-      const items=(r.items||[]).map(auditItemHtml).join('')
-        || '<div class="audit-empty">No item details were recorded.</div>';
-      return '<tr class="audit-run" onclick="toggleAudit('+Number(r.id)+')">'
-        +'<td class="audit-when">'+fmtAuditWhen(r.started_at)+'</td>'
-        +'<td class="audit-who">'+escHtml(r.profile_name||r.profile_id||'Unknown')+'</td>'
-        +'<td class="audit-num">'+Number(r.posted_units||0).toLocaleString()+'</td>'
-        +'<td class="audit-num audit-dup">'+Number(r.duplicate_units||0).toLocaleString()+'</td>'
-        +'<td class="audit-num">'+Number(r.posted_orders||0)+' / '+Number(r.attempted_orders||0)+'</td>'
-        +'<td><span class="audit-pill '+escHtml(r.status||'')+'">'+escHtml(r.status||'unknown')+'</span></td></tr>'
-        +'<tr class="audit-detail" id="audit-detail-'+Number(r.id)+'"><td colspan="6"><div class="audit-items">'+items+'</div></td></tr>';
-    }).join('')+'</tbody></table>';
-}
 
 // ---- Recorded shipments (local Super Dispatch mirror) ----------------------
 let REC = {status:'all', q:'', sort:'updated', dir:'desc'};   // default: most-recently updated on top

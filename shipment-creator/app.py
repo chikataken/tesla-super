@@ -2059,18 +2059,6 @@ def api_consolidation_price(body: dict = Body(...)):
     return {"ok": True, "price_override": entry.get("price_override")}
 
 
-# ---- SuperDispatch posting audit ---------------------------------------------
-@app.get("/api/audit")
-def api_audit(limit: int = 200, offset: int = 0):
-    """Global, read-only posting history across every dispatcher profile."""
-    try:
-        import audit_db
-        return audit_db.list_runs(limit=limit, offset=offset)
-    except Exception as e:                               # noqa: BLE001
-        return {"runs": [], "total": 0, "summary": {},
-                "error": f"audit unavailable: {e}"}
-
-
 # ---- Recorded shipments (the local Super Dispatch mirror) --------------------
 # Read-only views over recorder.db, populated by recorder_backfill.py (and, later,
 # the live webhook feed). Kept self-contained: a missing/empty DB returns empties
