@@ -314,7 +314,7 @@ def order_payload_from_route(number: str, chunk: list, transport_type: str = "OP
         "number": number,
         "purchase_order_number": chunk[0][2],          # full SHP of the first VIN
         "transport_type": transport_type,
-        "inspection_type": "standard",
+        "inspection_type": "advanced",
         "price": round(total, 2) if have else None,
         "need_by": soonest[1] if soonest else None,     # soonest across the order's VINs
         "need_by_ts": soonest[0].timestamp() if soonest else None,
@@ -352,7 +352,7 @@ def order_payload_from_bol(number: str, records: list[dict],
         "number": number,
         "purchase_order_number": head.get("shipment_number", ""),   # Tesla shipment id (traceability)
         "transport_type": transport_type,
-        "inspection_type": "standard",
+        "inspection_type": "advanced",
         "price": round(total, 2) if have_cost else None,
         "instructions": "",
         **_pickup_delivery(head),
@@ -409,7 +409,7 @@ def order_payload(ship, number: str | None = None, transport_type: str = "OPEN")
     return {
         "number": number or ship.number or ship.group_key,   # required; must be unique
         "transport_type": transport_type,
-        "inspection_type": "standard",
+        "inspection_type": "advanced",
         "price": ship.price,
         "instructions": ship.notes or "",
         "pickup": {"date_type": "estimated", "venue": _venue(ship.pickup)},
@@ -491,7 +491,7 @@ def to_sd_order(order: dict, total: float | None = None,
         "purchase_order_number": (order.get("purchase_order_number", "") or ""
                                   ) if config.SD_SEND_PO else "",
         "transport_type": order.get("transport_type", "OPEN"),
-        "inspection_type": order.get("inspection_type", "standard"),
+        "inspection_type": "advanced",
         "price": total,                             # the single carrier payment
         "payment": {
             "method": config.PAYMENT_METHOD,

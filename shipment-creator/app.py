@@ -1695,7 +1695,7 @@ def api_spare_restore(body: dict = Body(...)):
                 "number": num,
                 "purchase_order_number": "",
                 "transport_type": s.get("transport_type") or "OPEN",
-                "inspection_type": s.get("inspection_type") or "standard",
+                "inspection_type": s.get("inspection_type") or "advanced",
                 "price": None,
                 "instructions": s.get("instructions") or "",
                 "pickup": s.get("pickup"),
@@ -1864,7 +1864,7 @@ def api_consolidation_unstage(body: dict = Body(...)):
             new_order = {
                 "number": _unique_number(batch, a.get("from_number")),
                 "purchase_order_number": "",
-                "transport_type": "OPEN", "inspection_type": "standard",
+                "transport_type": "OPEN", "inspection_type": "advanced",
                 "price": None, "instructions": "",
                 "pickup": a.get("from_pickup"), "delivery": a.get("from_delivery"),
                 "vehicles": [veh],
