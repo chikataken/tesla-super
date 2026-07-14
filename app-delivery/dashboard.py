@@ -55,6 +55,12 @@ _STALL = {("pickup", 3): 210, ("pickup", 4): 90, ("pickup", 5): 150,
 _STALL_DEFAULT = 90
 # A flow's commit line (fires right after step 5) — marks the mark as DONE, not stuck.
 _COMPLETE_RE = re.compile(r"ledger:|ledger\(pickup\):")
+# A flow attempt that ENDED IN FAILURE (no ledger + no idle line ever follows) — used to clear
+# the tracker to idle so the rich UI doesn't keep showing a failed / API-errored drop-off or
+# pickup as if it's still active.
+_FAIL_RE = re.compile(r"! drop off failed|! pickup failed|drop off kept hitting|"
+                      r"departure did NOT reach home|departure hit an API error|"
+                      r"Start Loading not enabled|before parking", re.I)
 
 
 def _service_running() -> bool:
@@ -124,7 +130,10 @@ def _history(limit: int = 300) -> list[dict]:
     try:
         for s, v, stage, detail, t in con.execute(
                 "SELECT shipment, vin, stage, detail, seen_at FROM api_errors"):
-            rows.append({"action": "API ERROR", "vin": v or "", "model": detail or stage,
+            # 'no_photos' = parked because SD has no delivered photos for the VIN — its
+            # own label, so the site doesn't blame a (nonexistent) API failure.
+            act = "NO PHOTOS" if (stage or "").strip() == "no_photos" else "API ERROR"
+            rows.append({"action": act, "vin": v or "", "model": detail or stage,
                          "shipment": s, "exterior": None, "vin_found": None,
                          "key_found": None, "at": t, "when": _fmt_when(t)})
     except sqlite3.Error:
@@ -323,8 +332,8 @@ def _current(log_lines: list[str]) -> str | None:
             last_vin = mm.group(1)
         if "ledger" in ln and last_vin and last_vin in ln:
             last_vin = None
-        elif _DONE_RE.search(ln) and "ledger" not in ln:
-            last_vin = None
+        elif (_DONE_RE.search(ln) and "ledger" not in ln) or _FAIL_RE.search(ln):
+            last_vin = None                       # idle OR a failed attempt -> no VIN in-flight
     return last_vin
 
 
@@ -350,7 +359,7 @@ def _now(raw_lines: list[str]) -> dict:
             if s:
                 shp = s
             started = _parse_ts(ln) or started
-        elif flow and _HIDE_RE.search(ln):      # worker went idle after the last marker -> reset
+        elif flow and (_HIDE_RE.search(ln) or _FAIL_RE.search(ln)):   # idle OR a failed attempt -> reset to idle
             flow = label = None
             step = None
             vin = shp = ""
@@ -674,7 +683,7 @@ async function tick(){
  document.getElementById('gen').textContent = 'updated '+(d.generated_at||'').replace('T',' ');
  document.getElementById('log').textContent = (d.log||[]).join('\\n') || '(no shipment marked yet)';
  const lg=document.getElementById('log'); lg.scrollTop=lg.scrollHeight;
- const pillCls=a=>a==='Pick Up'?'p':(a==='API ERROR'?'e':'d');
+ const pillCls=a=>a==='Pick Up'?'p':((a==='API ERROR'||a==='NO PHOTOS')?'e':'d');
  document.getElementById('hist').innerHTML = (d.history||[]).map(h=>`<tr
    onclick="showPhotos('${esc(h.vin)}','${esc(h.action)}')" title="click to see the photos used">
    <td class=mut>${esc(h.when||'')}</td>

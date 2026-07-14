@@ -20,7 +20,6 @@
 [Unit]
 Description=Tesla delivery drop-off automation (emulator)
 After=graphical-session.target
-Wants=graphical-session.target
 
 [Service]
 Type=simple

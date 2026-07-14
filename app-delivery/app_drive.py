@@ -341,7 +341,7 @@ def ensure_emulator():
         return True
     log("  emulator not up — booting it (restoring snapshot)…")
     try:
-        subprocess.run(["bash", START_EMU], cwd=HERE, timeout=1200)
+        subprocess.run(["bash", START_EMU, "--headless"], cwd=HERE, timeout=1200)
     except subprocess.TimeoutExpired:
         log("  ! emulator boot timed out")
         return False
@@ -477,22 +477,53 @@ def picker_select(indices, tries=3):
         tap(619, 1517, pause=2.0)                    # known fallback location
 
 
-def picker_select_all(expected, tries=3):
-    """Select ALL photos currently in the picker (the gallery holds only this section's
-    files), then confirm. Order-independent — avoids any newest/oldest sort assumption."""
-    for _ in range(tries):
-        nodes = dump()
-        ivs = [n for n in nodes if n["rid"].endswith("ivPicture")]
-        tvs = [n for n in nodes if n["rid"].endswith("tvCheck")]
-        sel = {i for i, tv in enumerate(tvs) if tv["text"].strip().isdigit()}
-        targets = list(range(min(len(ivs), expected)))
-        missing = [i for i in targets if i not in sel]
-        if not missing and len(ivs) >= expected:
-            break
-        for i in missing:
+def _picker_selected_count(nodes):
+    """How many photos the PictureSelector grid currently has selected. This picker shows
+    the count in ps_tv_select_num (the node is absent when 0) and mirrors it in
+    ps_tv_preview ('Preview(N)') — NOT in the per-cell tvCheck badge, which stays empty
+    in this build. Reading the real counter is what lets us select each cell exactly once
+    instead of blindly re-tapping: every check-circle tap is a TOGGLE, so a re-tap of an
+    already-selected cell DESELECTS it."""
+    n = by(nodes, id_suffix="ps_tv_select_num")
+    if n and n["text"].strip().isdigit():
+        return int(n["text"].strip())
+    p = by(nodes, id_suffix="ps_tv_preview")
+    if p:
+        m = re.search(r"\((\d+)\)", p["text"])
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def picker_select_all(expected, tries=4):
+    """Select the first `expected` photos in the picker (the gallery holds ONLY this
+    section's files), verifying against the picker's own selected-count — NOT tvCheck,
+    which never carries a digit in this build. Each check-circle tap is a toggle, so we
+    tap a cell ONCE and wait for the running count to tick up before moving to the next;
+    a tap that never registers is retried on the SAME (still-unselected) cell, and we
+    never re-tap a counted cell (which would toggle it back off — the old 'select,
+    unselect, reselect' churn that left sections a photo short)."""
+    # Wait for every thumbnail to actually render — the MediaStore scan can lag behind
+    # gallery_push, and selecting before the Nth cell appears is how a section ended up
+    # short (e.g. 3 of 4 sides).
+    wait_until(lambda ns: sum(1 for n in ns if n["rid"].endswith("ivPicture")) >= expected,
+               tries=10, interval=0.5)
+    for i in range(expected):
+        target = i + 1
+        for _ in range(tries):
+            nodes = dump()
+            if _picker_selected_count(nodes) >= target:
+                break                                  # cell i is selected; move to the next
+            ivs = [n for n in nodes if n["rid"].endswith("ivPicture")]
+            if i >= len(ivs):
+                break                                  # not present (shouldn't happen post-wait)
             x1, y1, x2, y2 = ivs[i]["bounds"]
-            tap(x2 - 40, y1 + 40, pause=0.7)
+            tap(x2 - 40, y1 + 40, pause=0.6)           # toggle on, then let the count register
+            wait_until(lambda ns: _picker_selected_count(ns) >= target, tries=5, interval=0.4)
     nodes = dump()
+    got = _picker_selected_count(nodes)
+    if got < expected:
+        log(f"  ! picker: only {got}/{expected} photo(s) selected")
     comp = next((n for n in nodes if n["rid"].endswith("ps_tv_complete")
                  or n["rid"].endswith("ps_complete_select")), None)
     tap(comp["cx"], comp["cy"], pause=NAV_PAUSE) if comp else tap(619, 1517, pause=NAV_PAUSE)
@@ -520,7 +551,21 @@ def first_plus_box(nodes):
     return boxes[0] if boxes else None
 
 
+def _scroll_anchor(nodes):
+    """A scroll-position fingerprint for the Add Photos page: the (text, top-y) of every
+    labelled node. Thumbnails carry no text, so this ignores the async image loads that
+    make a raw node dump look 'new' between two identical scroll positions — only a real
+    scroll (which moves the section titles) changes it."""
+    return tuple(sorted((n["text"], n["bounds"][1]) for n in nodes if n["text"].strip()))
+
+
 # ------------------------------- decode ------------------------------------
+# VINs whose decode found NOTHING on SuperDispatch (no delivered shipment with photos).
+# When such a shipment is eventually parked, it's recorded as 'no_photos' instead of a
+# generic dropoff failure, so the dashboard shows NO PHOTOS rather than API ERROR.
+_no_photos: set = set()
+
+
 def decode(vin):
     step("dropoff", 2, "decode", vin=vin)
     log(f"  decoding {vin} (fetch latest shipment + model + OCR)…")
@@ -535,6 +580,10 @@ def decode(vin):
     sides = sorted(glob.glob(os.path.join(out, "sides", "*.jpg")))
     vinp = glob.glob(os.path.join(out, "vin_plate", "*.jpg"))
     key = glob.glob(os.path.join(out, "key", "*.jpg"))
+    if not (sides or vinp or key):
+        _no_photos.add(vin)              # SD has no delivered photos at all for this VIN
+    else:
+        _no_photos.discard(vin)
     if not (sides and vinp and key):
         raise RuntimeError(f"decode incomplete for {vin}: sides={len(sides)} vin={len(vinp)} key={len(key)}")
     return sides, vinp[0], key[0]
@@ -559,23 +608,30 @@ def add_photos_for_unit(vin, unit_node):
     for section, files in (("All Four Sides", sides[:4]), ("VIN Plate", [vinp]), ("Key", [key])):
         gallery_clear()
         gallery_push(files)
-        # Find this section's empty '+' box. Once the earlier sections are filled (4 sides +
-        # 1 VIN photo) the later ones — especially Key — sit WELL below the fold, so a single
-        # swipe wasn't enough (the "no '+' box for section Key" failure). Snap to the top,
-        # then page DOWN repeatedly until the box appears or the list stops moving.
+        # Find this section's empty '+' box. Each filled section drops its own '+' box, so
+        # the top-most remaining box is always the CURRENT section's — but once the earlier
+        # sections are filled (4 sides + 1 VIN photo) the later ones — especially Key — sit
+        # WELL below the fold. Snap to the top, then page DOWN until the box appears or the
+        # page truly stops moving. Progress is judged by the text labels' positions (robust
+        # to the async thumbnail loads that used to make a single dead swipe look like "new
+        # content"), and we require TWO dead swipes before giving up so one absorbed swipe
+        # can't abort early — that was the "no '+' box for section Key" failure.
         swipe(360, 500, 360, 1200, pause=0.8)          # scroll to top
         plus = first_plus_box(dump())
-        prev_sig = None
-        for _ in range(6):
+        stagnant = 0
+        for _ in range(10):
             if plus:
                 break
-            swipe(360, 1200, 360, 500, ms=500, pause=0.7)   # page down ~one screen
+            before = _scroll_anchor(dump())
+            swipe(360, 1200, 360, 500, ms=500, pause=0.8)   # page down ~one screen
             nodes = dump()
             plus = first_plus_box(nodes)
-            sig = tuple((n["rid"], n["bounds"]) for n in nodes)
-            if sig == prev_sig:                        # nothing new scrolled in -> at the bottom
-                break
-            prev_sig = sig
+            if _scroll_anchor(nodes) == before:        # nothing moved this swipe
+                stagnant += 1
+                if stagnant >= 2:                      # two dead swipes -> genuinely the bottom
+                    break
+            else:
+                stagnant = 0
         if not plus:
             raise RuntimeError(f"no '+' box for section {section}")
         log(f"  section '{section}': pushing {len(files)} photo(s), selecting all")
@@ -916,30 +972,94 @@ def _dropoff_open_detail(confirm):
     return (committed, ship_units)
 
 
+def _card_shipments(nodes, vd):
+    """The shipment number(s) shown on the In-Transit card whose 'View Details' button is
+    `vd`. The card prints its number(s) just above the button (one card can list several,
+    e.g. two shipments sharing a lane), so we take the closest SHP-bearing text above it."""
+    above = [n for n in nodes if n["bounds"][1] < vd["bounds"][1]
+             and re.search(r"SHP\d{4}-\w+", n["text"] + n["desc"])]
+    if not above:
+        return set()
+    above.sort(key=lambda n: n["bounds"][1])
+    return {s.upper() for s in re.findall(r"SHP\d{4}-\w+", above[-1]["text"] + above[-1]["desc"])}
+
+
+def _open_unskipped_dropoff(skip):
+    """Open the first In-Transit card that has a shipment NOT in `skip` (parked API errors +
+    shipments already tried this drain), leave its detail loaded, and return its shipment
+    number ('?' if unreadable) — or None only when there is genuinely nothing left to try.
+
+    Reads each card's shipment number straight from the LIST (never opening a skipped card)
+    and SCROLLS to reveal more when every visible card is skipped. The list virtualizes
+    (only a couple of cards mount at once) and re-renders lazily after a reload, so the old
+    open-check-go-back-to-top approach raced: with a skipped shipment (parked, or one just
+    tried) sitting at the top, it could never reach the droppable shipments below and the
+    whole drain quit after a single shipment."""
+    # Tab count reappears before the cards; wait for the actual card list (or a settled
+    # empty queue) so we don't scan an unrendered list and quit early.
+    wait_until(lambda ns: find_text(ns, "View Details") or _intransit_count(ns) == 0,
+               tries=16, interval=0.5)
+    for _ in range(24):
+        nodes = dump()
+        vds = sorted([n for n in nodes if "View Details" in (n["text"] + n["desc"])],
+                     key=lambda n: n["bounds"][1])
+        target = next((v for v in vds
+                       if not _card_shipments(nodes, v)                 # unreadable → try it
+                       or not _card_shipments(nodes, v).issubset(skip)), None)
+        if target is not None:
+            _open_detail(target)
+            shp = next((_shp_of(u["node"]["desc"]) for u in units_from(dump())
+                        if _shp_of(u["node"]["desc"])), "")
+            return shp or "?"
+        # every visible card is skipped — scroll to reveal more; stop only when the list
+        # truly doesn't move (genuinely the bottom / nothing new).
+        before = _scroll_anchor(nodes)
+        _scroll_list_down()
+        if _scroll_anchor(dump()) == before:
+            return None
+    return None
+
+
 def drain_queue(confirm, max_shipments):
-    """Drop off In-Transit shipments present right now (up to max_shipments). Returns the
+    """Drop off In-Transit shipments present now (up to max_shipments). SKIPS shipments parked as
+    API errors and any already tried this drain, so one broken drop-off can neither loop nor block
+    the rest; a drop-off that keeps failing is parked (api_errors) after a few tries. Returns the
     count dropped off."""
     if not goto_in_transit_home():
         log("couldn't reach the In-Transit home tab.")
         return 0
-    done = attempts = 0
-    while done < max_shipments and attempts < max_shipments + 4:   # cap retries on a stuck shipment
-        attempts += 1
-        ensure_app()
-        nodes = dump()
-        cnt = _intransit_count(nodes)
-        vd = find_text(nodes, "View Details")
-        if not vd or cnt == 0:
+    done = 0
+    tried: set = set()                             # shipments attempted/skipped this drain
+    for _ in range(max_shipments + 8):
+        if done >= max_shipments:
             break
-        log(f"In Transit ({cnt}) — dropping off shipment {done + 1}")
-        _open_detail(vd)
-        committed, _ = _dropoff_open_detail(confirm)
+        ensure_app()
+        # After a commit — or a restart_app relaunch (+ possible re-login) on the failure
+        # path — the In-Transit list can take many seconds to reload; a premature 0 here
+        # abandons the shipments still queued behind this one (it once exited after a
+        # single drop-off/failure). Re-assert the home tab and wait generously for the
+        # count to render before trusting a 0.
+        goto_in_transit_home()
+        nodes = wait_until(lambda ns: _intransit_count(ns) > 0, tries=24, interval=0.6)
+        if _intransit_count(nodes) == 0:
+            break
+        skip = _api_error_shipments() | {s.upper() for s in tried}
+        opened = _open_unskipped_dropoff(skip)     # opens the detail; None => nothing left to try
+        if opened is None:
+            break
+        log(f"In Transit — dropping off {opened}")
+        committed, ship_units = _dropoff_open_detail(confirm)
         if not confirm:
             break                                  # dry run: one and done
-        if not committed:
-            goto_in_transit_home(); continue       # failed (e.g. API error) — leave for next cycle
-        done += 1
-        wait_until(lambda ns: handle_dialogs(ns) or find_text(ns, "In Transit ("), tries=8)
+        shp = (ship_units[0][1] if ship_units else opened) or opened
+        vin = ship_units[0][0] if ship_units else ""
+        tried.add(shp)
+        if committed:
+            done += 1
+            _dropoff_fails.pop(shp, None)
+            wait_until(lambda ns: handle_dialogs(ns) or find_text(ns, "In Transit ("), tries=8)
+        else:
+            _note_dropoff_fail(shp, vin)           # park after repeated failures -> future drains skip it
         goto_in_transit_home()
     return done
 
@@ -1428,6 +1548,27 @@ def _api_error_shipments():
         return {(r[0] or "").strip().upper() for r in rows if r[0]}
     except sqlite3.Error:
         return set()
+
+
+_dropoff_fails: dict = {}          # shipment -> consecutive drain failures (parked after PARK_AFTER)
+
+
+def _note_dropoff_fail(shp, vin=""):
+    """A drop-off attempt failed. After PARK_AFTER failures the shipment is PARKED (api_errors)
+    so future drains SKIP it instead of re-attempting forever — the drop-off analog of the
+    pickup-departure parking. In-memory count; a worker restart resets it (safe)."""
+    PARK_AFTER = 3
+    if not shp or shp == "?":
+        return
+    _dropoff_fails[shp] = _dropoff_fails.get(shp, 0) + 1
+    log(f"  drop off failed for {shp} ({_dropoff_fails[shp]}/{PARK_AFTER} before parking)")
+    if _dropoff_fails[shp] >= PARK_AFTER:
+        if vin in _no_photos:
+            _record_api_error(shp, vin, "no_photos",
+                              "no delivered SD photos for this VIN — nothing to attach")
+        else:
+            _record_api_error(shp, vin, "dropoff", f"drop off failed {_dropoff_fails[shp]}x — parking")
+        _dropoff_fails.pop(shp, None)
 
 
 _all_skipped_logged = False   # so "all pickups skipped" prints once, not every idle cycle
