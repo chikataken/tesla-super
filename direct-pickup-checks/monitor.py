@@ -32,7 +32,11 @@ from email.message import EmailMessage
 import config
 import db
 
-SERVICES = ["cloudflared-direct-pickup", "direct-pickup-listener", "direct-pickup-worker"]
+# Webhooks arrive via the shipment-creator tunnel (test.wastake.com -> :8001), whose
+# app.py forwards /webhooks/* to the listener — the dedicated
+# cloudflared-direct-pickup tunnel is retired.
+SERVICES = ["cloudflared-shipment-creator", "shipment-creator-test-web",
+            "direct-pickup-listener", "direct-pickup-worker"]
 STATE_FILE = os.path.join(config.DATA_DIR, "monitor_state.json")
 
 
