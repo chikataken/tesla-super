@@ -17,8 +17,18 @@ CLI:  python sd_photos.py <VIN> [--type Delivery|Pickup|all] [--out DIR]
 from __future__ import annotations
 import argparse, os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 import sd_api
+
+# One pooled session for all photo downloads: reuse the TCP+TLS connection to GCS
+# instead of a fresh handshake per photo, and retry transient failures so a network
+# blip doesn't drop a photo from the set (GETs are idempotent — retrying is safe).
+_session = requests.Session()
+_session.mount("https://", HTTPAdapter(
+    max_retries=Retry(total=2, connect=2, read=2, backoff_factor=0.5,
+                      status_forcelist=[500, 502, 503, 504])))
 
 
 def order_for_vin(vin: str) -> dict | None:
@@ -50,7 +60,7 @@ def download(items: list[dict], dest: str) -> list[str]:
     saved = []
     for i, p in enumerate(items):
         try:
-            r = requests.get(p["url"], timeout=60)
+            r = _session.get(p["url"], timeout=(5, 30))
             if r.ok:
                 fn = os.path.join(dest, f"{i:02d}_{p['type']}_{(p['guid'] or '')[:8]}.jpg")
                 with open(fn, "wb") as f:
