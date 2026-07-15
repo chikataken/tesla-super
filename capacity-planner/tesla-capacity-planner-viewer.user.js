@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Capacity Planner — Requested History
 // @namespace    wastake.capacityplanner
-// @version      0.3.0
-// @description  Persistently tracks Tesla Requested-capacity changes. Changed / Y values are marked red directly on Capacity Planner and show their previous value and delta on hover. No launcher or popup panel.
+// @version      0.4.0
+// @description  Persistently tracks Tesla Requested-capacity changes. Changed / Y values are marked red directly on Capacity Planner and show their previous value and delta on hover. Also mirrors both capacity feeds to the shipment-creator server's change log. No launcher or popup panel.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
@@ -12,7 +12,9 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @connect      shipments.wastake.com
 // ==/UserScript==
 
 /*
@@ -34,7 +36,7 @@
   const REQUEST_HISTORY_KEY = 'cp_requested_history_v1';
   const HISTORY_LIMIT = 25;
 
-  const state = { req: null };
+  const state = { req: null, conf: null };
 
   // Persistent per carrier + origin + destination-group + date history. The first value is
   // a baseline; only a later different Requested value creates a change and a red marker.
@@ -107,17 +109,87 @@
     scheduleRequestedAnnotations();
   }
 
-  // ---- capture requestcapacity ----------------------------------------------
-  function classify(url) {
-    return url && /requestcapacity/i.test(url) ? 'req' : null;
+  // ---- mirror both feeds to the shipment-creator change log -----------------
+  // The server appends a row only when a value differs from the last one it logged, so
+  // re-sending the same snapshot is harmless; we still debounce ~2s and skip byte-identical
+  // payloads to keep normal browsing quiet.
+  const SNAPSHOT_URL = 'https://shipments.wastake.com/api/capacity-snapshot';
+  let pushTimer = null, lastPushSig = '';
+  function buildSnapshot() {
+    const req = state.req && state.req.data, conf = state.conf && state.conf.data;
+    const carrierId = (req && req.carrierId) != null ? req.carrierId : (conf && conf.carrierId);
+    const requested = [], confirmed = [];
+    (((req || {}).locationRequests) || []).forEach((location) => {
+      (location.groupRequests || []).forEach((group) => {
+        (group.capacityRequests || []).forEach((r) => {
+          requested.push({
+            origin_id: location.originLocationId, origin_name: location.originLocationName || '',
+            dest_group_id: group.destinationGroupId, dest_group_name: group.destinationGroupName || '',
+            date: r.date, capacity: r.capacity, latest_request_date: r.latestRequestDate || null,
+          });
+        });
+      });
+    });
+    (((conf || {}).locationCapacities) || []).forEach((location) => {
+      (location.groupCapacities || []).forEach((group) => {
+        (group.confirmCapacities || []).forEach((c) => {
+          confirmed.push({
+            origin_id: location.originLocationId, dest_group_id: group.destinationGroupId,
+            date: c.capacityDate, capacity: c.capacity, scheduled: c.scheduled,
+            is_conflict: !!c.isConflict,
+          });
+        });
+      });
+    });
+    if (!requested.length && !confirmed.length) return null;
+    return { carrier_id: carrierId, requested, confirmed };
   }
-  function ingest(text) {
+  function scheduleServerPush() {
+    if (typeof GM_xmlhttpRequest !== 'function') return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => {
+      const snap = buildSnapshot();
+      if (!snap) return;
+      const sig = JSON.stringify(snap);
+      if (sig === lastPushSig) return;
+      GM_xmlhttpRequest({
+        method: 'POST',
+        url: SNAPSHOT_URL,
+        headers: { 'Content-Type': 'application/json' },
+        data: sig,
+        onload: (r) => {
+          if (r.status >= 200 && r.status < 300) {
+            lastPushSig = sig;
+            try {
+              const j = JSON.parse(r.responseText);
+              if (j.requested_changes || j.confirmed_changes) {
+                LOG('server logged changes', { requested: j.requested_changes, confirmed: j.confirmed_changes });
+              }
+            } catch (_) {}
+          } else {
+            LOG('capacity-snapshot HTTP ' + r.status);
+          }
+        },
+        onerror: () => LOG('capacity-snapshot send failed'),
+      });
+    }, 2000);
+  }
+
+  // ---- capture requestcapacity + getcapacityconfirmations -------------------
+  function classify(url) {
+    if (!url) return null;
+    if (/requestcapacity/i.test(url)) return 'req';
+    if (/getcapacityconfirmations/i.test(url)) return 'conf';
+    return null;
+  }
+  function ingest(text, name) {
     try {
       const j = JSON.parse(text);
       if (!j || !j.data) return;
-      state.req = j;
-      trackRequested(j);
-      LOG('captured requestcapacity');
+      state[name] = j;
+      if (name === 'req') trackRequested(j);
+      LOG('captured ' + (name === 'req' ? 'requestcapacity' : 'getcapacityconfirmations'));
+      scheduleServerPush();
     } catch (_) {}
   }
 
@@ -128,7 +200,7 @@
       const url = (input && input.url) || input;
       const name = classify(url);
       const p = oFetch.apply(this, arguments);
-      if (name) p.then((r) => { r.clone().text().then(ingest).catch(() => {}); }).catch(() => {});
+      if (name) p.then((r) => { r.clone().text().then((t) => ingest(t, name)).catch(() => {}); }).catch(() => {});
       return p;
     };
   }
@@ -138,8 +210,8 @@
   const oOpen = X.prototype.open, oSend = X.prototype.send;
   X.prototype.open = function (m, u) { this.__cpHistoryUrl = u; return oOpen.apply(this, arguments); };
   X.prototype.send = function () {
-    const xhr = this;
-    if (classify(xhr.__cpHistoryUrl)) xhr.addEventListener('load', function () { try { ingest(xhr.responseText); } catch (_) {} });
+    const xhr = this, name = classify(xhr.__cpHistoryUrl);
+    if (name) xhr.addEventListener('load', function () { try { ingest(xhr.responseText, name); } catch (_) {} });
     return oSend.apply(this, arguments);
   };
 

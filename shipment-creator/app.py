@@ -188,6 +188,104 @@ def api_tesla_status(body: dict = Body(...)):
     return {"ok": True, "stored": stored}
 
 
+def _capacity_tables(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS capacity_request_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_id INTEGER, origin_id INTEGER,
+        origin_name TEXT, dest_group_id INTEGER, dest_group_name TEXT,
+        capacity_date TEXT, capacity INTEGER, latest_request_date TEXT, observed_at TEXT)""")
+    con.execute("""CREATE INDEX IF NOT EXISTS idx_capreq_lane ON capacity_request_log
+        (carrier_id, origin_id, dest_group_id, capacity_date)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS capacity_confirm_log(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, carrier_id INTEGER, origin_id INTEGER,
+        dest_group_id INTEGER, capacity_date TEXT, capacity INTEGER, scheduled INTEGER,
+        is_conflict INTEGER, observed_at TEXT)""")
+    con.execute("""CREATE INDEX IF NOT EXISTS idx_capconf_lane ON capacity_confirm_log
+        (carrier_id, origin_id, dest_group_id, capacity_date)""")
+
+
+@app.post("/api/capacity-snapshot")
+def api_capacity_snapshot(body: dict = Body(...)):
+    """OPEN (no-auth) intake for the capacity-planner extension. Receives the two feeds the
+    Tesla page already fetched (requestcapacity + getcapacityconfirmations) and appends a row
+    ONLY when a value changed since the last recorded row for that lane+date — an append-only
+    change log, not full snapshots. Body:
+    {"carrier_id": 378,
+     "requested":  [{"origin_id","origin_name","dest_group_id","dest_group_name",
+                     "date","capacity","latest_request_date"}, ...],
+     "confirmed":  [{"origin_id","dest_group_id","date","capacity","scheduled","is_conflict"}, ...]}
+    """
+    import sqlite3 as _sq
+    import datetime as _dt
+    carrier = int(body.get("carrier_id") or 0)
+    con = _sq.connect(_DROPOFFS_DB, timeout=10)
+    req_logged = conf_logged = 0
+    try:
+        _capacity_tables(con)
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        for r in (body.get("requested") or []):
+            date = (r.get("date") or "")[:10]
+            if not date:
+                continue
+            key = (carrier, int(r.get("origin_id") or 0), int(r.get("dest_group_id") or 0), date)
+            last = con.execute(
+                "SELECT capacity FROM capacity_request_log WHERE carrier_id=? AND origin_id=?"
+                " AND dest_group_id=? AND capacity_date=? ORDER BY id DESC LIMIT 1", key).fetchone()
+            cap = int(r.get("capacity") or 0)
+            if last is not None and last[0] == cap:
+                continue
+            con.execute(
+                "INSERT INTO capacity_request_log(carrier_id,origin_id,origin_name,dest_group_id,"
+                "dest_group_name,capacity_date,capacity,latest_request_date,observed_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)",
+                (key[0], key[1], r.get("origin_name"), key[2], r.get("dest_group_name"),
+                 date, cap, r.get("latest_request_date"), now))
+            req_logged += 1
+        for c in (body.get("confirmed") or []):
+            date = (c.get("date") or "")[:10]
+            if not date:
+                continue
+            key = (carrier, int(c.get("origin_id") or 0), int(c.get("dest_group_id") or 0), date)
+            vals = (int(c.get("capacity") or 0), int(c.get("scheduled") or 0),
+                    1 if c.get("is_conflict") else 0)
+            last = con.execute(
+                "SELECT capacity,scheduled,is_conflict FROM capacity_confirm_log WHERE carrier_id=?"
+                " AND origin_id=? AND dest_group_id=? AND capacity_date=?"
+                " ORDER BY id DESC LIMIT 1", key).fetchone()
+            if last is not None and tuple(last) == vals:
+                continue
+            con.execute(
+                "INSERT INTO capacity_confirm_log(carrier_id,origin_id,dest_group_id,"
+                "capacity_date,capacity,scheduled,is_conflict,observed_at) VALUES(?,?,?,?,?,?,?,?)",
+                key + vals + (now,))
+            conf_logged += 1
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "requested_changes": req_logged, "confirmed_changes": conf_logged}
+
+
+@app.get("/api/capacity-history")
+def api_capacity_history(days: int = 14):
+    """Change history for the capacity-planner UI: every logged requested-capacity change
+    (and confirmed/scheduled change) observed in the last `days` days, oldest first, flat —
+    the client groups rows into per-lane timelines."""
+    import sqlite3 as _sq
+    import datetime as _dt
+    since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=max(1, min(days, 90))))\
+        .isoformat(timespec="seconds")
+    con = _sq.connect(_DROPOFFS_DB, timeout=10)
+    con.row_factory = _sq.Row
+    try:
+        _capacity_tables(con)
+        requested = [dict(r) for r in con.execute(
+            "SELECT * FROM capacity_request_log WHERE observed_at>=? ORDER BY id", (since,))]
+        confirmed = [dict(r) for r in con.execute(
+            "SELECT * FROM capacity_confirm_log WHERE observed_at>=? ORDER BY id", (since,))]
+    finally:
+        con.close()
+    return {"ok": True, "requested": requested, "confirmed": confirmed}
+
+
 def _staged_files() -> list[str]:
     return sorted(glob.glob(os.path.join(_orders_dir(), "*.json")),
                   key=os.path.getmtime, reverse=True)
