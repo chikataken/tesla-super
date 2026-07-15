@@ -45,6 +45,13 @@ else
 fi
 
 # No -no-snapshot: let the AVD save/restore state so your app login survives reboots.
+# NOTE: hw.ramSize edits in config.ini do NOT take effect while the cached
+# hardware-qemu.ini + snapshots pin the old value (the guest ran at 2560M for weeks
+# after config.ini said 4096M, and the low-RAM guest's am_low_memory kills are what
+# zombie the app). To apply a RAM change: stop the emulator, then
+#   rm -rf ~/.android/avd/$AVD_NAME.avd/snapshots ~/.android/avd/$AVD_NAME.avd/hardware-qemu.ini
+# and let the next boot (cold, one-time) rebuild both. Login survives — it lives on
+# the userdata disk, not in the snapshot.
 nohup emulator -avd "$AVD_NAME" -no-audio -no-boot-anim "${WINFLAGS[@]}" \
   > "$HERE/emulator.log" 2>&1 &
 EMU_PID=$!

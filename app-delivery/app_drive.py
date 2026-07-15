@@ -814,7 +814,13 @@ def restart_app(wait=14):
     log("  app wedged / logged out — force-stop + relaunch…")
     shell(f"am force-stop {APP}")
     time.sleep(2)
-    shell(f"monkey -p {APP} -c android.intent.category.LAUNCHER 1")
+    # Relaunch with a CLEARED task — the swipe-away-and-reopen equivalent. A monkey
+    # launcher relaunch can rehydrate the RN UI from the saved task: after an
+    # am_low_memory kill the app then RENDERS the cached In-Transit home while its
+    # session is dead, so _home_now() passes, login_app() never runs, and the worker
+    # idles on a zombie app (Jul 14: 5h silent). A cleared task cold-starts the app,
+    # so a dead session surfaces as the LOGIN screen, which login_app() drives.
+    shell(f"am start -W -n {APP}/.MainActivity --activity-clear-task")
     time.sleep(6)                                     # let the splash render
     nodes = wait_until(lambda ns: _home_now(ns) or _on_login(ns), tries=wait, interval=2.0)
     if _home_now(nodes):
@@ -870,6 +876,10 @@ def grant_location():
     'Location Permission' prompt stops recurring."""
     shell(f"pm grant {APP} android.permission.ACCESS_FINE_LOCATION")
     shell(f"pm grant {APP} android.permission.ACCESS_COARSE_LOCATION")
+    # BLUETOOTH_SCAN too: the app's activity teardown calls cancelDiscovery(), which
+    # without this grant throws a FATAL SecurityException (seen Jul 14 11:26) — an
+    # independent source of app deaths during restart churn.
+    shell(f"pm grant {APP} android.permission.BLUETOOTH_SCAN")
     shell("cmd location set-location-enabled true")
 
 
