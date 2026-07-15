@@ -544,29 +544,22 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 </style></head><body><div class=wrap>
  <h1>Tesla Delivery Service</h1>
  <div class=sub>shipments.wastake.com › App · auto-refreshes every 4s · <span id=gen></span></div>
- <div class=row>
-   <div class=card><div class=k>Status</div><div class=v id=status>…</div></div>
-   <div class=card><div class=k>Picked up</div><div class=v id=pickups>…</div></div>
-   <div class=card><div class=k>Dropped off</div><div class=v id=dropoffs>…</div></div>
-   <div class=card><div class=k>API errors</div><div class=v id=apierrors>…</div></div>
- </div>
  <div class="card hero idle" id=hero>loading…</div>
  <h2 id=liveact>Live activity</h2>
  <details id=logwrap open><summary>Show raw log</summary><pre id=log>loading…</pre></details>
  <div class=histhead>
-   <button id=tabDelivered class="htab on">All</button>
+   <button id=tabMarks class="htab on">Log</button>
+   <button id=tabDelivered class="htab">All</button>
    <button id=tabUnmarked class="htab">Unmarked</button>
-   <button id=tabMarks class="htab">Log</button>
    <span class=mut id=histsub style="margin-left:auto;font-size:12px"></span>
  </div>
- <div id=viewDelivered>
+ <div id=viewDelivered hidden>
    <table><thead><tr><th>When</th><th>Status</th><th>VIN</th><th>Model</th><th>Shipment</th><th>Photos</th></tr></thead>
    <tbody id=deliv><tr><td colspan=6 class=mut style=padding:14px>loading…</td></tr></tbody></table>
  </div>
- <div id=viewMarks hidden>
-   <div class=mut style="font-size:12px;margin:0 0 8px">Exterior / VIN / Key = photo found?</div>
+ <div id=viewMarks>
    <table><thead><tr><th>When</th><th>Action</th><th>VIN</th><th>Model</th><th>Shipment</th>
-     <th>Exterior</th><th>VIN</th><th>Key</th></tr></thead>
+     <th>VIN</th><th>Key</th></tr></thead>
    <tbody id=hist></tbody></table>
  </div>
 </div>
@@ -579,9 +572,7 @@ PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <div id=lightbox class=lightbox onclick="if(event.target===this)closeLightbox()"><img id=lbimg src="" alt=""></div>
 <script>
 const esc=s=>(s??'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-let histTab='delivered', lastDeliv=0;
-const yn=v=>v==null?'<span class=mut>—</span>'
-   :(v?'<span class="pill y">yes</span>':'<span class="pill n">no</span>');
+let histTab='marks', lastDeliv=0;
 // VIN: real OCR plate = yes; pulled from rear/front fallback = yellow "!"
 const vinCell=v=>v==null?'<span class=mut>—</span>'
    :(v?'<span class="pill y">yes</span>':'<span class="pill w">!</span>');
@@ -605,14 +596,17 @@ function closeLightbox(){ document.getElementById('lightbox').style.display='non
 document.addEventListener('keydown',e=>{ if(e.key!=='Escape')return;
   if(document.getElementById('lightbox').style.display==='flex') closeLightbox(); else closeModal(); });
 const fmtAge=s=>s==null?'':(s<60?s+'s':Math.floor(s/60)+'m '+(s%60)+'s');
-function renderNow(now,up,curVin){
+function renderNow(now,up,curVin,marked){
  const el=document.getElementById('hero');
  if(!now||!now.flow){
    // Idle (or a VIN in-flight without STEP markers) -> the classic blue box with the
    // driver phone hint (curVin shows the VIN being marked when there's no active flow).
    el.className='card hero now';
    const msg = up ? (curVin || 'idle - add "Andrew Enkh 3106925984" as driver to auto mark') : '—';
-   el.innerHTML = `<div class=k>Currently marking</div><div class=v>${esc(msg)}</div>`;
+   // No stat-tile row anymore — the marked total (picked up + dropped off) rides at
+   // the end of the idle box instead.
+   const cnt = (up && marked!=null) ? `<span class=mut title="picked up + dropped off"> · ${marked}</span>` : '';
+   el.innerHTML = `<div class=k>Currently marking</div><div class=v>${esc(msg)}${cnt}</div>`;
    return;
  }
  el.className='card hero '+now.flow;
@@ -674,12 +668,7 @@ document.getElementById('tabMarks').addEventListener('click',()=>setHistTab('mar
 async function tick(){
  let d; try{ d=await (await fetch('api',{cache:'no-store'})).json(); }catch(e){ return; }
  const up = d.running || d.log_fresh;
- document.getElementById('status').innerHTML =
-   `<span class="dot ${up?'on':'off'}"></span>${up?'Running':'Stopped'}`;
- document.getElementById('pickups').textContent = d.stats.pickups;
- document.getElementById('dropoffs').textContent = d.stats.dropoffs;
- document.getElementById('apierrors').textContent = d.stats.api_errors ?? 0;
- renderNow(d.now, up, d.current_vin);
+ renderNow(d.now, up, d.current_vin, (d.stats.pickups||0)+(d.stats.dropoffs||0));
  document.getElementById('gen').textContent = 'updated '+(d.generated_at||'').replace('T',' ');
  document.getElementById('log').textContent = (d.log||[]).join('\\n') || '(no shipment marked yet)';
  const lg=document.getElementById('log'); lg.scrollTop=lg.scrollHeight;
@@ -689,8 +678,8 @@ async function tick(){
    <td class=mut>${esc(h.when||'')}</td>
    <td><span class="pill ${pillCls(h.action)}">${esc(h.action)}</span>${h.check==='error'?' <span class="pill err">⚠ ERROR</span>':''}</td>
    <td class=vin>${esc(h.vin)}</td><td>${esc(h.model||'')}</td>
-   <td class=mut>${esc(h.shipment||'')}</td>
-   <td>${yn(h.exterior)}</td><td>${vinCell(h.vin_found)}</td><td>${keyCell(h.key_found,h.vin_found)}</td></tr>`).join('');
+   <td class=mut>${esc((h.shipment||'').replace(/^SHP\\d{4}-/,''))}</td>
+   <td>${vinCell(h.vin_found)}</td><td>${keyCell(h.key_found,h.vin_found)}</td></tr>`).join('');
  if(histTab==='marks'){
    const n=(d.history||[]).filter(h=>h.check==='error').length;
    document.getElementById('histsub').textContent = n?`${n} link error${n>1?'s':''}`:'';
