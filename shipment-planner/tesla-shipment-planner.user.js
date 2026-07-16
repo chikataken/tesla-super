@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Shipment Planner Helper
 // @namespace    wastake.shipment-planner
-// @version      0.4.0
-// @description  Opens Available To Bid with 25 rows, forces the Ready Date window to ±2 weeks of today (rewritten in the request, no GUI), and hides EU-origin or EU-destination shipments in Tesla Shipment Planner.
+// @version      0.5.0
+// @description  Opens Available To Bid with 25 rows, forces the Ready Date window to ±2 weeks of today (rewritten in the request, no GUI) and hides the now-redundant Ready Date picker, and hides EU-origin or EU-destination shipments in Tesla Shipment Planner.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
@@ -126,7 +126,13 @@
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement('style');
     style.id = STYLE_ID;
-    style.textContent = `.${HIDDEN_CLASS}{display:none!important}`;
+    // Hide EU rows, and hide the Ready Date range picker entirely — the ±2-week
+    // window is forced in the request (readyDateWindow), so the calendar filter is
+    // both redundant and misleading. `tds-form-field.date-picker-width` uniquely
+    // wraps that field's label + datepicker. The Ready Date table COLUMN is untouched.
+    style.textContent =
+      `.${HIDDEN_CLASS}{display:none!important}` +
+      `tds-form-field.date-picker-width{display:none!important}`;
     (document.head || document.documentElement).appendChild(style);
   }
 
