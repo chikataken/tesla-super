@@ -19,22 +19,41 @@ separators like the native grid, and Tesla's own **Universal Sans Text / Display
 
 - **Transposed grid (v0.9.0): rows = dates, columns = lanes.** All 14 days — Monday of
   this week through Sunday of next — are rows in one continuous view (no week tabs), with
-  a NEXT WEEK divider row and today's row highlighted. Lane columns are grouped under
-  their origin (Tesla Inc Gigafactory Texas · Fremont Factory), each group ending in a
-  **Total** column (confirmed/requested + scheduled, red when under-confirmed). The
-  dummy **Confirm Capacity** button sits in each remaining day's date cell.
-- **Cells are an Excel-style box pair**: **left box = scheduled** — an uncolored editable
-  entry whose placeholder is Tesla's current confirmed amount; anything typed is a local
-  draft kept in Tampermonkey storage until the confirm write is wired. **Right box =
-  requested** — shades **red with a ▲/▼ delta while a change is unacknowledged; clicking
-  it acknowledges the change** (green with a pulse animation). Acknowledgements persist
-  per change timestamp, so a newer change on the same lane-day turns the box red again.
-- **Hover any requested box** with recorded history for the **timeline card** — every
-  observed value with timestamps (`6 first seen → 3 → 9`) plus Tesla's own
-  `latestRequestDate` stamp. A header chip counts **unacknowledged** requested changes from
-  the last 48 h. History comes from the server change log
-  (`GET …/api/capacity-history?days=14`, refreshed ~3 min; local GM history is the offline
-  fallback).
+  a NEXT WEEK divider row. Lane columns are grouped under their origin (Tesla Inc
+  Gigafactory Texas · Fremont Factory), each group ending in a **Total** column
+  (confirmed/requested + scheduled, red when under-confirmed).
+- **Date column = the Confirm Capacity control (v0.10.0).** Each date is a single
+  centered `Fri 17` label. While the day still needs confirming the **entire date cell
+  is highlighted light blue** (v0.13.0) and is the (dummy) Confirm Capacity click
+  target. Once a day counts as confirmed — past date, or Tesla already returns
+  confirmed capacity for it (heuristic until the real flag is captured with the write
+  path) — the date cell goes **white** and the rest of the **row grays out**.
+- **Lane names link to Tesla's lane pages (v0.13.0).** Column headers are real links
+  opening `…/logistics/calendar-view/{originId}/{destGroupId}?isOriginGroup=…` in a
+  new tab — the exact URL Tesla's own grid opens when a lane name is clicked
+  (captured from the native `window.open` handler).
+- **Cells are two fully-shaded halves** filling the entire cell height (v0.11.0; the
+  table uses a fixed layout whose lane columns share the window width evenly, so the
+  grid always fits a full-size browser window with no horizontal scrolling, and the
+  Total column shows just `confirmed / requested`): **left half = scheduled** — an
+  editable entry on a light tint, placeholder = Tesla's current confirmed amount;
+  typed drafts persist in Tampermonkey storage until the confirm write is wired. It
+  shades **red when the effective value doesn't match requested** (no green), live
+  while typing. **Right half = requested** on a slightly darker tint — it highlights
+  **amber while a change is unacknowledged**, with a single **▲/▼ ticker to the LEFT
+  of the current number** (green = increased, red = decreased vs the previous value).
+  Highlighted cells keep **black text** — only the ticker carries color. The ticker is
+  pinned to the half's left edge (out of flow, so the number stays centered) and
+  **remains visible after the amber is acknowledged** (v0.14.0). **Clicking the amber
+  half acknowledges the change** (pulse back to the base tint); acknowledgements
+  persist per change timestamp, so a newer change re-ambers the box. The current
+  day's row carries a **thin blue outline** all the way around (v0.14.0).
+- **Hover any requested box** with recorded history for the **history card** (v0.12.0):
+  a vertical column of the recorded values, **most recent at the top**, each with its
+  date + time; values are tinted green/red by direction vs the chronologically previous
+  one. A header chip counts **unacknowledged** requested changes from the last 48 h.
+  History comes from the server change log (`GET …/api/capacity-history?days=14`,
+  refreshed ~3 min; local GM history is the offline fallback).
 - **Confirm Capacity buttons** per remaining day — dummies for now (toast only); real
   confirming happens on the native grid.
 - **Bottom-right button** (same dark launcher style as the other extensions): **Tesla grid**

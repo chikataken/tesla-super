@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      1.0.2
-// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
+// @version      1.0.5
+// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -14,8 +14,9 @@
 /*
  * LIVE BIDDING — typing a price and pressing Enter to leave a card POSTs UpdateOffer for that card's VINs.
  *   Left half : route list (origin -> destination), each expanded with its VINs / list price / existing counter.
- *   Right half: one focused card per route — route, recommended-ETA date picker, and price box(es). CT and CAB
- *               (Cybercab, VIN starts 5YJA) each get their own box; one price -> every VIN in that subset.
+ *   Right half: one focused card per route — route, recommended-ETA date picker, and price box(es). CT, CAB
+ *               (Cybercab, VIN starts 5YJA), and YL (VIN starts 7SAY and its 6th character is B)
+ *               each get their own box; one price -> every VIN in that subset.
  *   Submit    : Enter only sends boxes you've TYPED into; pickup = next weekday at 16:00Z, USD (ETA counts calendar days, may be a weekend).
  *               Card stays green on success (HTTP 200), red on failure. Only sent VINs are committed.
  *   Note      : the panel is a snapshot loaded once (+ Reload). After bidding, hit Reload to see updated counters.
@@ -83,9 +84,11 @@
   const legKey = (g) => (g.origin && g.origin.name || '') + ' → ' + (g.destination && g.destination.name || '');
   const isCT = (b) => /^ct$/i.test(String(b && b.model || '').trim());
   const isCAB = (b) => /^5YJA/i.test(String(b && b.vin || ''));   // Cybercab: VIN begins 5YJA
-  const klass = (b) => isCAB(b) ? 'cab' : (isCT(b) ? 'ct' : 'std');
+  const isYL = (b) => /^7SAY.B/i.test(String(b && b.vin || '').trim()); // 7SAY + any 5th char + B as 6th char
+  const klass = (b) => isCAB(b) ? 'cab' : (isYL(b) ? 'yl' : (isCT(b) ? 'ct' : 'std'));
   function modelCell(b) {
     if (isCAB(b)) return '<span class="badge cab">CAB</span>';
+    if (isYL(b)) return '<span class="badge yl">YL</span>';
     if (isCT(b)) return '<span class="badge ct">CT</span>';
     const v = String(b && b.model || '').trim();
     if (/^m.$/i.test(v)) return v.charAt(1).toUpperCase();
@@ -166,7 +169,7 @@
     const sep = key.lastIndexOf('|'), leg = key.slice(0, sep), variant = key.slice(sep + 1);
     const g = state.groups.find((x) => legKey(x) === leg); if (!g) return { g: null, vins: [] };
     const all = (g.bids && g.bids.items) || [];
-    const vins = variant === 'cab' ? all.filter(isCAB) : variant === 'ct' ? all.filter((b) => !isCAB(b) && isCT(b)) : all.filter((b) => !isCAB(b) && !isCT(b));
+    const vins = all.filter((b) => klass(b) === variant);
     return { g, vins };
   }
   async function postOffer(bidId, verb, body) {
@@ -263,6 +266,7 @@
         .badge{display:inline-block;color:#fff;border-radius:10px;padding:1px 8px;font-size:11px;font-weight:700;letter-spacing:.5px}
         .badge.ct{background:rgba(120,135,160,.18);color:#566072;border:2px solid #000;border-radius:3px;padding:1px 6px}  /* CT shading = shipment-creator .vbub.ct */
         .badge.cab{background:rgba(212,170,60,.22);color:#8a6d14;border:2px solid #000;border-radius:3px;padding:1px 6px} /* CAB shading = shipment-creator .vbub.cc */
+        .badge.yl{background:#000;color:#fff;border:2px solid #000;border-radius:3px;padding:1px 6px} /* YL: dedicated 7SAY + 6th-character-B subset */
         /* focused bidding cards */
         .fcard{background:#fff;border:1px solid #e0e3e6;border-radius:14px;box-shadow:0 2px 10px rgba(0,0,0,.06);padding:18px 20px;margin:0 auto 16px;max-width:560px;transition:box-shadow .15s,border-color .15s,transform .15s}
         .fcard.active{border-color:#3457d5;box-shadow:0 10px 30px rgba(52,87,213,.22);transform:translateY(-1px)}
@@ -451,9 +455,11 @@
     const ph = maj != null ? String(maj) : '';
     const done = fullyPriced(subset);                     // skip on Enter only when ALL VINs are already priced
     const cap = variant === 'ct'
-      ? `<span class="badge ct">CT</span> <span class="num">${subset.length}</span>`
+      ? `<span class="num">${subset.length}</span> <span class="badge ct">CT</span>`
       : variant === 'cab'
-      ? `<span class="badge cab">CAB</span> <span class="num">${subset.length}</span>`
+      ? `<span class="num">${subset.length}</span> <span class="badge cab">CAB</span>`
+      : variant === 'yl'
+      ? `<span class="num">${subset.length}</span> <span class="badge yl">YL</span>`
       : `<span class="num">${subset.length}</span> VIN${subset.length === 1 ? '' : 's'}`;
     return `<div class="price-col"><div class="pcap">${cap}</div>`
       + `<div class="pin${local !== '' ? ' filled' : ''}"><span class="cur">$</span>`
@@ -538,19 +544,21 @@
     });
     body.left.innerHTML = ''; body.left.appendChild(lf);
 
-    // RIGHT — one card per route; CT and CAB (Cybercab) each get their own price box
+    // RIGHT — one card per route; CT, CAB (Cybercab), and YL each get their own price box
     const rf = document.createDocumentFragment();
     gs.forEach((g, ri) => {
       const key = legKey(g), vins = (g.bids && g.bids.items) || [];
-      const cab = vins.filter(isCAB);
-      const ct = vins.filter((b) => !isCAB(b) && isCT(b));
-      const std = vins.filter((b) => !isCAB(b) && !isCT(b));
+      const cab = vins.filter((b) => klass(b) === 'cab');
+      const yl = vins.filter((b) => klass(b) === 'yl');
+      const ct = vins.filter((b) => klass(b) === 'ct');
+      const std = vins.filter((b) => klass(b) === 'std');
       const O = shortLoc(g.origin && g.origin.name), D = shortLoc(g.destination && g.destination.name);
       const card = document.createElement('div'); card.className = 'fcard'; card.dataset.ri = ri;
       let boxes = '';
       if (std.length) boxes += priceBox(key, 'std', std);
       if (ct.length) boxes += priceBox(key, 'ct', ct);
       if (cab.length) boxes += priceBox(key, 'cab', cab);
+      if (yl.length) boxes += priceBox(key, 'yl', yl);
       card.innerHTML = `<div class="froute"><span>${O}</span><span class="arrow">→</span><span>${D}</span></div>`
         + `<div class="fmeta"><div class="fneed">Need by <b>${needByLabel(vins)}</b></div></div>`
         + dateSelector(g)

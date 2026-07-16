@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Capacity Planner — Requested History
 // @namespace    wastake.capacityplanner
-// @version      0.9.0
+// @version      0.14.0
 // @description  Full-screen replacement UI for Tesla Capacity Planner in the bidboard theme: This Week / Next Week grid, per-day cells with a schedule entry box (placeholder = Tesla's current confirmed) next to the requested number, hover history cards from the server change log, dummy Confirm Capacity buttons, and a bottom-right Tesla grid / Planner UI toggle. Still read-only toward Tesla; mirrors both capacity feeds to the shipment-creator change log.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
@@ -498,9 +498,21 @@
           confFor: (k) => confIndex.get(location.originLocationId + '|' + group.destinationGroupId + '|' + k),
         });
       });
-      origins.push({ id: location.originLocationId, name: (location.originLocationName || '').trim() || ('#' + location.originLocationId), lanes });
+      origins.push({
+        id: location.originLocationId,
+        name: (location.originLocationName || '').trim() || ('#' + location.originLocationId),
+        isOriginGroup: !!location.isOriginGroup,
+        lanes,
+      });
     });
     return { carrierId, origins };
+  }
+
+  // Same lane page Tesla's own grid opens when a lane name is clicked (captured from the
+  // native click handler: window.open('calendar-view/{originId}/{groupId}?isOriginGroup=…')).
+  function laneUrl(origin, lane) {
+    return location.origin + '/logistics/calendar-view/' + lane.originId + '/' + lane.groupId +
+      '?isOriginGroup=' + origin.isOriginGroup;
   }
 
   // ---- panel shell -----------------------------------------------------------
@@ -519,65 +531,87 @@
         .tools{display:flex;align-items:center;gap:12px;padding:14px 24px 10px;background:#fff;border-bottom:1px solid #ececec;flex-wrap:wrap}
         .title{font-family:"Universal Sans Display","Universal Sans Text",Inter,sans-serif;font-size:18px;font-weight:500;color:#171a20}
         .chip{font-size:12px;font-weight:700;color:#3457d5;background:#eaf0ff;border-radius:10px;padding:2px 8px;white-space:nowrap}
-        .chip.hot{color:#c0392b;background:#fdeceb}
+        .chip.hot{color:#8a6d14;background:#fff3cd}
         .legend{font-size:12px;color:#5c5e62}
         .legend b{color:#171a20;font-weight:700}
         .grow{flex:1}
         .gridwrap{flex:1;overflow:auto;background:#fff;padding:0 24px 24px}
-        table{border-collapse:separate;border-spacing:0;width:100%;background:#fff;border:0}
-        th,td{border-bottom:1px solid #ececec;border-right:1px solid #f2f2f2;padding:0;text-align:center;vertical-align:middle}
+        /* fixed layout + colgroup widths: the date and Total columns are pinned narrow and
+           the lane columns share the remaining width evenly, so the grid always fits a
+           full-size browser window exactly — no horizontal scrolling */
+        table{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;background:#fff;border:0}
+        th,td{border-bottom:1px solid #ececec;border-right:1px solid #f2f2f2;padding:0;text-align:center;vertical-align:middle;overflow:hidden}
         th:last-child,td:last-child{border-right:0}
         /* two stacked sticky header rows: origin groups on top, lane names under */
         thead tr:first-child th{position:sticky;top:0;background:#fff;z-index:3;height:30px;padding:4px 6px}
-        thead tr:nth-child(2) th{position:sticky;top:30px;background:#fff;z-index:3;border-bottom:1px solid #e2e2e2;padding:8px 6px}
-        th.og{font-size:12px;font-weight:700;color:#171a20;background:#f7f7f7!important;border-bottom:1px solid #e2e2e2}
-        th.lh{font-size:12px;font-weight:600;color:#171a20;min-width:118px}
-        th.lh.tot,td.tot{min-width:74px;background:#fbfbfb}
+        thead tr:nth-child(2) th{position:sticky;top:30px;background:#fff;z-index:3;border-bottom:1px solid #e2e2e2;padding:8px 4px}
+        th.og{font-size:12px;font-weight:700;color:#171a20;background:#f7f7f7!important;border-bottom:1px solid #e2e2e2;white-space:nowrap;text-overflow:ellipsis}
+        th.lh{font-size:12px;font-weight:600;color:#171a20;white-space:nowrap;text-overflow:ellipsis}
+        .lanelink{color:inherit;text-decoration:none}
+        .lanelink:hover{color:#3457d5;text-decoration:underline}
+        th.lh.tot,td.tot{background:#fbfbfb}
         th.corner{z-index:5!important}
-        th.lane,td.lane{position:sticky;left:0;background:#fff;z-index:2;text-align:left;padding:8px 12px 8px 0;min-width:118px;font-size:13px;font-weight:600;color:#171a20}
+        th.lane,td.lane{position:sticky;left:0;background:#fff;z-index:2;text-align:center;padding:4px 6px;font-size:13px;font-weight:600;color:#171a20}
+        /* thin blue outline around the whole current-day row: the cells' own borders are
+           outside the shaded halves, so they stay visible; :has() colors the row above's
+           bottom border to draw the outline's top edge without doubling lines */
         tr.today td{background:#f6f9ff}
         tr.today td.lane{background:#f6f9ff}
-        tr.wksep td{background:#fafafa;color:#9a9da1;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;text-align:left;padding:5px 12px}
-        .dow{font-size:13px;font-weight:700;color:#171a20}
-        .dow .today{display:inline-block;background:#3457d5;color:#fff;border-radius:10px;padding:1px 8px;font-weight:700}
-        .dt{font-size:11px;color:#9a9da1;margin-top:1px}
-        .cbtn{margin-top:6px;background:#3e6ae1;color:#fff;border:1px solid #3e6ae1;border-radius:4px;padding:4px 7px;font-size:9px;font-weight:600;letter-spacing:.04em;cursor:pointer;text-transform:uppercase}
-        .cbtn:hover{background:#3457d5;border-color:#3457d5}
+        tr:has(+ tr.today) td,tr:has(+ tr.today) th{border-bottom-color:#3457d5}
+        tr.today td{border-bottom-color:#3457d5}
+        tr.today td:first-child{border-left:1px solid #3457d5}
+        tr.today td:last-child{border-right:1px solid #3457d5}
+        tr.wksep td{background:#fafafa;color:#9a9da1;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;text-align:left;padding:4px 12px}
+        /* the whole date cell is the Confirm Capacity control: the ENTIRE cell is light
+           blue while the day still needs confirming; confirmed days keep a white date
+           cell (the rest of the row grays out) */
+        .datepill{display:inline-block;font-size:14px;font-weight:700;color:#171a20;white-space:nowrap}
+        tr td.lane.confirmable{cursor:pointer;background:#d9e7fd}
+        tr td.lane.confirmable:hover{background:#c8dcfb}
+        tr.confirmed td{background:#ececec}
+        tr.confirmed td.lane{background:#fff}
+        tr.confirmed .datepill{color:#8d9096}
+        tr.confirmed .bx{background:#e3e3e3;color:#8d9096}
+        tr.confirmed .osum{color:#b0b3b7}
         .osum{font-size:12px;font-weight:700;font-variant-numeric:tabular-nums}
         .osum.u{color:#c0392b}
-        .osched{font-size:10px;color:#9a9da1;font-weight:600}
-        td.cell{padding:8px 6px;background:#fff}
-        tr.today td.cell{background:#f6f9ff}
-        td.cell.zero .bx{color:#b0b3b7;background:#fff;border-color:#e4e5e7}
-        /* Excel-style box pair: left = our scheduled entry (uncolored), right = Tesla's
-           requested. The two share the middle border so they read as adjacent cells. */
-        .cw{display:flex;align-items:stretch;justify-content:center}
-        .bx{width:50px;height:34px;border:1px solid #cfd3d7;font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;text-align:center;background:#fff;color:#171a20}
-        .bx-s{border-radius:3px 0 0 3px;outline:0;padding:0 3px}
+        td.cell{padding:0;background:#fff;height:40px}
+        td.tot{height:40px}
+        tr.today td.cell{background:#eaf1ff}
+        td.cell.zero .bx{color:#b7bac0}
+        /* Cell split into two fully-shaded halves that fill the ENTIRE cell height:
+           left = scheduled entry, right = requested. Base tints tell them apart;
+           red = scheduled off requested, amber = requested changed (click to ack).
+           Highlight text stays black — only the ▲/▼ ticker carries color. */
+        .cw{display:flex;align-items:stretch;height:100%}
+        .bx{flex:1;min-width:0;height:100%;border:0;font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;text-align:center;color:#171a20}
+        .bx-s{background:#eceef1;outline:0;padding:0 3px;border-radius:0}
         .bx-s::placeholder{color:inherit;opacity:.45}
-        .bx-s:focus{position:relative;z-index:1;border-color:#3457d5;box-shadow:0 0 0 3px rgba(52,87,213,.15)}
-        .bx-r{border-left:0;border-radius:0 3px 3px 0;display:inline-flex;align-items:center;justify-content:center;gap:3px}
+        .bx-s:focus{box-shadow:inset 0 0 0 2px #3457d5}
+        .bx-s.off{background:#f5c6cb;color:#171a20}
+        .bx-r{position:relative;background:#e1e4e9;border-left:1px solid #d3d6dc;display:inline-flex;align-items:center;justify-content:center}
         .bx-r[data-hk]{cursor:help}
-        /* right box: red while a requested change is unacknowledged; click -> green */
-        .bx-r.chg{background:#fdeceb;border-color:#f2c4c0;border-left:1px solid #f2c4c0;color:#c0392b;cursor:pointer}
-        .bx-r.acked{background:#e6f4ea;border-color:#b7dfc3;border-left:1px solid #b7dfc3;color:#0a7d33}
+        .bx-r.chg{background:#ffe08a;color:#171a20;cursor:pointer}
         .bx-r.ackflash{animation:cpackpulse .5s ease}
-        @keyframes cpackpulse{0%{background:#fdeceb;transform:scale(1)}40%{background:#bfe6cb;transform:scale(1.12)}100%{background:#e6f4ea;transform:scale(1)}}
-        .bx-r .delta{font-size:10px;font-weight:700;opacity:.9}
+        @keyframes cpackpulse{0%{background:#ffe08a;transform:scale(1)}40%{background:#ffd34d;transform:scale(1.1)}100%{background:#e1e4e9;transform:scale(1)}}
+        /* single-direction ticker: pinned to the left edge, out of flow, so the
+           requested number stays perfectly centered. Survives acknowledgement. */
+        .tick{position:absolute;left:5px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700}
+        .tick.up{color:#0a7d33}
+        .tick.down{color:#c0392b}
         .empty,.loadwrap{display:flex;align-items:center;justify-content:center;height:100%;min-height:300px;color:#9a9da1;font-size:13px}
         .arc{width:46px;height:46px;animation:cparcspin .9s linear infinite}
         .arc circle{stroke:#b0b3b7}
         @keyframes cparcspin{to{transform:rotate(360deg)}}
-        .pop{position:fixed;display:none;z-index:2147483647;width:300px;padding:12px 13px;background:#171a20;color:#fff;border:1px solid #34383f;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);font-size:13px;line-height:1.35;pointer-events:none}
-        .pop .p-title{font-weight:800;color:#ff9b95;margin-bottom:4px;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
-        .pop .p-route{font-weight:650;margin-bottom:1px}
-        .pop .p-date{font-size:12px;color:#b9bec6;margin-bottom:9px}
-        .pop .p-step{display:flex;align-items:center;gap:8px;padding:3px 0}
-        .pop .p-step b{font-size:16px;min-width:26px;text-align:right;font-variant-numeric:tabular-nums}
-        .pop .p-step .up{color:#ff9089}
-        .pop .p-step .down{color:#8fc4ff}
+        .pop{position:fixed;display:none;z-index:2147483647;width:236px;padding:11px 13px;background:#171a20;color:#fff;border:1px solid #34383f;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.3);font-size:13px;line-height:1.35;pointer-events:none}
+        .pop .p-route{font-weight:650;margin-bottom:1px;font-size:12px}
+        .pop .p-date{font-size:11px;color:#b9bec6;margin-bottom:8px}
+        .pop .p-step{display:flex;align-items:center;gap:10px;padding:3px 0;border-top:1px solid #26292f}
+        .pop .p-step:first-of-type{border-top:0}
+        .pop .p-step b{font-size:16px;min-width:24px;text-align:right;font-variant-numeric:tabular-nums}
+        .pop .p-step .up{color:#7ddb96}
+        .pop .p-step .down{color:#ff9089}
         .pop .p-step span{color:#b9bec6;font-size:11px}
-        .pop .p-tesla{margin-top:8px;padding-top:7px;border-top:1px solid #34383f;color:#b9bec6;font-size:11px}
         .toast{position:absolute;left:50%;bottom:18px;transform:translateX(-50%) translateY(8px);background:#171a20;color:#fff;padding:9px 18px;border-radius:9px;font-size:13px;font-weight:800;letter-spacing:.02em;box-shadow:0 6px 20px rgba(0,0,0,.25);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;z-index:6}
         .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
       </style>
@@ -586,7 +620,7 @@
           <div class="title">Capacity Planner</div>
           <div class="chip hot" id="chgchip" style="display:none"></div>
           <div class="grow"></div>
-          <div class="legend"><b>scheduled</b> | <b>requested</b> — hover requested for history · click a red requested box to acknowledge its change</div>
+          <div class="legend"><b>scheduled</b> | <b>requested</b> — amber = requested changed (click to acknowledge) · red = scheduled off requested · hover requested for history</div>
         </div>
         <div class="gridwrap" id="gridwrap"></div>
         <div class="pop" id="pop"></div>
@@ -595,17 +629,15 @@
     document.documentElement.appendChild(host);
 
     root.addEventListener('click', (event) => {
-      if (event.target.closest('.cbtn')) { panelToast('Confirm Capacity — not wired yet'); return; }
-      // Acknowledge a requested change: red box -> green, with a pulse. Persisted per
-      // change timestamp, so a NEWER change re-reds the same box.
+      if (event.target.closest('td.lane.confirmable')) { panelToast('Confirm Capacity — not wired yet'); return; }
+      // Acknowledge a requested change: amber half fades back to the base tint with a
+      // pulse. Persisted per change timestamp, so a NEWER change re-ambers the box.
       const reqBox = event.target.closest('.bx-r.chg');
       if (reqBox && reqBox.dataset.stamp) {
         reqAck[reqBox.dataset.hk] = reqBox.dataset.stamp;
         saveReqAck();
         reqBox.classList.remove('chg');
-        reqBox.classList.add('acked', 'ackflash');
-        const d = reqBox.querySelector('.delta');
-        if (d) d.remove();
+        reqBox.classList.add('ackflash');   // the ▲/▼ ticker deliberately stays
         setTimeout(renderPanel, 600);   // solidify (and refresh the changes chip) after the pulse
         return;
       }
@@ -618,6 +650,12 @@
       if (v === '') delete schedPlan[hk];
       else schedPlan[hk] = v;
       saveSchedPlan();
+      // live re-shade while typing (no re-render, so focus/caret survive): red only
+      // when the effective value (typed, else confirmed) is off requested
+      const R = t.dataset.req === '' ? null : Number(t.dataset.req);
+      const C = t.dataset.conf === '' ? null : Number(t.dataset.conf);
+      const effective = v !== '' ? Number(v) : C;
+      t.classList.toggle('off', R != null && !(effective != null && Number(effective) === R));
     });
     root.addEventListener('mouseover', (event) => {
       const target = event.target.closest && event.target.closest('.bx-r[data-hk]');
@@ -663,13 +701,22 @@
     const laneCount = model.origins.reduce((n, o) => n + o.lanes.length, 0);
     const totalCols = 1 + laneCount + model.origins.length;
 
-    let html = '<table><thead><tr><th class="lane corner" rowspan="2">Date</th>';
+    // colgroup pins the date + Total columns narrow; lane columns share the rest evenly
+    // (table-layout:fixed), so the grid always fills the window width exactly.
+    let html = '<table><colgroup><col style="width:104px">';
+    model.origins.forEach((origin) => {
+      origin.lanes.forEach(() => { html += '<col>'; });
+      html += '<col style="width:64px">';
+    });
+    html += '</colgroup><thead><tr><th class="lane corner" rowspan="2">Date</th>';
     model.origins.forEach((origin) => {
       html += `<th class="og" colspan="${origin.lanes.length + 1}">${esc(origin.name)}</th>`;
     });
     html += '</tr><tr>';
     model.origins.forEach((origin) => {
-      origin.lanes.forEach((lane) => { html += `<th class="lh">${esc(lane.name)}</th>`; });
+      origin.lanes.forEach((lane) => {
+        html += `<th class="lh"><a class="lanelink" href="${esc(laneUrl(origin, lane))}" target="_blank" rel="noopener">${esc(lane.name)}</a></th>`;
+      });
       html += '<th class="lh tot">Total</th>';
     });
     html += '</tr></thead><tbody>';
@@ -683,10 +730,20 @@
       }
       const isToday = key === todayKey;
       const dow = d.toLocaleDateString(undefined, { weekday: 'short' });
-      html += `<tr${isToday ? ' class="today"' : ''}>`;
-      html += `<td class="lane"><div class="dow">${isToday ? `<span class="today">${esc(dow)} ${d.getDate()}</span>` : `${esc(dow)} ${d.getDate()}`}</div>` +
-        `<div class="dt">${esc(fmtDay(d))}</div>` +
-        (key >= todayKey ? `<button class="cbtn" data-day="${esc(key)}">Confirm Capacity</button>` : '') + '</td>';
+      // Heuristic until the real confirm flag is captured with the write path: a day
+      // counts as confirmed when it is past, or when Tesla already returns confirmed
+      // capacity for it. Confirmed rows gray out; the rest keep the blue date bubble
+      // (the whole date cell is the dummy Confirm Capacity control).
+      let dayConfirmedCapacity = 0;
+      model.origins.forEach((origin) => origin.lanes.forEach((lane) => {
+        const c = lane.confFor(key);
+        dayConfirmedCapacity += (c && Number(c.capacity)) || 0;
+      }));
+      const confirmed = key < todayKey || dayConfirmedCapacity > 0;
+      const confirmable = !confirmed;
+      html += `<tr class="${isToday ? 'today' : ''}${confirmed ? ' confirmed' : ''}">`;
+      html += `<td class="lane${confirmable ? ' confirmable' : ''}"${confirmable ? ` data-day="${esc(key)}" title="Confirm Capacity"` : ''}>` +
+        `<span class="datepill">${esc(dow)} ${d.getDate()}</span></td>`;
       model.origins.forEach((origin) => {
         let sumR = 0, sumC = 0, sumS = 0;
         origin.lanes.forEach((lane) => {
@@ -702,22 +759,24 @@
           const acked = isChanged && reqAck[hk] === lastStamp;
           if (isChanged && !acked && new Date(lastStamp).getTime() >= cutoff48) changed48++;
           const zero = !(R || C || S);
-          let delta = '';
-          if (isChanged && !acked) {
-            const df = Number(tl[tl.length - 1].capacity) - Number(tl[tl.length - 2].capacity);
-            delta = `<span class="delta">${df > 0 ? '▲' : '▼'}${Math.abs(df)}</span>`;
-          }
-          // Left box = our scheduled entry, uncolored (typed draft, placeholder =
-          // Tesla's current confirmed). Right box = requested; red while a change is
-          // unacknowledged (click to acknowledge -> green), hoverable for history.
+          // Left half = scheduled entry; red only when it doesn't match requested.
+          // Right half = requested; amber while a change is unacknowledged. The ▲/▼
+          // ticker (green up / red down vs the previous value) is pinned to the left
+          // edge and PERSISTS after the amber is acknowledged.
           const typed = (schedPlan[hk] || '').trim();
-          const reqCls = isChanged ? (acked ? ' acked' : ' chg') : '';
+          const effective = typed !== '' ? Number(typed) : C;
+          const off = !zero && R != null && !(effective != null && Number(effective) === R);
+          let tick = '';
+          if (isChanged) {
+            const df = Number(tl[tl.length - 1].capacity) - Number(tl[tl.length - 2].capacity);
+            tick = `<span class="tick ${df > 0 ? 'up' : 'down'}">${df > 0 ? '▲' : '▼'}</span>`;
+          }
           html += `<td class="cell${zero ? ' zero' : ''}"><div class="cw">` +
-            `<input class="bx bx-s" type="text" inputmode="numeric" data-hk="${esc(hk)}" placeholder="${C == null ? '' : C}" value="${esc(typed)}">` +
-            `<span class="bx bx-r${reqCls}"${tl.length ? ` data-hk="${esc(hk)}"` : ''}${lastStamp ? ` data-stamp="${esc(lastStamp)}"` : ''}>${R == null ? '–' : R}${delta}</span>` +
+            `<input class="bx bx-s${off ? ' off' : ''}" type="text" inputmode="numeric" data-hk="${esc(hk)}" data-req="${R == null ? '' : R}" data-conf="${C == null ? '' : C}" placeholder="${C == null ? '' : C}" value="${esc(typed)}">` +
+            `<span class="bx bx-r${isChanged && !acked ? ' chg' : ''}"${tl.length ? ` data-hk="${esc(hk)}"` : ''}${lastStamp ? ` data-stamp="${esc(lastStamp)}"` : ''}>${tick}${R == null ? '–' : R}</span>` +
             `</div></td>`;
         });
-        html += `<td class="tot"><div class="osum${sumC < sumR ? ' u' : ''}">${sumC} / ${sumR}</div><div class="osched">${sumS} schd</div></td>`;
+        html += `<td class="tot"><div class="osum${sumC < sumR ? ' u' : ''}">${sumC} / ${sumR}</div></td>`;
       });
       html += '</tr>';
     });
@@ -756,16 +815,16 @@
     const { route, date } = laneLabelFromKey(hk);
     const d = parseDay(date);
     const dateText = isNaN(d) ? date : d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+    // Vertical value column, most recent at the top, each with its date + time.
+    // Direction color compares each value to the chronologically previous one.
+    const rows = [...tl].reverse();
     let steps = '';
-    tl.forEach((step, i) => {
-      const prev = i > 0 ? Number(tl[i - 1].capacity) : null;
-      const cls = prev == null ? '' : (Number(step.capacity) > prev ? 'up' : Number(step.capacity) < prev ? 'down' : '');
-      steps += `<div class="p-step"><b class="${cls}">${esc(step.capacity)}</b><span>${i === 0 ? 'first seen' : 'changed'} · ${esc(fmtWhen(step.observed_at))}</span></div>`;
+    rows.forEach((step, i) => {
+      const prevChrono = i < rows.length - 1 ? Number(rows[i + 1].capacity) : null;
+      const cls = prevChrono == null ? '' : (Number(step.capacity) > prevChrono ? 'up' : Number(step.capacity) < prevChrono ? 'down' : '');
+      steps += `<div class="p-step"><b class="${cls}">${esc(step.capacity)}</b><span>${esc(fmtWhen(step.observed_at))}</span></div>`;
     });
-    const teslaStamp = tl[tl.length - 1].latest_request_date;
-    pop.innerHTML = `<div class="p-title">Requested history</div>` +
-      `<div class="p-route">${esc(route)}</div><div class="p-date">${esc(dateText)}</div>` + steps +
-      (teslaStamp ? `<div class="p-tesla">Tesla last stamped ${esc(fmtWhen(teslaStamp))}</div>` : '');
+    pop.innerHTML = `<div class="p-route">${esc(route)}</div><div class="p-date">${esc(dateText)}</div>` + steps;
     pop.style.display = 'block';
     const tr = target.getBoundingClientRect(), pr = pop.getBoundingClientRect();
     let left = tr.right + 10;
