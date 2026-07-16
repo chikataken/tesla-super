@@ -19,9 +19,13 @@ Tampermonkey userscript for Tesla's Shipment Planner page.
   and the server filters on them. The script rewrites those two fields in the request
   body to `today − 14d … today + 14d` (UTC calendar-day format, matching Tesla), so the
   window is widened **behind the scenes** — the calendar is never touched. This applies
-  to **every** planner query (all four tabs). Because it overrides on every request,
-  manually narrowing the calendar is also overridden back to ±2 weeks; change
-  `READY_DATE_DAYS` at the top of the script to adjust the span.
+  to **every** planner query (all four tabs). Change `READY_DATE_DAYS` at the top of
+  the script to adjust the span.
+  - **Ready Date picker hidden (v0.5.0):** because the window is forced in the request,
+    the calendar filter is redundant and would only mislead (it can't change the actual
+    result set). The script hides the whole field via CSS
+    (`tds-form-field.date-picker-width{display:none}`), which is unique to it. The Ready
+    Date **column** in the results table is left intact — only the filter control is removed.
 - **NA origins first (v0.2.0):** the planner's `GetShipmentPlannerReviewDashboard`
   endpoint returns every shipment in one response and the table pages/sorts
   client-side, so the userscript intercepts that XHR response and stable-sorts
