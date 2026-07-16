@@ -1,11 +1,45 @@
-# Tesla Capacity Planner — Requested history
+# Tesla Capacity Planner — full-screen planner UI + Requested history
 
-A background Tampermonkey userscript for Tesla **Capacity Planner**
-(`…/logistics/capacity-planner`). It has no launcher and no popup panel. It quietly captures
-Tesla's existing Requested-capacity response and annotates changes directly on the portal grid.
+A Tampermonkey userscript for Tesla **Capacity Planner** (`…/logistics/capacity-planner`).
+Since v0.5.0 it **replaces the whole page** with its own bidboard-style panel (Tesla's grid
+keeps running hidden underneath — its own fetches are what feed the panel).
 
 It is read-only toward Tesla: no editable fields, Tesla writes, extra Tesla requests, or
-**Confirm Capacity** actions.
+**Confirm Capacity** actions (the panel's Confirm Capacity buttons are dummies until the
+write contract is captured).
+
+## Full-screen planner panel (v0.7.0)
+
+Spliced over Tesla's own grid on the capacity-planner route only (same embed technique
+and self-guarded placement as bidboard, so it never leaks onto other portal pages).
+Since v0.7.0 it is styled to read as part of the Tesla portal itself: no panel borders or
+gutters (the host sits flush in Tesla's layout), white-on-white with only hairline row
+separators like the native grid, and Tesla's own **Universal Sans Text / Display** fonts
+(already loaded by the page, so the shadow DOM inherits them):
+
+- **Transposed grid (v0.9.0): rows = dates, columns = lanes.** All 14 days — Monday of
+  this week through Sunday of next — are rows in one continuous view (no week tabs), with
+  a NEXT WEEK divider row and today's row highlighted. Lane columns are grouped under
+  their origin (Tesla Inc Gigafactory Texas · Fremont Factory), each group ending in a
+  **Total** column (confirmed/requested + scheduled, red when under-confirmed). The
+  dummy **Confirm Capacity** button sits in each remaining day's date cell.
+- **Cells are an Excel-style box pair**: **left box = scheduled** — an uncolored editable
+  entry whose placeholder is Tesla's current confirmed amount; anything typed is a local
+  draft kept in Tampermonkey storage until the confirm write is wired. **Right box =
+  requested** — shades **red with a ▲/▼ delta while a change is unacknowledged; clicking
+  it acknowledges the change** (green with a pulse animation). Acknowledgements persist
+  per change timestamp, so a newer change on the same lane-day turns the box red again.
+- **Hover any requested box** with recorded history for the **timeline card** — every
+  observed value with timestamps (`6 first seen → 3 → 9`) plus Tesla's own
+  `latestRequestDate` stamp. A header chip counts **unacknowledged** requested changes from
+  the last 48 h. History comes from the server change log
+  (`GET …/api/capacity-history?days=14`, refreshed ~3 min; local GM history is the offline
+  fallback).
+- **Confirm Capacity buttons** per remaining day — dummies for now (toast only); real
+  confirming happens on the native grid.
+- **Bottom-right button** (same dark launcher style as the other extensions): **Tesla grid**
+  hides the panel and restores Tesla's original page; it then reads **Planner UI** to come
+  back. Also in the Tampermonkey menu: *Toggle Tesla native grid*.
 
 ## Install
 
