@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.16.1
+// @version      0.16.2
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, and provides Cleaner/Marker actions for pickups, ETAs, Driver Needed shipments, and Tesla-status reconciliation.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -471,8 +471,8 @@
     }
     return [...shipments.values()];
   }
-  // Clean Pickups: prep() scans all three alerts and previews both write counts. Confirmation
-  // updates pickup dates and assigns Jessica only to shipments carrying Driver Needed (id 2).
+  // Clean Pickups: scan all three alerts, then immediately update pickup dates and assign Jessica
+  // only to shipments carrying Driver Needed (id 2).
   async function prepCleanPickups(setStatus) {
     setStatus('scanning pickup + driver alerts…');
     const pickups = await scanPickupAlerts();
@@ -776,6 +776,8 @@
     .act .s { font-size: 11px; opacity: .72; }
     .act.armed { background: #f5c518; color: #171a20; }        /* yellow — confirm */
     .act.armed .s { opacity: .9; }
+    .act.processing { background: #f5c518; color: #171a20; }   /* yellow — scanning/writing */
+    .act.processing .s { opacity: .9; }
     .act.run { background: #2a2f36; }
     .act.done { background: #0a7d33; }                         /* green — success */
     .act.err { background: #b42318; }
@@ -790,8 +792,8 @@
     root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style'); style.textContent = CSS; root.appendChild(style);
     const menu = document.createElement('div'); menu.className = 'menu'; menu.id = 'ddmenu';
-    menu.appendChild(actionButton('Clean Pickups', () => nextWeekdayCaption(), runCleanPickups, prepCleanPickups));
-    menu.appendChild(actionButton('Clean ETA', () => nextCalendarDayCaption(), runCleanEta, prepCleanEta));
+    menu.appendChild(actionButton('Clean Pickups', () => nextWeekdayCaption(), runCleanPickups, prepCleanPickups, { oneClick: true }));
+    menu.appendChild(actionButton('Clean ETA', () => nextCalendarDayCaption(), runCleanEta, prepCleanEta, { oneClick: true }));
     menu.appendChild(actionButton('Pull red VINs to mark', 'tap to confirm', runPullRed));  // nearest the pill
     root.appendChild(menu);
     const launch = document.createElement('button');
@@ -811,13 +813,13 @@
     }
   }
 
-  // Confirm-to-run button. idle -> (click) either arms directly, or if prepFn is given, runs a
-  // read-only scan first and arms with its count ("N → date · Confirm?"). armed -> (click) runs
-  // runFn(setStatus, prepData) -> green "✓" on success, red on error, then auto-reverts.
-  function actionButton(label, subtitle, runFn, prepFn) {
+  // Standard actions retain confirm-to-run. With oneClick enabled, one press scans and writes
+  // while yellow, then turns green on success (including when the scan finds nothing to clean).
+  function actionButton(label, subtitle, runFn, prepFn, options) {
     const btn = document.createElement('button');
     btn.innerHTML = `<span class="t"></span><span class="s"></span>`;
     const T = btn.querySelector('.t'), S = btn.querySelector('.s');
+    const oneClick = !!(options && options.oneClick);
     let state = 'idle', armTimer = null, prepData = null;
     const subtitleText = () => typeof subtitle === 'function' ? subtitle() : subtitle;
     const setStatus = (msg) => { S.textContent = msg; };
@@ -828,6 +830,18 @@
     idle();
     btn.addEventListener('click', async () => {
       if (state === 'running' || state === 'prepping') return;
+      if (oneClick) {
+        state = 'running'; btn.className = 'act processing'; T.textContent = label; S.textContent = 'scanning…';
+        try {
+          const prepared = prepFn ? await prepFn(setStatus) : null;
+          const summary = prepared && prepared.count
+            ? await runFn(setStatus, prepared)
+            : ((prepared && prepared.emptyMsg) || 'nothing to clean ✓');
+          state = 'done'; btn.className = 'act done'; T.textContent = '✓ ' + label; S.textContent = summary;
+          setTimeout(idle, 6000);
+        } catch (e) { err(e); }
+        return;
+      }
       if (state === 'armed') {                              // confirmed -> run
         clearTimeout(armTimer);
         if (!runFn) { btn.className = 'act err'; T.textContent = 'Not wired yet'; S.textContent = ''; setTimeout(idle, 1800); return; }

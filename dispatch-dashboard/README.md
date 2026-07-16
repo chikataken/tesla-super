@@ -59,10 +59,10 @@ comes from that shipment, falling back to the selected-carrier request header. T
 yellow while assigning, green only after Tesla returns a successful response, and red/retry on
 HTTP or `success:false` errors. It does not reload the dashboard.
 
-## "Clean Pickups" (v0.12.0) — pickup dates + Driver Needed assignment
-**Clean Pickups** (scan-first, tap-to-confirm): scans the board for both **Pickup Date Late**
-(id 1) and **Pickup Date Today** (id 7) across all non-delivered stops, shows the count
-(`N pickups · M drivers · date · Confirm?`), and on confirm bulk-moves **all** of them to the **next weekday at
+## "Clean Pickups" (v0.16.2) — pickup dates + Driver Needed assignment
+Clicking **Clean Pickups** once immediately scans the board for both **Pickup Date Late**
+(id 1) and **Pickup Date Today** (id 7) across all non-delivered stops, then bulk-moves
+**all** of them to the **next weekday at
 16:00Z (4 PM)** with **reason 4** — the
 exact contract we recorded: `POST …/updateestimatedshipdate?dateTrackingSource=3` with
 `{updateEstimatedShipDateList:[{updateReasonId:4, estimateShipDate, stopId}]}` (chunked 100).
@@ -70,25 +70,27 @@ The target is based on the day the button is pressed. Friday through Sunday roll
 The idle button caption displays that calculated weekday (for example, `Monday 4PM`) and refreshes whenever the menu opens.
 Bounds: 90-day SHP-create-date window + `take:5000` (no pagination).
 
-The preview also independently scans **Driver Needed** (id 2), deduplicates matches by
-`shipmentId`, and on the same confirmation assigns **JESSICA TFI** (`driverId:67651`) only to
+The same click independently scans **Driver Needed** (id 2), deduplicates matches by
+`shipmentId`, and assigns **JESSICA TFI** (`driverId:67651`) only to
 those shipments. It uses the recorded mass endpoint
 `POST …/UpdateShipmentsDriverAndLicensePlate`, groups requests by the carrier ID returned by
 Tesla (falling back to the selected-carrier header), chunks shipment IDs 100 at a time, and sends
 `{shipmentIds,driverId:67651,carrierId,driverJobStatus:"PENDING",source:"TVP",truckLicensePlate:""}`.
-The button turns green only after every applicable pickup and driver response passes HTTP and
-`success:false` validation. If driver assignment fails after pickup dates succeeded, the red
+The button stays yellow while scanning and writing, then turns green only after every applicable
+pickup and driver response passes HTTP and `success:false` validation. If driver assignment fails
+after pickup dates succeeded, the red
 error state explicitly reports that the pickup updates already landed.
 
 Note: `updateReasonId:4` is copied verbatim from the recorded manual edit. Change it (and the
 `16:00` time / next-weekday rule) at the top of `updatePickups`/`nextWeekday16` if the desired reason changes.
 
-## "Clean ETA" (v0.11.0) — bulk ETA write
-**Clean ETA** uses the same scan-first, tap-to-confirm flow. It runs independent scans for
+## "Clean ETA" (v0.16.2) — bulk ETA write
+Clicking **Clean ETA** once immediately runs independent scans for
 **Late ETA** (id 3) and **ETA Today** (id 6), verifies those alert ids on every returned stop,
 merges duplicate `stopId` values, and moves all matches to the **next calendar day**, including
-Saturday and Sunday, with a **4 PM ETA window**. Its idle caption and confirmation preview use
-the same next-day calculation. The recorded write contract is `POST …/updateStopEta` with an array of:
+Saturday and Sunday, with a **4 PM ETA window**. The button stays yellow while scanning and
+writing, then turns green once the work succeeds. Its idle caption uses the same next-day
+calculation. The recorded write contract is `POST …/updateStopEta` with an array of:
 `{StopId, EtaUpdateSourceId:3, EstimatedDeliveryDate, EtaTimeWindowEndInHours:16,
 EtaUpdateReasonId:4}`. Writes are chunked 100 and HTTP-200 responses containing
 `success:false` are treated as failures.
