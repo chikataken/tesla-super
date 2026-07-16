@@ -30,15 +30,17 @@ Tampermonkey menu: *Toggle recorder panel*, *Clear recorded data*.
 Tampermonkey ▸ install `tesla-dispatch-dashboard-recorder.user.js` (auto-update wired to the
 GitHub raw URL; bump `@version` to push updates).
 
-## Default Search By: VINs (v0.16.0)
+## Default Search By: VINs (v0.16.1)
 Whenever Dispatch Dashboard 2.0 is entered, the userscript defaults searches to VINs without
 opening or clicking Tesla's dropdown. The page's own `GetCarrierDispatchShipment` request is
 intercepted before send and only its search field is translated from `shipmentNumbers:[...]` to
 `vins:[...]`; the same translation applies to the dashboard's Excel download request. Alerts,
 dates, statuses, carrier, and paging are left unchanged. The displayed
 selector and neighboring placeholder are kept at **VINs** / **Enter VINs** so the UI matches the
-actual request. A deliberate manual choice of **Shipment Numbers** disables the translation for
-the rest of that dashboard visit; leaving and re-entering restores the VIN default.
+actual request. A deliberate manual choice of **Shipment** or **Shipment Numbers** disables the
+translation for the rest of that dashboard visit and restores the shipment label/placeholder even
+when Tesla already had Shipment selected internally; leaving and re-entering restores the VIN
+default.
 
 ## Deliver / Andrew Enkh control (v0.13.1)
 On every rendered Dispatch Dashboard shipment card, the userscript visually replaces Tesla's

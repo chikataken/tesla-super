@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.16.0
+// @version      0.16.1
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, and provides Cleaner/Marker actions for pickups, ETAs, Driver Needed shipments, and Tesla-status reconciliation.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -551,15 +551,21 @@
     clearTimeout(vinDefaultTimer);
     vinDefaultTimer = setTimeout(applyVinDefaultVisual, 40);
   }
-  function applyVinDefaultVisual() {
-    if (!ON_DASH() || !vinSearchMode) return;
+  function searchByControls() {
     const label = [...document.querySelectorAll('.t-label')].find(el => el.textContent.trim() === 'Search By');
     const select = label && label.parentElement && label.parentElement.querySelector('tsl-select');
-    if (!select) return;
+    if (!select) return null;
     const valueNode = select.querySelector('.tsl-select-value-text');
     const valueText = valueNode && (valueNode.querySelector('span') || valueNode);
-    if (valueText && valueText.textContent.trim() !== 'VINs') valueText.textContent = 'VINs';
     const input = label.parentElement.nextElementSibling && label.parentElement.nextElementSibling.querySelector('input');
+    return { valueText, input };
+  }
+  function applyVinDefaultVisual() {
+    if (!ON_DASH() || !vinSearchMode) return;
+    const controls = searchByControls();
+    if (!controls) return;
+    const { valueText, input } = controls;
+    if (valueText && valueText.textContent.trim() !== 'VINs') valueText.textContent = 'VINs';
     if (input && input.placeholder !== 'Enter VINs') {
       input.placeholder = 'Enter VINs';
       input.setAttribute('placeholder', 'Enter VINs');
@@ -569,15 +575,49 @@
     vinSearchMode = true;
     scheduleVinDefault();
   }
+  function selectedSearchOption(event) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    return path.find(node => node && node.nodeType === 1 && node.matches
+      && node.matches('.tsl-option, tsl-option, .tsl-select-option, [role="option"]'))
+      || (event.target && event.target.closest
+        && event.target.closest('.tsl-option, tsl-option, .tsl-select-option, [role="option"]'));
+  }
+  function restoreShipmentVisual(optionText) {
+    if (vinSearchMode || !ON_DASH()) return;
+    const controls = searchByControls();
+    if (!controls) return;
+    // The VIN default is cosmetic: Tesla may already have Shipment selected internally and
+    // therefore may not repaint when the user selects it again. Replace only stale VIN text;
+    // if Angular rendered its own Shipment wording, leave that native wording untouched.
+    if (controls.valueText && /^vins?$/i.test(controls.valueText.textContent.trim())) {
+      controls.valueText.textContent = optionText || 'Shipment Numbers';
+    }
+    if (controls.input && /^enter\s+vins?$/i.test(controls.input.placeholder || '')) {
+      controls.input.placeholder = 'Enter Shipment Numbers';
+      controls.input.setAttribute('placeholder', 'Enter Shipment Numbers');
+    }
+  }
   // A deliberate manual selection still wins for the rest of this dashboard visit.
-  document.addEventListener('click', event => {
+  function handleManualSearchOption(event) {
     if (!ON_DASH()) return;
-    const option = event.target && event.target.closest && event.target.closest('.tsl-option');
+    const option = selectedSearchOption(event);
     if (!option) return;
-    const text = option.textContent.trim();
-    if (text === 'Shipment Numbers') vinSearchMode = false;
-    else if (text === 'VINs') { vinSearchMode = true; scheduleVinDefault(); }
-  }, true);
+    const text = option.textContent.replace(/\s+/g, ' ').trim();
+    if (/^shipment(?:\s+numbers?)?$/i.test(text)) {
+      vinSearchMode = false;
+      clearTimeout(vinDefaultTimer);
+      // Run after Tesla's option handler. The second pass covers a delayed Angular repaint.
+      setTimeout(() => restoreShipmentVisual(text), 0);
+      setTimeout(() => restoreShipmentVisual(text), 120);
+    } else if (/^vins?$/i.test(text)) {
+      vinSearchMode = true;
+      scheduleVinDefault();
+    }
+  }
+  // pointerdown releases the override before Tesla handles the choice; click also supports
+  // keyboard-generated selections and older versions of the selector.
+  document.addEventListener('pointerdown', handleManualSearchOption, true);
+  document.addEventListener('click', handleManualSearchOption, true);
 
   // ---- in-page Deliver / Andrew Enkh control --------------------------------
   let deliverUiTimer = null, deliverObserver = null;
