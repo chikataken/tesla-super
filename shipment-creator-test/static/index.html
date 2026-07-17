@@ -120,7 +120,32 @@
   .panel{display:none}
   .panel.active{display:flex;flex-direction:column;flex:1;min-height:0}
   /* terminals & users just scroll as one block; the orders panel uses two internal scroll panes */
-  #terminals.panel.active,#users.panel.active,#recorded.panel.active,#audit.panel.active{display:block;overflow:auto;padding-bottom:40px}
+  #terminals.panel.active,#users.panel.active,#recorded.panel.active,#audit.panel.active,#checks.panel.active{display:block;overflow:auto;padding-bottom:40px}
+  /* ---- Checks (wells-check WF reconciliation) ---- */
+  .ck-list{padding:14px}
+  #checks .term-main{max-width:1400px}
+  .ck-table{width:100%;border-collapse:collapse;font-size:13px;background:#fff;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden}
+  .ck-table th{position:sticky;top:0;background:#f8fafc;text-align:left;padding:8px 10px;font-size:11px;
+    text-transform:uppercase;letter-spacing:.03em;color:#64748b;border-bottom:1px solid #e2e8f0}
+  .ck-table td{padding:7px 10px;border-bottom:1px solid #f1f5f9}
+  .ck-table tr:hover td{background:#f8fafc}
+  .ck-vin{font-family:ui-monospace,SFMono-Regular,monospace;font-size:12px}
+  .ck-ref{font-weight:600}
+  .ck-amt{font-variant-numeric:tabular-nums}
+  .ck-ok{color:#15803d}.ck-pend{color:#b45309}.ck-err{color:#b91c1c;cursor:help}
+  .ck-empty{padding:16px;color:#64748b}
+  .ck-viewbtn.active{background:#0f172a;color:#fff;border-color:#0f172a}
+  .ck-chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 14px}
+  .ck-chip{padding:5px 12px;border-radius:999px;font-size:12px;font-weight:600;border:1px solid;
+    cursor:pointer;user-select:none}
+  .ck-chip.sel{outline:2px solid #0f172a;outline-offset:1px}
+  .ck-chip.ok{background:#f0fdf4;color:#15803d;border-color:#bbf7d0}
+  .ck-chip.bad{background:#fef2f2;color:#b91c1c;border-color:#fecaca}
+  .ck-chip.warn{background:#fffbeb;color:#b45309;border-color:#fde68a}
+  .ck-cov{font-size:12px;color:#64748b;margin-left:auto}
+  .ck-h{font-size:13px;margin:18px 0 6px;color:#0f172a}
+  .ck-h .ck-n{color:#64748b;font-weight:400}
+
   /* ---- Recorded shipments ---- */
   /* status groups as a sub-list in the dark left nav rail */
   .recnav{display:flex;flex-direction:column;gap:1px;margin:2px 0 6px;
@@ -758,6 +783,7 @@
     <div id="recNav" class="recnav" hidden></div>
     <button class="tab navitem" data-tab="terminals">Terminals</button>
     <button class="tab navitem" data-tab="app">App</button>
+    <button class="tab navitem" data-tab="checks">Checks</button>
     <button class="tab navitem" data-tab="audit">Audit</button>
     <button class="tab navitem" data-tab="users">Settings</button>
   </nav>
@@ -804,6 +830,14 @@
     <div id="ht-audit" class="ht-group" hidden>
       <button class="btn ghost" onclick="loadAudit()">Refresh audit</button>
       <span class="count" id="astats"></span>
+    </div>
+    <div id="ht-checks" class="ht-group" hidden>
+      <label class="btn ghost" style="cursor:pointer" title="Upload the monthly Wells Fargo statement PDF">
+        Upload WF statement<input id="ckPdf" type="file" accept=".pdf,application/pdf"
+        style="display:none" onchange="ckUpload(this)"></label>
+      <input id="ckq" type="search" placeholder="Search by check #, order, or VIN…" oninput="ckDebounced()">
+      <button class="btn ghost" onclick="CK.recon=null;loadChecks();loadReconcile()">Refresh</button>
+      <span class="count" id="ckstats"></span>
     </div>
   </div>
   <div class="tabs">
@@ -880,6 +914,13 @@
     <iframe src="/app/" title="Tesla delivery service"
             style="flex:1;width:100%;height:100%;border:0;background:#fff"></iframe>
   </div>
+
+  <!-- CHECKS (wells-check: Wells Fargo check <-> SD paid-order reconciliation) -->
+  <div class="panel" id="checks">
+    <div class="term-main">
+      <div id="cklist" class="ck-list"></div>
+    </div>
+  </div>
 </div>
   </div><!-- /appmain -->
 </div><!-- /appshell -->
@@ -943,14 +984,161 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   t.classList.add('active'); $('#'+tab).classList.add('active');
   if(tab==='terminals') loadTerminals();
   if(tab==='audit') loadAudit();
+  if(tab==='checks'){ loadChecks(); if(!CK.recon) loadReconcile(); }
   if(tab==='users'){ USERS_EDIT=JSON.parse(JSON.stringify(PROFILES||[]));
     const m=$('#usersMsg'); if(m) m.textContent=''; renderUsersEditor(); }   // Settings = edit users
   const onRecorded = tab==='recorded';
   const rn = $('#recNav'); if(rn) rn.hidden = !onRecorded;   // status groups stay Recorded-only
   // Centered header slot shows ONLY the active tab's own toolbar group.
-  ['orders','recorded','terminals','audit'].forEach(k=>{ const g=$('#ht-'+k); if(g) g.hidden = (k!==tab); });
+  ['orders','recorded','terminals','audit','checks'].forEach(k=>{ const g=$('#ht-'+k); if(g) g.hidden = (k!==tab); });
   if(onRecorded){ loadRecorded(); startRecPoll(); } else { stopRecPoll(); }
 });
+
+// ---- Checks (wells-check: WF check <-> SD paid orders) ----------------------
+let CK={view:'recon', q:'', data:null, recon:null, group:null}, ckTimer=null;
+function ckDebounced(){ clearTimeout(ckTimer);
+  ckTimer=setTimeout(()=>{ CK.q=($('#ckq').value||'').trim().toLowerCase(); renderChecks(); },200); }
+async function loadReconcile(){
+  const el=$('#cklist'); if(el) el.innerHTML='<div class="ck-empty">Reconciling…</div>';
+  try{
+    const r=await fetch('/api/wells-checks/reconcile');
+    if(!r.ok) throw new Error(`API error ${r.status}`);
+    CK.recon=await r.json();
+  }catch(e){ CK.recon={summary:{},matched:[],mismatched:[],wf_only:[],sd_only:[],error:String(e.message||e)}; }
+  renderChecks();
+}
+async function ckUpload(input){
+  const f=input.files && input.files[0]; if(!f) return;
+  input.value='';
+  const el=$('#cklist'); if(el) el.innerHTML=`<div class="ck-empty">Parsing ${escHtml(f.name)}…</div>`;
+  try{
+    const r=await fetch('/api/wells-checks/statement',
+      {method:'POST', body:f, headers:{'x-filename':f.name,'content-type':'application/pdf'}});
+    const j=await r.json();
+    if(!r.ok || j.ok===false){
+      const dbg=j.debug?` (pages ${j.debug.pages||'?'}, checks-paid hits ${j.debug.checks_paid_hits},`+
+        ` txn hits ${j.debug.txn_hits})`:'';
+      el.innerHTML=`<div class="ck-empty">Upload failed: ${escHtml(j.error||j.detail||r.status)}${escHtml(dbg)}</div>`;
+      return;
+    }
+    CK.recon=null; loadReconcile();
+  }catch(e){ el.innerHTML=`<div class="ck-empty">Upload failed: ${escHtml(String(e))}</div>`; }
+}
+async function loadChecks(){
+  const el=$('#cklist'); if(el && !CK.data) el.innerHTML='<div class="ck-empty">Loading…</div>';
+  try{
+    const r = await fetch('/api/wells-checks?limit=5000');
+    if(!r.ok) throw new Error(r.status===404
+      ? 'API route not loaded — restart shipment-creator-test-web (sudo systemctl restart shipment-creator-test-web)'
+      : `API error ${r.status}`);
+    CK.data = await r.json();
+  }
+  catch(e){ CK.data={orders:[],refs:[],stats:{},error:String(e.message||e)}; }
+  renderChecks();
+}
+const ckMoney=v=>v==null?'—':'$'+Number(v).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+const ckDate=s=>s?String(s).slice(0,10):'—';
+function renderChecks(){
+  const el=$('#cklist'); if(!el) return;
+  const d=CK.data||{orders:[],refs:[],stats:{}};
+  const st=d.stats||{};
+  $('#ckstats').textContent = st.scraped!=null
+    ? `${st.scraped} scraped · ${st.enriched} enriched`+(st.errors?` (${st.errors} err)`:'')+
+      ` · ${st.distinct_references} checks · `+
+      (st.scan_done ? 'scan complete' : `scan resumes at page ${st.next_page}`)
+    : '';
+  if(CK.view==='recon'){ renderReconcile(el); return; }
+  if(d.error){ el.innerHTML=`<div class="ck-empty">${escHtml(d.error)}</div>`; return; }
+  const q=CK.q;
+  if(CK.view==='refs'){
+    let rows=d.refs||[];
+    if(q) rows=rows.filter(r=>String(r.reference_number||'').toLowerCase().includes(q));
+    el.innerHTML=`<table class="ck-table"><thead><tr><th>Check #</th><th>Shipments</th>
+      <th>Vehicles</th><th>Total carrier amount</th><th>Sent</th></tr></thead><tbody>`+
+      (rows.map(r=>`<tr><td class="ck-ref">${escHtml(r.reference_number)}</td>
+        <td>${r.orders_n}</td><td>${r.vehicles??'—'}</td>
+        <td class="ck-amt">${ckMoney(r.total)}</td><td>${ckDate(r.sent_date)}</td></tr>`).join('')
+       || `<tr><td colspan=5 class="ck-empty">No check numbers yet — run wells-check's ./run.sh enrich.</td></tr>`)
+      +`</tbody></table>`;
+    return;
+  }
+  let rows=d.orders||[];
+  if(q) rows=rows.filter(o=>[o.order_id,o.vin_preview,o.reference_number,o.number]
+      .some(x=>String(x||'').toLowerCase().includes(q)));
+  el.innerHTML=`<table class="ck-table"><thead><tr><th>Order</th><th>VIN (preview)</th>
+    <th>Units</th><th>Carrier $</th><th>Check #</th><th>Sent</th><th>Status</th></tr></thead><tbody>`+
+    (rows.map(o=>{
+      const stt=o.enrich_error?`<span class="ck-err" title="${escHtml(o.enrich_error)}">error</span>`
+        :(o.enriched_at?`<span class="ck-ok">✓</span>`:`<span class="ck-pend">pending</span>`);
+      return `<tr><td><b>${escHtml(o.order_id||o.number||'')}</b></td>
+        <td class="ck-vin">${escHtml(o.vin_preview||'')}</td><td>${o.vehicle_count??'—'}</td>
+        <td class="ck-amt">${ckMoney(o.price)}</td><td class="ck-ref">${escHtml(o.reference_number||'—')}</td>
+        <td>${ckDate(o.sent_date)}</td><td>${stt}</td></tr>`;
+    }).join('') || `<tr><td colspan=7 class="ck-empty">Nothing scraped yet — run ./run.sh in wells-check.</td></tr>`)
+    +`</tbody></table>`;
+}
+
+function ckGroup(g){ CK.group = (CK.group===g ? null : g); renderChecks(); }
+function renderReconcile(el){
+  const r=CK.recon;
+  if(!r){ el.innerHTML='<div class="ck-empty">Loading…</div>'; return; }
+  if(r.error){ el.innerHTML=`<div class="ck-empty">${escHtml(r.error)}</div>`; return; }
+  const s=r.summary||{};
+  if(!s.wf_checks){
+    el.innerHTML='<div class="ck-empty">No statement uploaded yet — use “Upload WF statement” above. '+
+      'Checks are matched by number against SD payment references and by amount against the '+
+      'summed carrier totals of the shipments each check paid.</div>';
+    return;
+  }
+  const q=CK.q, g=CK.group,
+    flt=(rows,keys)=>!q?rows:rows.filter(x=>keys.some(k=>String(x[k]||'').toLowerCase().includes(q)));
+  const chip=(key,cls,txt)=>`<span class="ck-chip ${cls}${g===key?' sel':''}"
+     onclick="ckGroup('${key}')" title="click to show only this group">${txt}</span>`;
+  let h=`<div class="ck-chips">`+
+    chip('matched','ok',`✓ ${s.matched} matched · ${ckMoney(s.matched_total)}`)+
+    chip('mismatched',s.mismatched?'bad':'ok',`≠ ${s.mismatched} amount differ${s.mismatched===1?'s':''}`)+
+    chip('wf_only',s.wf_only?'warn':'ok',`? ${s.wf_only} on statement, not in SD · ${ckMoney(s.wf_only_total)}`)+
+    chip('sd_only',s.sd_only?'warn':'ok',`⌀ ${s.sd_only} in SD, missing from statement`)+
+    `<span class="ck-cov">statement: ${escHtml(s.statement||'—')} · ${s.wf_checks} checks · `+
+    `SD check data ${ckDate(s.sd_coverage_from)} → ${ckDate(s.sd_coverage_to)}</span></div>`;
+  const sec=(key,title,rows,head,row)=>{
+    if(g && g!==key) return;                       // a selected bubble shows ONLY its group
+    h+=`<h3 class="ck-h">${title} <span class="ck-n">${rows.length}</span></h3>`;
+    h+=rows.length?`<table class="ck-table"><thead><tr>${head}</tr></thead><tbody>`+
+      rows.map(row).join('')+`</tbody></table>`:`<div class="ck-empty">none</div>`;
+  };
+  // Diff cell: RED when the WF check paid MORE than SD says it should (money out the
+  // door), GREEN when SD is higher than the check (no minus sign — shown as a plain $).
+  const diffCell=m=> m.diff>0
+    ? `<td class="ck-amt ck-err">${ckMoney(m.diff)}</td>`
+    : `<td class="ck-amt ck-ok">${ckMoney(Math.abs(m.diff))}</td>`;
+  const mrow=m=>`<tr><td class="ck-ref">${escHtml(m.check_number)}</td><td class="ck-amt">${ckMoney(m.wf_amount)}</td>
+      <td class="ck-amt">${ckMoney(m.sd_total)}</td>${diffCell(m)}
+      <td class="ck-vin" title="${escHtml(m.orders)}">${m.orders_n} — ${escHtml(m.orders)}</td></tr>`;
+  const MHEAD='<th>Check #</th><th>WF amount</th><th>SD total</th><th>Diff</th><th>SD shipments</th>';
+  // Split: within 15% of the SD price = minor (parked at the bottom, still visible);
+  // everything else is the main list. Both sorted biggest discrepancy first.
+  const bySize=(a,b)=>Math.abs(b.diff)-Math.abs(a.diff);
+  const isMinor=m=> m.sd_total>0 && Math.abs(m.diff)/m.sd_total<=0.15;
+  const all=(r.mismatched||[]).slice().sort(bySize);
+  const major=flt(all.filter(m=>!isMinor(m)),['check_number','orders','sd_refs']);
+  const minor=flt(all.filter(isMinor),['check_number','orders','sd_refs']);
+  sec('mismatched','Amount differs (WF vs SD) — biggest difference first', major, MHEAD, mrow);
+  sec('wf_only','On statement, not found in SD', flt(r.wf_only||[],['check_number']),
+    '<th>Check #</th><th>WF amount</th><th>Date</th>',
+    w=>`<tr><td class="ck-ref">${escHtml(w.check_number)}</td>
+      <td class="ck-amt">${ckMoney(w.wf_amount)}</td><td>${escHtml(w.date||'—')}</td></tr>`);
+  sec('sd_only','In SD, missing from statement (within its check range)', flt(r.sd_only||[],['sd_refs','orders']),
+    '<th>SD reference</th><th>SD total</th><th>SD shipments</th>',
+    x=>`<tr><td class="ck-ref">${escHtml(x.sd_refs)}</td><td class="ck-amt">${ckMoney(x.sd_total)}</td>
+      <td class="ck-vin" title="${escHtml(x.orders)}">${x.orders_n} — ${escHtml(x.orders)}</td></tr>`);
+  sec('matched','Matched', flt(r.matched||[],['check_number','orders','sd_refs']),
+    '<th>Check #</th><th>Amount</th><th>SD shipments</th>',
+    m=>`<tr><td class="ck-ref">${escHtml(m.check_number)}</td><td class="ck-amt">${ckMoney(m.wf_amount)}</td>
+      <td class="ck-vin" title="${escHtml(m.orders)}">${m.orders_n} — ${escHtml(m.orders)}</td></tr>`);
+  sec('mismatched','Minor differences — within 15% of the SD price', minor, MHEAD, mrow);
+  el.innerHTML=h;
+}
 
 // ---- SuperDispatch posting audit -------------------------------------------
 function fmtAuditWhen(iso){

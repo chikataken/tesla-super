@@ -1842,6 +1842,110 @@ def api_audit(limit: int = 200, offset: int = 0):
                 "error": f"audit unavailable: {e}"}
 
 
+# ---- Checks (wells-check Wells Fargo reconciliation) -------------------------
+# Read-only view over ../wells-check/data/wells.db: every PAID SD order its
+# scraper has recorded + the payment reference (check #) the enrich pass fills.
+# `refs` is the per-check rollup — a WF check pays a BUNDLE of shipments, so its
+# statement amount must equal SUM(price) across the orders sharing its number.
+_WELLS_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "wells-check", "data", "wells.db")
+
+
+@app.get("/api/wells-checks")
+def api_wells_checks(q: Optional[str] = None, limit: int = 5000, offset: int = 0):
+    import sqlite3 as _sq
+    path = os.path.abspath(_WELLS_DB)
+    if not os.path.exists(path):
+        return {"orders": [], "refs": [], "stats": {},
+                "error": "wells.db not found — run wells-check/run.sh first"}
+    con = _sq.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+    con.row_factory = _sq.Row
+    try:
+        where, args = "", []
+        if q:
+            where = (" WHERE (order_id LIKE ? OR vin_preview LIKE ?"
+                     " OR reference_number LIKE ? OR number LIKE ?)")
+            like = f"%{q}%"
+            args = [like, like, like, like]
+        # rowid = scan order = most recently PAID first (the scraper starts at page 1).
+        orders = [dict(r) for r in con.execute(
+            "SELECT guid, order_id, vin_preview, number, price, reference_number,"
+            " method, sent_date, delivered_at, vehicle_count, page_seen,"
+            " enriched_at, enrich_error"
+            f" FROM paid_orders{where} ORDER BY rowid LIMIT ? OFFSET ?",
+            args + [min(int(limit), 20000), int(offset)])]
+        refs = [dict(r) for r in con.execute(
+            "SELECT reference_number, COUNT(*) orders_n, SUM(price) total,"
+            " SUM(vehicle_count) vehicles, MAX(sent_date) sent_date"
+            " FROM paid_orders"
+            " WHERE reference_number IS NOT NULL AND reference_number != ''"
+            " GROUP BY reference_number ORDER BY MIN(rowid)")]
+        one = lambda s: con.execute(s).fetchone()[0]
+        st = {r["key"]: r["value"] for r in con.execute("SELECT key, value FROM scan_state")}
+        stats = {
+            "scraped": one("SELECT COUNT(*) FROM paid_orders"),
+            "enriched": one("SELECT COUNT(*) FROM paid_orders WHERE enriched_at IS NOT NULL"),
+            "errors": one("SELECT COUNT(*) FROM paid_orders WHERE enrich_error IS NOT NULL"),
+            "distinct_references": len(refs),
+            "next_page": int(st.get("next_page", "1") or 1),
+            "scan_done": st.get("scan_done") or None,
+            "last_run_at": st.get("last_run_at") or None,
+        }
+        return {"orders": orders, "refs": refs, "stats": stats}
+    finally:
+        con.close()
+
+
+@app.post("/api/wells-checks/statement")
+async def api_wells_statement(request: Request):
+    """Upload the monthly Wells Fargo statement PDF (raw request body — no multipart).
+    Every check entry (check number + Withdrawals/Debits amount) is parsed and
+    upserted into wells.db's wf_checks, keyed on the check number, ready for
+    /api/wells-checks/reconcile."""
+    data = await request.body()
+    if not data or not data[:5].startswith(b"%PDF"):
+        raise HTTPException(400, "send the Wells Fargo statement PDF as the request body")
+    import wells_reconcile
+    try:
+        parsed = wells_reconcile.parse_statement(data)
+    except Exception as e:                                   # noqa: BLE001
+        raise HTTPException(400, f"could not read that PDF: {e}")
+    checks = parsed["checks"]
+    if not checks:
+        return {"ok": False, "parsed": 0, "debug": parsed["debug"],
+                "error": "no check entries recognized in this PDF — see debug"}
+    import sqlite3 as _sq
+    import time as _t
+    fname = request.headers.get("x-filename", "statement.pdf")[:120]
+    con = _sq.connect(os.path.abspath(_WELLS_DB), timeout=15)
+    try:
+        con.execute("""CREATE TABLE IF NOT EXISTS wf_checks(
+            check_number TEXT PRIMARY KEY, amount REAL, date TEXT,
+            source_file TEXT, uploaded_at REAL)""")
+        for c in checks:
+            con.execute("INSERT INTO wf_checks(check_number, amount, date, source_file,"
+                        " uploaded_at) VALUES(?,?,?,?,?) ON CONFLICT(check_number) DO UPDATE"
+                        " SET amount=excluded.amount, date=excluded.date,"
+                        " source_file=excluded.source_file, uploaded_at=excluded.uploaded_at",
+                        (c["check_number"], c["amount"], c.get("date"), fname, _t.time()))
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "parsed": len(checks), "file": fname, "debug": parsed["debug"]}
+
+
+@app.get("/api/wells-checks/reconcile")
+def api_wells_reconcile():
+    """WF statement ↔ SuperDispatch breakdown: matched / amount-mismatch / on the
+    statement but not in SD / in SD but missing from the statement."""
+    import wells_reconcile
+    path = os.path.abspath(_WELLS_DB)
+    if not os.path.exists(path):
+        return {"summary": {}, "matched": [], "mismatched": [], "wf_only": [],
+                "sd_only": [], "error": "wells.db not found — run wells-check first"}
+    return wells_reconcile.reconcile(path)
+
+
 # ---- Recorded shipments (the local Super Dispatch mirror) --------------------
 # Read-only views over recorder.db, populated by recorder_backfill.py (and, later,
 # the live webhook feed). Kept self-contained: a missing/empty DB returns empties
