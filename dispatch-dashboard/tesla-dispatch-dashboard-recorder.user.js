@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.16.0
+// @version      0.16.2
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, and provides Cleaner/Marker actions for pickups, ETAs, Driver Needed shipments, and Tesla-status reconciliation.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -471,8 +471,8 @@
     }
     return [...shipments.values()];
   }
-  // Clean Pickups: prep() scans all three alerts and previews both write counts. Confirmation
-  // updates pickup dates and assigns Jessica only to shipments carrying Driver Needed (id 2).
+  // Clean Pickups: scan all three alerts, then immediately update pickup dates and assign Jessica
+  // only to shipments carrying Driver Needed (id 2).
   async function prepCleanPickups(setStatus) {
     setStatus('scanning pickup + driver alerts…');
     const pickups = await scanPickupAlerts();
@@ -551,15 +551,21 @@
     clearTimeout(vinDefaultTimer);
     vinDefaultTimer = setTimeout(applyVinDefaultVisual, 40);
   }
-  function applyVinDefaultVisual() {
-    if (!ON_DASH() || !vinSearchMode) return;
+  function searchByControls() {
     const label = [...document.querySelectorAll('.t-label')].find(el => el.textContent.trim() === 'Search By');
     const select = label && label.parentElement && label.parentElement.querySelector('tsl-select');
-    if (!select) return;
+    if (!select) return null;
     const valueNode = select.querySelector('.tsl-select-value-text');
     const valueText = valueNode && (valueNode.querySelector('span') || valueNode);
-    if (valueText && valueText.textContent.trim() !== 'VINs') valueText.textContent = 'VINs';
     const input = label.parentElement.nextElementSibling && label.parentElement.nextElementSibling.querySelector('input');
+    return { valueText, input };
+  }
+  function applyVinDefaultVisual() {
+    if (!ON_DASH() || !vinSearchMode) return;
+    const controls = searchByControls();
+    if (!controls) return;
+    const { valueText, input } = controls;
+    if (valueText && valueText.textContent.trim() !== 'VINs') valueText.textContent = 'VINs';
     if (input && input.placeholder !== 'Enter VINs') {
       input.placeholder = 'Enter VINs';
       input.setAttribute('placeholder', 'Enter VINs');
@@ -569,15 +575,49 @@
     vinSearchMode = true;
     scheduleVinDefault();
   }
+  function selectedSearchOption(event) {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    return path.find(node => node && node.nodeType === 1 && node.matches
+      && node.matches('.tsl-option, tsl-option, .tsl-select-option, [role="option"]'))
+      || (event.target && event.target.closest
+        && event.target.closest('.tsl-option, tsl-option, .tsl-select-option, [role="option"]'));
+  }
+  function restoreShipmentVisual(optionText) {
+    if (vinSearchMode || !ON_DASH()) return;
+    const controls = searchByControls();
+    if (!controls) return;
+    // The VIN default is cosmetic: Tesla may already have Shipment selected internally and
+    // therefore may not repaint when the user selects it again. Replace only stale VIN text;
+    // if Angular rendered its own Shipment wording, leave that native wording untouched.
+    if (controls.valueText && /^vins?$/i.test(controls.valueText.textContent.trim())) {
+      controls.valueText.textContent = optionText || 'Shipment Numbers';
+    }
+    if (controls.input && /^enter\s+vins?$/i.test(controls.input.placeholder || '')) {
+      controls.input.placeholder = 'Enter Shipment Numbers';
+      controls.input.setAttribute('placeholder', 'Enter Shipment Numbers');
+    }
+  }
   // A deliberate manual selection still wins for the rest of this dashboard visit.
-  document.addEventListener('click', event => {
+  function handleManualSearchOption(event) {
     if (!ON_DASH()) return;
-    const option = event.target && event.target.closest && event.target.closest('.tsl-option');
+    const option = selectedSearchOption(event);
     if (!option) return;
-    const text = option.textContent.trim();
-    if (text === 'Shipment Numbers') vinSearchMode = false;
-    else if (text === 'VINs') { vinSearchMode = true; scheduleVinDefault(); }
-  }, true);
+    const text = option.textContent.replace(/\s+/g, ' ').trim();
+    if (/^shipment(?:\s+numbers?)?$/i.test(text)) {
+      vinSearchMode = false;
+      clearTimeout(vinDefaultTimer);
+      // Run after Tesla's option handler. The second pass covers a delayed Angular repaint.
+      setTimeout(() => restoreShipmentVisual(text), 0);
+      setTimeout(() => restoreShipmentVisual(text), 120);
+    } else if (/^vins?$/i.test(text)) {
+      vinSearchMode = true;
+      scheduleVinDefault();
+    }
+  }
+  // pointerdown releases the override before Tesla handles the choice; click also supports
+  // keyboard-generated selections and older versions of the selector.
+  document.addEventListener('pointerdown', handleManualSearchOption, true);
+  document.addEventListener('click', handleManualSearchOption, true);
 
   // ---- in-page Deliver / Andrew Enkh control --------------------------------
   let deliverUiTimer = null, deliverObserver = null;
@@ -736,6 +776,8 @@
     .act .s { font-size: 11px; opacity: .72; }
     .act.armed { background: #f5c518; color: #171a20; }        /* yellow — confirm */
     .act.armed .s { opacity: .9; }
+    .act.processing { background: #f5c518; color: #171a20; }   /* yellow — scanning/writing */
+    .act.processing .s { opacity: .9; }
     .act.run { background: #2a2f36; }
     .act.done { background: #0a7d33; }                         /* green — success */
     .act.err { background: #b42318; }
@@ -750,8 +792,8 @@
     root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style'); style.textContent = CSS; root.appendChild(style);
     const menu = document.createElement('div'); menu.className = 'menu'; menu.id = 'ddmenu';
-    menu.appendChild(actionButton('Clean Pickups', () => nextWeekdayCaption(), runCleanPickups, prepCleanPickups));
-    menu.appendChild(actionButton('Clean ETA', () => nextCalendarDayCaption(), runCleanEta, prepCleanEta));
+    menu.appendChild(actionButton('Clean Pickups', () => nextWeekdayCaption(), runCleanPickups, prepCleanPickups, { oneClick: true }));
+    menu.appendChild(actionButton('Clean ETA', () => nextCalendarDayCaption(), runCleanEta, prepCleanEta, { oneClick: true }));
     menu.appendChild(actionButton('Pull red VINs to mark', 'tap to confirm', runPullRed));  // nearest the pill
     root.appendChild(menu);
     const launch = document.createElement('button');
@@ -771,13 +813,13 @@
     }
   }
 
-  // Confirm-to-run button. idle -> (click) either arms directly, or if prepFn is given, runs a
-  // read-only scan first and arms with its count ("N → date · Confirm?"). armed -> (click) runs
-  // runFn(setStatus, prepData) -> green "✓" on success, red on error, then auto-reverts.
-  function actionButton(label, subtitle, runFn, prepFn) {
+  // Standard actions retain confirm-to-run. With oneClick enabled, one press scans and writes
+  // while yellow, then turns green on success (including when the scan finds nothing to clean).
+  function actionButton(label, subtitle, runFn, prepFn, options) {
     const btn = document.createElement('button');
     btn.innerHTML = `<span class="t"></span><span class="s"></span>`;
     const T = btn.querySelector('.t'), S = btn.querySelector('.s');
+    const oneClick = !!(options && options.oneClick);
     let state = 'idle', armTimer = null, prepData = null;
     const subtitleText = () => typeof subtitle === 'function' ? subtitle() : subtitle;
     const setStatus = (msg) => { S.textContent = msg; };
@@ -788,6 +830,18 @@
     idle();
     btn.addEventListener('click', async () => {
       if (state === 'running' || state === 'prepping') return;
+      if (oneClick) {
+        state = 'running'; btn.className = 'act processing'; T.textContent = label; S.textContent = 'scanning…';
+        try {
+          const prepared = prepFn ? await prepFn(setStatus) : null;
+          const summary = prepared && prepared.count
+            ? await runFn(setStatus, prepared)
+            : ((prepared && prepared.emptyMsg) || 'nothing to clean ✓');
+          state = 'done'; btn.className = 'act done'; T.textContent = '✓ ' + label; S.textContent = summary;
+          setTimeout(idle, 6000);
+        } catch (e) { err(e); }
+        return;
+      }
       if (state === 'armed') {                              // confirmed -> run
         clearTimeout(armTimer);
         if (!runFn) { btn.className = 'act err'; T.textContent = 'Not wired yet'; S.textContent = ''; setTimeout(idle, 1800); return; }

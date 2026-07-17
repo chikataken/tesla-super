@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      1.0.5
+// @version      1.0.6
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -18,6 +18,8 @@
  *               (Cybercab, VIN starts 5YJA), and YL (VIN starts 7SAY and its 6th character is B)
  *               each get their own box; one price -> every VIN in that subset.
  *   Submit    : Enter only sends boxes you've TYPED into; pickup = next weekday at 16:00Z, USD (ETA counts calendar days, may be a weekend).
+ *               Submissions are serialized per route: if Enter is pressed again while a send is
+ *               running, the newest card snapshot runs last and is the one that leaves the card green.
  *               Card stays green on success (HTTP 200), red on failure. Only sent VINs are committed.
  *   Note      : the panel is a snapshot loaded once (+ Reload). After bidding, hit Reload to see updated counters.
  *
@@ -152,6 +154,7 @@
   // verb: MakeOffer for a VIN with no offer yet, UpdateOffer to change an existing one (same id + payload).
   const writeUrl = (bidId, verb) => state.endpoint.replace(/groups(\?.*)?$/i, '') + bidId + '/' + verb;
   const MIN_BID = 50;
+  const cardSubmissionSlots = new Map(); // route -> {running, pending, promise}; newest pending wins
   const typedPriceInputs = (cardEl) => [...cardEl.querySelectorAll('.price:not([readonly])')].filter((i) => (i.value || '').trim() !== '');
   const bidValue = (value) => Number(String(value || '').replace(/[$,\s]/g, ''));
   function validateCardBids(cardEl, focusInvalid = false) {
@@ -179,25 +182,129 @@
     if (j && j.success === false) throw new Error('Tesla returned success:false'); // 200 but logically rejected
     return j;
   }
-  // Send every TYPED box in a card; each box's price -> every VIN in its subset. Pickup/ETA per the rules.
-  async function submitCard(cardEl) {
-    if (!validateCardBids(cardEl, true)) return false;
+
+  function inputRouteKey(inputKey) {
+    const sep = String(inputKey || '').lastIndexOf('|');
+    return sep >= 0 ? inputKey.slice(0, sep) : String(inputKey || '');
+  }
+
+  function currentCard(route, fallback) {
+    if (fallback && fallback.isConnected) return fallback;
+    if (!body || !body.right) return fallback;
+    return [...body.right.querySelectorAll('.fcard')].find((card) => card.dataset.leg === route) || fallback;
+  }
+
+  // Freeze exactly what was on the card when Enter was pressed. Editing without pressing Enter
+  // does not enqueue anything; pressing Enter again replaces any waiting snapshot with this one.
+  function snapshotCard(cardEl) {
     const inputs = typedPriceInputs(cardEl);
-    if (!inputs.length) return;
-    const oldTag = cardEl.querySelector('.subtag'); if (oldTag) oldTag.remove();
-    cardEl.classList.remove('submitted', 'submit-err', 'bid-invalid'); cardEl.classList.add('sending');
-    let sent = 0, failed = 0;
+    if (!inputs.length) return null;
+    const offers = [];
     for (const inp of inputs) {
-      const { g, vins } = bidsForKey(inp.dataset.key); if (!g) continue;
-      const body = { CurrencyCode: 'USD', BidAmount: String(bidValue(inp.value)), EstimatedShipDate: iso16(pickupDate()), NeededByDate: iso16(selectedEta(g)), OfferExpiryDate: null };
-      for (const b of vins) { const verb = (b.carrierCounter && b.carrierCounter.bidAmount != null) ? 'UpdateOffer' : 'MakeOffer'; try { await postOffer(b.bidId, verb, body); sent++; } catch (e) { failed++; console.warn('[bidpanel] bid FAILED for', b.vin, '—', e && e.message); } }
+      const { g } = bidsForKey(inp.dataset.key);
+      if (!g) continue;
+      offers.push({
+        key: inp.dataset.key,
+        price: String(bidValue(inp.value)),
+        estimatedShipDate: iso16(pickupDate()),
+        neededByDate: iso16(selectedEta(g)),
+      });
     }
-    cardEl.classList.remove('sending'); cardEl.classList.add(failed ? 'submit-err' : 'submitted');
+    if (!offers.length) return null;
+    return { route: inputRouteKey(offers[0].key), cardEl, offers };
+  }
+
+  function markCardSending(snapshot) {
+    const card = currentCard(snapshot.route, snapshot.cardEl);
+    if (!card) return;
+    const oldTag = card.querySelector('.subtag'); if (oldTag) oldTag.remove();
+    card.classList.remove('submitted', 'submit-err', 'bid-invalid');
+    card.classList.add('sending');
+  }
+
+  function finishCard(snapshot, failed) {
+    const card = currentCard(snapshot.route, snapshot.cardEl);
+    if (!card) return;
+    const oldTag = card.querySelector('.subtag'); if (oldTag) oldTag.remove();
+    card.classList.remove('sending', 'submitted', 'submit-err', 'bid-invalid');
+    card.classList.add(failed ? 'submit-err' : 'submitted');
     if (failed) {
-      const tag = document.createElement('div'); tag.className = 'subtag'; cardEl.appendChild(tag);
+      const tag = document.createElement('div'); tag.className = 'subtag'; card.appendChild(tag);
       tag.textContent = `⚠ ${failed} offer${failed === 1 ? '' : 's'} failed`;
     }
-    return failed === 0;
+  }
+
+  function rememberSuccessfulOffer(bid, offer) {
+    // find-by-route data is a snapshot, so teach it about this write. A queued correction will
+    // then use UpdateOffer (not a second, rejected MakeOffer) and future renders show the new bid.
+    bid.carrierCounter = Object.assign({}, bid.carrierCounter || {}, {
+      bidAmount: Number(offer.price),
+      currencyCode: 'USD',
+      estimatedShipDate: offer.estimatedShipDate,
+      neededByDate: offer.neededByDate,
+    });
+  }
+
+  async function sendCardSnapshot(snapshot, slot) {
+    let failed = 0;
+    for (const offer of snapshot.offers) {
+      const { g, vins } = bidsForKey(offer.key); if (!g) continue;
+      const requestBody = {
+        CurrencyCode: 'USD', BidAmount: offer.price,
+        EstimatedShipDate: offer.estimatedShipDate,
+        NeededByDate: offer.neededByDate, OfferExpiryDate: null,
+      };
+      for (const bid of vins) {
+        // The current request cannot be recalled, but once it finishes skip the rest of this stale
+        // batch and move immediately to the newest Entered snapshot.
+        if (slot.pending) return { failed, superseded: true };
+        const verb = (bid.carrierCounter && bid.carrierCounter.bidAmount != null) ? 'UpdateOffer' : 'MakeOffer';
+        try {
+          await postOffer(bid.bidId, verb, requestBody);
+          rememberSuccessfulOffer(bid, offer);
+        } catch (e) {
+          failed++;
+          console.warn('[bidpanel] bid FAILED for', bid.vin, '—', e && e.message);
+        }
+      }
+    }
+    return { failed, superseded: false };
+  }
+
+  async function drainCardSubmissions(route, slot) {
+    slot.running = true;
+    let finalOk = false;
+    try {
+      while (slot.pending) {
+        const snapshot = slot.pending;
+        slot.pending = null;
+        const result = await sendCardSnapshot(snapshot, slot);
+        if (slot.pending || result.superseded) continue;
+        finishCard(snapshot, result.failed);
+        finalOk = result.failed === 0;
+      }
+      return finalOk;
+    } finally {
+      slot.running = false;
+      if (cardSubmissionSlots.get(route) === slot) cardSubmissionSlots.delete(route);
+    }
+  }
+
+  // Send every TYPED box in a card; each box's price -> every VIN in its subset. Only one batch
+  // runs per route. Repeated Enters while it runs collapse to the newest snapshot (last-write-wins).
+  function submitCard(cardEl) {
+    if (!validateCardBids(cardEl, true)) return Promise.resolve(false);
+    const snapshot = snapshotCard(cardEl);
+    if (!snapshot) return Promise.resolve(false);
+    let slot = cardSubmissionSlots.get(snapshot.route);
+    if (!slot) {
+      slot = { running: false, pending: null, promise: null };
+      cardSubmissionSlots.set(snapshot.route, slot);
+    }
+    slot.pending = snapshot;
+    markCardSending(snapshot);
+    if (!slot.running) slot.promise = drainCardSubmissions(snapshot.route, slot);
+    return slot.promise;
   }
 
   // ---- 3) Panel -------------------------------------------------------------
@@ -553,7 +660,7 @@
       const ct = vins.filter((b) => klass(b) === 'ct');
       const std = vins.filter((b) => klass(b) === 'std');
       const O = shortLoc(g.origin && g.origin.name), D = shortLoc(g.destination && g.destination.name);
-      const card = document.createElement('div'); card.className = 'fcard'; card.dataset.ri = ri;
+      const card = document.createElement('div'); card.className = 'fcard'; card.dataset.ri = ri; card.dataset.leg = key;
       let boxes = '';
       if (std.length) boxes += priceBox(key, 'std', std);
       if (ct.length) boxes += priceBox(key, 'ct', ct);
