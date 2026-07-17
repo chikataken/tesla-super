@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Capacity Planner — Requested History
 // @namespace    wastake.capacityplanner
-// @version      0.14.0
+// @version      0.15.0
 // @description  Full-screen replacement UI for Tesla Capacity Planner in the bidboard theme: This Week / Next Week grid, per-day cells with a schedule entry box (placeholder = Tesla's current confirmed) next to the requested number, hover history cards from the server change log, dummy Confirm Capacity buttons, and a bottom-right Tesla grid / Planner UI toggle. Still read-only toward Tesla; mirrors both capacity feeds to the shipment-creator change log.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
@@ -594,9 +594,10 @@
         .bx-r.chg{background:#ffe08a;color:#171a20;cursor:pointer}
         .bx-r.ackflash{animation:cpackpulse .5s ease}
         @keyframes cpackpulse{0%{background:#ffe08a;transform:scale(1)}40%{background:#ffd34d;transform:scale(1.1)}100%{background:#e1e4e9;transform:scale(1)}}
-        /* single-direction ticker: pinned to the left edge, out of flow, so the
-           requested number stays perfectly centered. Survives acknowledgement. */
-        .tick{position:absolute;left:5px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700}
+        /* single-direction ticker: anchored just left of the (centered) number, out of
+           flow so the number never shifts. Survives acknowledgement. */
+        .num{position:relative;display:inline-block}
+        .tick{position:absolute;right:100%;margin-right:3px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700}
         .tick.up{color:#0a7d33}
         .tick.down{color:#c0392b}
         .empty,.loadwrap{display:flex;align-items:center;justify-content:center;height:100%;min-height:300px;color:#9a9da1;font-size:13px}
@@ -761,19 +762,24 @@
           const zero = !(R || C || S);
           // Left half = scheduled entry; red only when it doesn't match requested.
           // Right half = requested; amber while a change is unacknowledged. The ▲/▼
-          // ticker (green up / red down vs the previous value) is pinned to the left
-          // edge and PERSISTS after the amber is acknowledged.
+          // ticker compares the LIVE requested number against the previous recorded
+          // value (last log row if it lags the feed, else the second-to-last), hugs
+          // the centered number's left side, and PERSISTS after acknowledgement.
           const typed = (schedPlan[hk] || '').trim();
           const effective = typed !== '' ? Number(typed) : C;
           const off = !zero && R != null && !(effective != null && Number(effective) === R);
+          const lastVal = tl.length ? Number(tl[tl.length - 1].capacity) : null;
+          let prevVal = null;
+          if (lastVal != null && R != null && lastVal !== R) prevVal = lastVal;
+          else if (tl.length >= 2) prevVal = Number(tl[tl.length - 2].capacity);
           let tick = '';
-          if (isChanged) {
-            const df = Number(tl[tl.length - 1].capacity) - Number(tl[tl.length - 2].capacity);
+          if (prevVal != null && R != null && prevVal !== R) {
+            const df = R - prevVal;
             tick = `<span class="tick ${df > 0 ? 'up' : 'down'}">${df > 0 ? '▲' : '▼'}</span>`;
           }
           html += `<td class="cell${zero ? ' zero' : ''}"><div class="cw">` +
             `<input class="bx bx-s${off ? ' off' : ''}" type="text" inputmode="numeric" data-hk="${esc(hk)}" data-req="${R == null ? '' : R}" data-conf="${C == null ? '' : C}" placeholder="${C == null ? '' : C}" value="${esc(typed)}">` +
-            `<span class="bx bx-r${isChanged && !acked ? ' chg' : ''}"${tl.length ? ` data-hk="${esc(hk)}"` : ''}${lastStamp ? ` data-stamp="${esc(lastStamp)}"` : ''}>${tick}${R == null ? '–' : R}</span>` +
+            `<span class="bx bx-r${isChanged && !acked ? ' chg' : ''}"${tl.length ? ` data-hk="${esc(hk)}"` : ''}${lastStamp ? ` data-stamp="${esc(lastStamp)}"` : ''}><span class="num">${tick}${R == null ? '–' : R}</span></span>` +
             `</div></td>`;
         });
         html += `<td class="tot"><div class="osum${sumC < sumR ? ' u' : ''}">${sumC} / ${sumR}</div></td>`;
