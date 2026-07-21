@@ -1,0 +1,301 @@
+Attribute VB_Name = "TeslaFormatter"
+Option Explicit
+
+' ============================================================
+'  Tesla Export Formatter  (Mac & Windows compatible)
+'  - Deletes rows by OriginLocation
+'  - Keeps / reorders columns, adds narrow reference columns, adds a blank "rate" column and model column
+'  - Sorts by Origin/Destination State & City
+'  - Custom column widths (character + exact-pixel), auto-fits the rest
+'  - Adds model code after rate: YL=7SAY + 6th character B; otherwise 4th VIN character C=CT, A=CAB, X=X
+'  - Writes the result to a new "Formatted" sheet
+'  Runs on the workbook that is currently active.
+' ============================================================
+
+Sub FormatTeslaExport()
+
+    Dim wb As Workbook
+    Dim ws As Worksheet
+    Dim outSheet As Worksheet
+    Dim arr As Variant
+    Dim i As Long, k As Long, r As Long, c As Long
+    Dim nRows As Long, nCols As Long
+    Dim lastRow As Long, lastCol As Long
+
+    ' ---- EDIT HERE: origins to delete (matched against OriginLocation) ----
+    Dim dropOrigins As Variant
+    dropOrigins = Array( _
+        "Tesla Inc Gigafactory Texas", _
+        "Fremont Factory")
+
+    ' ---- EDIT HERE: pickup addresses to delete (matched against OriginAddress) ----
+    Dim dropOriginAddresses As Variant
+    dropOriginAddresses = Array( _
+        "40445 Albrae St", _
+        "13101 Tesla Rd", _
+        "1 Tesla Rd")
+
+    ' ---- EDIT HERE: output columns, in order (rate added automatically) ----
+    Dim outNames As Variant
+    outNames = Array( _
+        "ShipmentNumber", _
+        "Vin", _
+        "OriginState", "OriginCity", "OriginAddress", "OriginZip", _
+        "OriginLocation", "DestinationLocation", "NeedByDate", "OriginContactPhone", "DestinationContactPhone", _
+        "DestinationState", "DestinationCity", "DestinationAddress", "DestinationZip")
+
+    ' ---- EDIT HERE: sort priority, top key first (all ascending) ----
+    Dim sortKeys As Variant
+    sortKeys = Array("OriginState", "OriginCity", "DestinationState", "DestinationCity")
+
+    ' ---- EDIT HERE: fixed widths in CHARACTERS. Pairs of name, width. ----
+    Dim fixedWidths As Variant
+    fixedWidths = Array( _
+        "OriginAddress", 22, _
+        "DestinationAddress", 22, _
+        "OriginZip", 9, _
+        "DestinationZip", 11, _
+        "rate", 10, _
+        "model", 5)
+
+    ' ---- EDIT HERE: exact widths in PIXELS. Pairs of name, pixels. ----
+    Dim pixelWidths As Variant
+    pixelWidths = Array( _
+        "OriginLocation", 1, _
+        "DestinationLocation", 1, _
+        "NeedByDate", 1, _
+        "OriginContactPhone", 1, _
+        "DestinationContactPhone", 1)
+
+    ' ----------------------------------------------------------------
+
+    Set wb = ActiveWorkbook
+    If wb Is Nothing Then Exit Sub
+
+    On Error Resume Next
+    Set ws = wb.Worksheets("VINs")
+    On Error GoTo 0
+    If ws Is Nothing Then Set ws = wb.ActiveSheet
+
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+    Application.EnableEvents = False
+
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    If lastRow < 2 Then
+        RestoreApp
+        MsgBox "No data rows found on sheet '" & ws.Name & "'.", vbExclamation, "Tesla Formatter"
+        Exit Sub
+    End If
+    arr = ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, lastCol)).Value
+    nRows = UBound(arr, 1)
+    nCols = UBound(arr, 2)
+
+    Dim srcCol() As Long
+    ReDim srcCol(LBound(outNames) To UBound(outNames))
+    Dim missing As String
+    For k = LBound(outNames) To UBound(outNames)
+        srcCol(k) = ColIdx(arr, CStr(outNames(k)))
+        If srcCol(k) = 0 Then missing = missing & vbCrLf & "  - " & outNames(k)
+    Next k
+
+    Dim olCol As Long
+    olCol = ColIdx(arr, "OriginLocation")
+    If olCol = 0 Then missing = missing & vbCrLf & "  - OriginLocation (needed to filter rows)"
+
+    Dim oaCol As Long
+    oaCol = ColIdx(arr, "OriginAddress")
+    If oaCol = 0 Then missing = missing & vbCrLf & "  - OriginAddress (needed to filter rows)"
+
+    If Len(missing) > 0 Then
+        RestoreApp
+        MsgBox "Can't run. These expected columns weren't found:" & missing, vbExclamation, "Tesla Formatter"
+        Exit Sub
+    End If
+
+    Dim keep() As Boolean
+    ReDim keep(2 To nRows)
+    Dim keptCount As Long
+    Dim ov As String, oa As String, dropIt As Boolean
+    For i = 2 To nRows
+        ov = CStr(arr(i, olCol))
+        oa = Trim$(CStr(arr(i, oaCol)))
+        dropIt = False
+        For k = LBound(dropOrigins) To UBound(dropOrigins)
+            If ov = CStr(dropOrigins(k)) Then dropIt = True: Exit For
+        Next k
+        If Not dropIt Then
+            For k = LBound(dropOriginAddresses) To UBound(dropOriginAddresses)
+                If StrComp(oa, Trim$(CStr(dropOriginAddresses(k))), vbTextCompare) = 0 Then dropIt = True: Exit For
+            Next k
+        End If
+        If Not dropIt Then keep(i) = True: keptCount = keptCount + 1
+    Next i
+
+    Dim outCols As Long
+    outCols = (UBound(outNames) - LBound(outNames) + 1) + 2
+
+    Dim rateCol As Long
+    Dim modelCol As Long
+    rateCol = outCols - 1
+    modelCol = outCols
+
+    Dim vinSrcCol As Long
+    vinSrcCol = ColIdx(arr, "Vin")
+
+    Dim outArr() As Variant
+    ReDim outArr(1 To keptCount + 1, 1 To outCols)
+
+    For k = LBound(outNames) To UBound(outNames)
+        outArr(1, k - LBound(outNames) + 1) = outNames(k)
+    Next k
+    outArr(1, rateCol) = "rate"
+    outArr(1, modelCol) = "model"
+
+    Dim vinText As String
+    Dim vinCode As String
+
+    r = 1
+    For i = 2 To nRows
+        If keep(i) Then
+            r = r + 1
+            For k = LBound(outNames) To UBound(outNames)
+                outArr(r, k - LBound(outNames) + 1) = arr(i, srcCol(k))
+            Next k
+
+            vinText = CStr(arr(i, vinSrcCol))
+            vinCode = ""
+            If Len(vinText) >= 6 And _
+                    UCase$(Left$(vinText, 4)) = "7SAY" And _
+                    UCase$(Mid$(vinText, 6, 1)) = "B" Then
+                vinCode = "YL"
+            ElseIf Len(vinText) >= 4 Then
+                Select Case UCase$(Mid$(vinText, 4, 1))
+                    Case "C"
+                        vinCode = "CT"
+                    Case "A"
+                        vinCode = "CAB"
+                    Case "X"
+                        vinCode = "X"
+                End Select
+            End If
+            outArr(r, modelCol) = vinCode
+        End If
+    Next i
+
+    On Error Resume Next
+    Application.DisplayAlerts = False
+    wb.Worksheets("Formatted").Delete
+    Application.DisplayAlerts = True
+    On Error GoTo 0
+    Set outSheet = wb.Worksheets.Add(After:=ws)
+    outSheet.Name = "Formatted"
+
+    outSheet.Range(outSheet.Cells(1, 1), outSheet.Cells(keptCount + 1, outCols)).Value = outArr
+
+    ' ---- header row: pitch-black fill, white bold text ----
+    With outSheet.Range(outSheet.Cells(1, 1), outSheet.Cells(1, outCols))
+        .Font.Bold = True
+        .Interior.Color = RGB(0, 0, 0)      ' pitch black fill
+        .Font.Color = RGB(255, 255, 255)    ' white text for contrast
+    End With
+
+    ' ---- sort (multi-level, ascending) ----
+    If keptCount > 1 Then
+        With outSheet.Sort
+            .SortFields.Clear
+            For k = LBound(sortKeys) To UBound(sortKeys)
+                c = ColIdx(outArr, CStr(sortKeys(k)))
+                If c > 0 Then .SortFields.Add Key:=outSheet.Range(outSheet.Cells(1, c), outSheet.Cells(keptCount + 1, c)), _
+                    SortOn:=xlSortOnValues, Order:=xlAscending, DataOption:=xlSortNormal
+            Next k
+            .SetRange outSheet.Range(outSheet.Cells(1, 1), outSheet.Cells(keptCount + 1, outCols))
+            .Header = xlYes
+            .MatchCase = False
+            .Orientation = xlTopToBottom
+            .Apply
+        End With
+    End If
+
+    ' ---- widths: auto-fit, then character overrides, then exact-pixel overrides ----
+    outSheet.Columns.AutoFit
+    For k = LBound(fixedWidths) To UBound(fixedWidths) Step 2
+        c = ColIdx(outArr, CStr(fixedWidths(k)))
+        If c > 0 Then outSheet.Columns(c).ColumnWidth = CDbl(fixedWidths(k + 1))
+    Next k
+    For k = LBound(pixelWidths) To UBound(pixelWidths) Step 2
+        c = ColIdx(outArr, CStr(pixelWidths(k)))
+        If c > 0 Then SetColumnPixels outSheet.Columns(c), CDbl(pixelWidths(k + 1))
+    Next k
+
+    ' ---- model column: centered; darker highlights for CT and CAB only (YL has no highlight) ----
+    With outSheet.Range(outSheet.Cells(1, modelCol), outSheet.Cells(keptCount + 1, modelCol))
+        .HorizontalAlignment = xlCenter
+        .VerticalAlignment = xlCenter
+    End With
+    If keptCount > 0 Then
+        For r = 2 To keptCount + 1
+            Select Case CStr(outSheet.Cells(r, modelCol).Value)
+                Case "CT"
+                    outSheet.Cells(r, modelCol).Interior.Color = RGB(191, 191, 191)   ' darker gray
+                Case "CAB"
+                    outSheet.Cells(r, modelCol).Interior.Color = RGB(255, 192, 0)     ' darker gold
+                Case "X"
+                    ' no highlight
+            End Select
+        Next r
+    End If
+
+    ' ---- borders: outline every cell in the data range ----
+    With outSheet.Range(outSheet.Cells(1, 1), outSheet.Cells(keptCount + 1, outCols)).Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+        .Color = RGB(0, 0, 0)
+    End With
+
+    outSheet.Range("A2").Select
+    ActiveWindow.FreezePanes = True
+
+    RestoreApp
+    outSheet.Activate
+
+    MsgBox "Done." & vbCrLf & _
+           "Kept:    " & keptCount & " rows" & vbCrLf & _
+           "Removed: " & (nRows - 1 - keptCount) & " rows" & vbCrLf & _
+           "Result is on the 'Formatted' sheet.", vbInformation, "Tesla Formatter"
+End Sub
+
+' Returns the column number whose header matches name (case-insensitive), or 0.
+Private Function ColIdx(ByRef arr As Variant, ByVal name As String) As Long
+    Dim j As Long
+    ColIdx = 0
+    For j = 1 To UBound(arr, 2)
+        If StrComp(Trim$(CStr(arr(1, j))), name, vbTextCompare) = 0 Then
+            ColIdx = j
+            Exit Function
+        End If
+    Next j
+End Function
+
+' Sets a column to an exact pixel width by iterating ColumnWidth (96 DPI).
+Private Sub SetColumnPixels(ByVal col As Range, ByVal px As Double)
+    Dim targetPts As Double, curPts As Double, cw As Double, i As Long
+    targetPts = px * 72# / 96#
+    col.ColumnWidth = 8.43
+    For i = 1 To 25
+        curPts = col.Width
+        If curPts <= 0 Then Exit Sub
+        If Abs(curPts - targetPts) <= 0.25 Then Exit Sub
+        cw = col.ColumnWidth * (targetPts / curPts)
+        If cw < 0 Then cw = 0
+        If cw > 255 Then cw = 255
+        col.ColumnWidth = cw
+    Next i
+End Sub
+
+Private Sub RestoreApp()
+    Application.ScreenUpdating = True
+    Application.Calculation = xlCalculationAutomatic
+    Application.EnableEvents = True
+End Sub
