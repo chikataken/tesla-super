@@ -1,4 +1,10 @@
 # ───── secrets / credentials (NEVER commit) ─────
+# Google OAuth client + minted tokens (Gmail API)
+secrets/gmail_credentials.json
+secrets/gmail_token.json
+secrets/didi_gmail_token.json
+# IMAP mailbox credentials (didi@tfitrans.com on iPage)
+secrets/didi_imap.json
 .env
 **/.env
 settings.json
