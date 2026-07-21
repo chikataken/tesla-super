@@ -18,6 +18,10 @@ active_profile.json
 # ───── local shipment-recorder mirror DB (runtime data, not shared) ─────
 **/data/recorder.db
 **/data/recorder.db-*
+
+# ───── local Tesla load-tender mirror DB (raw tender emails incl. gate codes) ─────
+**/tenders.db
+**/tenders.db-*
 posting_audit.db
 **/posting_audit.db
 

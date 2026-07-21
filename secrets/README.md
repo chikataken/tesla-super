@@ -17,6 +17,7 @@ Fill in:
 | `ANTHROPIC_API_KEY`          | tesla-reconcile   | console.anthropic.com               |
 | `SUPERDISPATCH_CLIENT_ID`    | shipment-creator  | Super Dispatch account (API creds)  |
 | `SUPERDISPATCH_CLIENT_SECRET`| shipment-creator  | Super Dispatch account (API creds)  |
+| `DIDI_EMAIL_USER` / `_PASSWORD` | shipment-creator (email segment) | didi@tfitrans.com mailbox password (iPage IMAP) |
 
 ## Precedence
 
