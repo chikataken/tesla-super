@@ -15,10 +15,10 @@ Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/c
 '    emailed load tender, fetched live from shipments.wastake.com (matched on
 '    ShipmentNumber + VIN; latest email wins on re-tenders). First run asks once
 '    for the API token (stored per-user via SaveSetting; see ResetTenderCostToken).
-'    cost shows "$800" (real number - summable/sortable). LIVE color: once a
-'    rate is typed on the row, the cost text turns DARK RED when cost >= rate,
-'    stays black otherwise (and while rate is empty). No tender match = blank.
-'    Red-FILLED cost cell = the tender itself says 0.00.
+'    cost shows "$800" (real number - summable/sortable, black text). LIVE:
+'    once a rate is typed on the row, the cost CELL highlights red when
+'    cost >= rate, plain otherwise (and while rate is empty). No match = blank.
+'    Light-red fill from the start = the tender itself says 0.00.
 '    Mac needs the one-time helper: copy TFITenderCosts.applescript into
 '    ~/Library/Application Scripts/com.microsoft.Excel/
 '  - Writes the result to a new "Formatted" sheet
@@ -291,9 +291,9 @@ Sub FormatTeslaExport()
 
     ' ---- cost column ----------------------------------------------------------
     ' The tender's per-VIN payout as a real NUMBER shown "$800" (summable, sorts
-    ' numerically). LIVE conditional format: once a rate is typed on the row the
-    ' cost text turns DARK RED when cost >= rate, stays black otherwise (and
-    ' while rate is empty). Red FILL = the tender really says 0.00.
+    ' numerically, black text). LIVE conditional format: once a rate is typed on
+    ' the row the CELL highlights red when cost >= rate, plain otherwise (and
+    ' while rate is empty). Static light-red fill = the tender really says 0.00.
     ' No tender match = cell stays blank.
     With outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
         .NumberFormat = "$#,##0"
@@ -317,7 +317,8 @@ Sub FormatTeslaExport()
         With costRng.FormatConditions.Add(Type:=xlExpression, Formula1:= _
                 "=AND(ISNUMBER(" & costFirst & "),ISNUMBER(" & rateFirst & ")," & _
                 costFirst & ">=" & rateFirst & ")")
-            .Font.Color = RGB(139, 0, 0)      ' dark red: cost at or above rate
+            .Interior.Color = RGB(255, 0, 0)  ' red cell: cost at or above rate
+            .Font.Color = RGB(0, 0, 0)        ' text stays black
         End With
     End If
 
