@@ -317,8 +317,8 @@ Sub FormatTeslaExport()
         With costRng.FormatConditions.Add(Type:=xlExpression, Formula1:= _
                 "=AND(ISNUMBER(" & costFirst & "),ISNUMBER(" & rateFirst & ")," & _
                 costFirst & ">=" & rateFirst & ")")
-            .Interior.Color = RGB(255, 0, 0)  ' red cell: cost at or above rate
-            .Font.Color = RGB(0, 0, 0)        ' text stays black
+            .Interior.Color = RGB(255, 153, 153)  ' soft red cell: cost at or above rate
+            .Font.Color = RGB(0, 0, 0)            ' text stays black
         End With
     End If
 
