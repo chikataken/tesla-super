@@ -586,14 +586,14 @@ def build_vehicles_merge(existing_order: dict, new_vehicles: list) -> dict:
             keep["guid"] = v["guid"]                    # MUST include to retain it
         out.append(keep)
         if v.get("vin"):
-            have.add(v["vin"])
+            have.add(str(v["vin"]).strip().upper())     # normalized: case/space-proof
     for nv in new_vehicles:
-        vin = nv.get("vin")
-        if not vin or vin in have:                      # skip blanks + already-present
+        vin = str(nv.get("vin") or "").strip()
+        if not vin or vin.upper() in have:              # skip blanks + already-present
             continue
         out.append({k: val for k, val in nv.items()
                     if val is not None and k != "guid"})  # new -> no guid
-        have.add(vin)
+        have.add(vin.upper())
     return {"vehicles": out}
 
 

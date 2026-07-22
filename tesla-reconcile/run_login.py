@@ -24,6 +24,8 @@ def main():
         print("SuperDispatch:", config.SD_BASE)
         print("Tesla:", config.TESLA_FLEET_URL)
         input("\nWhen both are logged in, press Enter to save the session and exit... ")
+        import sd_login
+        sd_login.clear_2fa_lock()          # manual login done -> auto-logins may resume
         print("Session saved to", config.USER_DATA_DIR)
 
 

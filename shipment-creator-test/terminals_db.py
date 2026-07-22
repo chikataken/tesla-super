@@ -506,20 +506,52 @@ def get_by_sd_id(sd_id: str) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def _sd_sites_in_zip(zip5: str) -> int:
+    """How many DISTINCT buildings (normalized addresses) the scraped terminals occupy
+    in a zip. Distinct addresses — not rows — because SD often carries 2+ venue records
+    for one building ('Tesla - Pond Springs' + 'TESLA AUSTIN - Research Blvd', both
+    12845 Research Blvd): that's harmless. 2+ real sites is what makes a street-less
+    name unable to say WHICH building is meant."""
+    if not zip5:
+        return 0
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT address FROM terminals WHERE source='sd' AND zip5=?",
+            (zip5,)).fetchall()
+    return len({normalize_address(r["address"]) for r in rows
+                if normalize_address(r["address"])})
+
+
+def _name_pins_site(name: str) -> bool:
+    """True when the name itself points at ONE building — it carries a street-number-like
+    digit run ('…-6114', '…-1400 SHOWROOM'). Hub/city-level codes ('NA-US-TX-Dallas')
+    don't, and can mean any Tesla site in the area."""
+    return bool(re.search(r"\d{2,}", name or ""))
+
+
 def resolve_row(name: str) -> tuple[Optional[dict], Optional[str]]:
     """Exact-name lookup that FOLLOWS an address-link. Returns (row, kind):
       kind 'linked' — a learned name aliased (by exact address) to its original scraped
                       terminal; `row` is that ORIGINAL terminal.
       kind 'db'     — a direct match on an original scraped (sd) terminal.
       kind 'added'  — a learned (bol) terminal with no link (genuinely new).
-    (None, None) on no/ambiguous match. This is the single source of truth both posting
-    and the skip-the-portal gate use, so links apply everywhere."""
+    (None, None) on no match; (None, 'ambiguous_site') when the name is a LEARNED
+    hub-level code (no street number) whose site sits in a zip with 2+ real terminals —
+    such a name resolves to whichever building its first BOL happened to use, which is
+    wrong for every other site in the zip (A2C9288 posted 6114 Forest Park while the
+    car sat at 6500 Cedar Springs). We refuse to guess; posting keeps the shipment's
+    own Excel/BOL venue. This is the single source of truth both posting and the
+    skip-the-portal gate use, so links (and this gate) apply everywhere."""
     row = get_by_name(name)
     if not row:
         return None, None
     link = row.get("linked_sd_id")
+    canon = get_by_sd_id(link) if link else None
+    if (row.get("source") or "sd") == "bol" and not _name_pins_site(row.get("name")):
+        eff = canon or row
+        if _sd_sites_in_zip(_zip5(eff.get("zip") or "")) >= 2:
+            return None, "ambiguous_site"
     if link:
-        canon = get_by_sd_id(link)
         if canon:
             # Prefer the ORIGINAL's contact/phone, but if it's blank OR junk
             # (111-111-1111, a zip, etc.) use the learned BOL value instead — and if both

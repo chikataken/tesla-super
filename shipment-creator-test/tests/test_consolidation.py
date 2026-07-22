@@ -149,14 +149,26 @@ def test_no_match_when_routes_differ():
     assert out[0]["matches_board_routes"] == [] and out[0]["is_candidate"] is False
 
 
-def test_accepted_status_is_candidate_even_if_not_posted():
+def test_accepted_order_is_never_a_candidate():
+    """Accepted/pending/picked-up loads belong to a carrier — offering them as
+    consolidation targets is how VINs got appended onto already-accepted loads."""
     pu, do = venue("Bend", "OR", "97703"), venue("Duluth", "GA", "30096")
     o = consolidation.normalize_order(order("g1", "A1", pu, do, ["VIN1"], posted=False))
     o["loadboard_status"] = "accepted"                   # found on the Accepted tab
     board = [{"number": "B1", "pickup": pu, "delivery": do}]
     out = consolidation.match_against_routes([o], board)
     assert out[0]["loadboard_status"] == "accepted"
-    assert out[0]["is_candidate"] is True                # accepted is consolidatable too
+    assert out[0]["editable"] is False
+    assert out[0]["is_candidate"] is False               # route matches, but not editable
+
+
+def test_order_editable_checks_both_status_fields():
+    # lifecycle status blocks even when loadboard_status is empty (SD clears it on accept)
+    for st in ("accepted", "pending", "picked_up", "delivered", "invoiced", "paid", "canceled"):
+        assert consolidation.order_editable({"status": st, "loadboard_status": None}) is False
+        assert consolidation.order_editable({"status": "", "loadboard_status": st}) is False
+    assert consolidation.order_editable({"status": "new", "loadboard_status": None}) is True
+    assert consolidation.order_editable({"status": "posted", "loadboard_status": "posted"}) is True
 
 
 def test_exact_street_match_required_by_default():

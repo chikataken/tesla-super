@@ -183,6 +183,20 @@ def zip_to_state(zip_code: str) -> str:
     return ""
 
 
+def _street_no(a: str) -> str:
+    """Leading street number of an address ('6114 Forest Park Rd' -> '6114'); '' if none."""
+    import re as _re
+    m = _re.match(r"\s*(\d+)", a or "")
+    return m.group(1) if m else ""
+
+
+def _zip5(z: str) -> str:
+    """First 5-digit run of a ZIP ('75235-1234' -> '75235'); '' if none."""
+    import re as _re
+    m = _re.search(r"\d{5}", z or "")
+    return m.group(0) if m else ""
+
+
 def _venue_bol(v: dict) -> dict:
     """A pdf_read BOL pickup/delivery dict -> SD venue object."""
     return {
@@ -215,10 +229,26 @@ def _venue_notes_for_stop(bol_venue: dict, bol_notes: str) -> tuple[dict, str, s
         # No DB terminal. The fallback data is either this run's Tesla BOL ('bol') or, for
         # non-ALL dispatchers who never touch Tesla, the Excel row itself ('excel').
         return venue, bol_notes, (bol_venue.get("src_hint") or "bol")
+    # Cross-check the cached terminal against THIS shipment's own venue data: a different
+    # street number or a different zip means the Excel/BOL names a different BUILDING —
+    # trust the shipment and keep its venue. Without this, a name match silently replaced
+    # a correct Excel address with the cached site (A2C9288: Excel said 6500 Cedar Springs
+    # Rd, the 'NA-US-TX-Dallas' alias posted 6114 Forest Park Rd). Logged as
+    # 'addr_mismatch' so cache drift stays visible.
+    tv = hit["venue"]
+    b_no, t_no = _street_no(venue.get("address")), _street_no(tv.get("address"))
+    b_z, t_z = _zip5(venue.get("zip")), _zip5(tv.get("zip"))
+    if (b_no and t_no and b_no != t_no) or (b_z and t_z and b_z != t_z):
+        try:
+            terminals_lookup.terminals_db.record_miss(
+                bol_venue.get("location", ""), "addr_mismatch")
+        except Exception:
+            pass
+        return venue, bol_notes, (bol_venue.get("src_hint") or "bol")
     # term_source is already the badge token ('db' | 'linked' | 'added').
     source = hit.get("term_source") or "db"
     # Use the terminal's note when present; don't blank a real BOL note with an empty one.
-    return dict(hit["venue"]), (hit.get("carrier_notes") or bol_notes), source
+    return dict(tv), (hit.get("carrier_notes") or bol_notes), source
 
 
 def group_bol_records(records: list[dict]) -> list[tuple[str, list[dict]]]:
@@ -586,14 +616,14 @@ def build_vehicles_merge(existing_order: dict, new_vehicles: list) -> dict:
             keep["guid"] = v["guid"]                    # MUST include to retain it
         out.append(keep)
         if v.get("vin"):
-            have.add(v["vin"])
+            have.add(str(v["vin"]).strip().upper())     # normalized: case/space-proof
     for nv in new_vehicles:
-        vin = nv.get("vin")
-        if not vin or vin in have:                      # skip blanks + already-present
+        vin = str(nv.get("vin") or "").strip()
+        if not vin or vin.upper() in have:              # skip blanks + already-present
             continue
         out.append({k: val for k, val in nv.items()
                     if val is not None and k != "guid"})  # new -> no guid
-        have.add(vin)
+        have.add(vin.upper())
     return {"vehicles": out}
 
 

@@ -16,6 +16,7 @@ Flag logic:
 Usage:
     python test_superdispatch.py                 # batches of 100 until the window
                                                  # is exhausted, then exits
+    python test_superdispatch.py --delivered     # same, but on the DELIVERED tab
     python test_superdispatch.py --count 5       # one pass, 5 shipments (0 = all)
     python test_superdispatch.py --skip-vision   # skip the BOL/photo step
     python test_superdispatch.py --dry-run       # decide but don't write tags
@@ -99,7 +100,10 @@ SCAN_RECYCLE_EVERY = 30
 BATCH_SIZE = 100
 
 
-def collect_qualifying(pages, count, max_pages):
+def collect_qualifying(pages, count, max_pages, tab: str = "invoiced"):
+    """Scan one SD orders tab ('invoiced' by default; 'delivered' via --delivered) for
+    qualifying shipments in the Delivered-On window. Everything downstream (skip tags,
+    Tesla checks, photos, tagging) is tab-agnostic."""
     found = []
     seen = set()                       # detail_urls already collected (dedupe across pages)
     for pageno in range(1, max_pages + 1):
@@ -108,7 +112,7 @@ def collect_qualifying(pages, count, max_pages):
         # orders (~80 pages of 20), so --max-pages must be high enough to reach the
         # recent, still-markable deliveries at the end — the default is 80. Earlier
         # pages are mostly already marked ("Delivery confirmed") and get skipped.
-        page.goto(sd.invoiced_url(WINDOW_START, WINDOW_END, page=pageno, ascending=True))
+        page.goto(sd.list_url(tab, WINDOW_START, WINDOW_END, page=pageno, ascending=True))
         rows = sd.scrape_order_rows(page)
         if not rows:
             print(f"  page {pageno}: 0 rows -> stop")
@@ -451,14 +455,15 @@ def main(args):
         batch_mode = args.count is None and not args.loop and not args.dry_run
         count = BATCH_SIZE if batch_mode else (args.count or 0)
 
+        tab = "delivered" if args.delivered else "invoiced"
         pass_no = 0
         while True:
             pass_no += 1
             limit = "all" if not count else count
             print(f"\n===== pass {pass_no}  {dt.datetime.now():%Y-%m-%d %H:%M} =====")
-            print(f"Window {WINDOW_START}..{WINDOW_END}  count={limit}  "
+            print(f"Tab: {tab}  Window {WINDOW_START}..{WINDOW_END}  count={limit}  "
                   f"dry_run={args.dry_run}  skip_vision={args.skip_vision}")
-            orders, pages = collect_qualifying(pages, count, args.max_pages)
+            orders, pages = collect_qualifying(pages, count, args.max_pages, tab=tab)
             sd_page, tesla_page, claims_page = pages   # adopt any mid-scan recycled tab
             if not orders:
                 print("No qualifying shipments found.")
@@ -500,6 +505,10 @@ if __name__ == "__main__":
     ap.add_argument("--max-pages", type=int, default=80,
                     help="Invoiced-list pages to scan (20 orders each). The window "
                          "can hold ~80 pages, so 80 reaches the recent deliveries.")
+    ap.add_argument("--delivered", action="store_true",
+                    help="Scan the DELIVERED tab instead of Invoiced — same window, "
+                         "same checks and tagging; catches shipments Tesla hasn't "
+                         "invoiced yet.")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--skip-vision", action="store_true")
     ap.add_argument("--loop", action="store_true",

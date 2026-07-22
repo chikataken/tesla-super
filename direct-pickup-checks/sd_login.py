@@ -36,6 +36,39 @@ HUMAN_NEEDED = frozenset({"captcha", "2fa", "no_creds"})
 # post-submit state) — safe to retry auto-login after a backoff, no human required.
 
 
+# ---- 2FA lockout (SHARED across every tool) ---------------------------------
+# Once one auto-login attempt lands on SD's email-code page, every FURTHER attempt
+# makes SD send ANOTHER code — spamming the inbox and invalidating the code the
+# human is about to type. So the first 2FA sighting writes a lock file in the
+# shared Chrome profile dir (tesla-reconcile/.auth), and every project's sd_login
+# copy refuses to auto-login while it exists. It clears itself the moment any run
+# sees the session logged in again (i.e. after the human signs in).
+_2FA_LOCK = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "tesla-reconcile", ".auth", "sd_2fa.lock")
+
+
+def twofa_lock_active() -> bool:
+    return os.path.exists(_2FA_LOCK)
+
+
+def _set_2fa_lock() -> None:
+    try:
+        os.makedirs(os.path.dirname(_2FA_LOCK), exist_ok=True)
+        with open(_2FA_LOCK, "w") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S")
+                     + " SD asked for an email 2FA code; auto-login stood down\n")
+    except OSError:
+        pass
+
+
+def clear_2fa_lock() -> None:
+    try:
+        os.remove(_2FA_LOCK)
+    except OSError:
+        pass
+
+
 class AuthBlocked(RuntimeError):
     """Raised by a web flow when it hit the login page and auto-login could not
     complete. `reason` is one of the codes above; the worker trips its auth gate and
@@ -158,7 +191,13 @@ def ensure_logged_in(page) -> str:
     Captcha is checked FIRST — before any Vaultwarden call — so a captcha page never
     triggers a credential fetch (and so can't contribute to vault rate-limiting)."""
     if not is_login_page(page):
+        clear_2fa_lock()               # session healthy again — the human signed in
         return LOGIN_OK
+    if twofa_lock_active():
+        log("a 2FA email code is already pending from an earlier attempt — standing down "
+            "(every retry makes SD send ANOTHER code). Sign in manually (e.g. "
+            "tesla-reconcile: python sd_login.py); the lock clears once a session is live.")
+        return "2fa"
 
     if _visible_captcha(page):
         log("visible captcha on the login page — leaving it for a human")
@@ -206,10 +245,13 @@ def ensure_logged_in(page) -> str:
         log("captcha after submit — leaving it for a human"); return _needs_human(page, "captcha")
     if not is_login_page(page):
         log("re-login succeeded")
+        clear_2fa_lock()
         return LOGIN_OK
     # Still on a login-ish page — likely a 2FA email/SMS code prompt we can't fill.
     if page.locator("input[autocomplete=one-time-code], input[name*=code], input[name*=otp]").count():
-        log("SD wants a 2FA code (email/SMS) — can't auto-fill; needs a human")
+        log("SD wants a 2FA email code — LOCKING further auto-logins (each attempt "
+            "sends a fresh code); enter it / sign in manually to clear")
+        _set_2fa_lock()
         return _needs_human(page, "2fa")
     log("still on the login page after submit — wrong creds or unknown layout")
     return "unknown"

@@ -120,6 +120,16 @@ def test_build_vehicles_merge_keeps_guids_adds_new_no_dupes(sd):
     assert "guid" not in by_vin["NEW1"]       # new vehicle carries no guid
 
 
+def test_build_vehicles_merge_dedupes_case_and_whitespace(sd):
+    # A VIN differing only by case or stray whitespace is the SAME car — appending it
+    # again is how an accepted load once ended up with a duplicate vehicle.
+    sd_api, _ = sd
+    existing = {"vehicles": [{"vin": "5YJ3E1EA4RF864263", "guid": "vg1"}]}
+    merge = sd_api.build_vehicles_merge(
+        existing, [{"vin": "5yj3e1ea4rf864263"}, {"vin": " 5YJ3E1EA4RF864263 "}])
+    assert [v["vin"] for v in merge["vehicles"]] == ["5YJ3E1EA4RF864263"]
+
+
 def test_429_honors_retry_after(sd, monkeypatch):
     sd_api, calls = sd
     slept = []

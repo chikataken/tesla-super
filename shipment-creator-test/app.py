@@ -1206,10 +1206,32 @@ def api_post_all(body: dict = Body(default=None)):
     # TWO things change: the vehicles list (existing kept with their guids, new VINs
     # appended — no per-VIN price) and the order total. Everything else is left intact.
     kept_consol = []
+    import consolidation as _consol
     for entry in _load_json(_consol_path(), []):
         add = entry.get("add") or []
         try:
             existing = sd_api.get_order(entry.get("order_guid"))
+            # HARD guard at post time — the order's status may have changed since staging
+            # (a carrier accepting in that window is exactly how an accepted load got
+            # edited). Never patch a non-editable load; drop the entry (no retry loop)
+            # and surface it as a failure.
+            if not _consol.order_editable(existing):
+                st = (existing.get("status") or "unknown").strip().lower()
+                failures.append({"number": entry.get("number"),
+                                 "error": f"skipped: order is now '{st}' — "
+                                          "accepted/pending/picked-up loads are never edited"})
+                continue
+            # Add only VINs NOT already on the freshly-fetched order (case/space-proof) —
+            # the price sum must match what's actually appended.
+            have = {(v.get("vin") or "").strip().upper()
+                    for v in (existing.get("vehicles") or [])}
+            fresh = [a for a in add if (a.get("vin") or "").strip().upper() not in have]
+            if not fresh:
+                failures.append({"number": entry.get("number"),
+                                 "error": "skipped: all staged VIN(s) already on the order — "
+                                          "nothing to add"})
+                continue
+            add = fresh
             new_vehicles = [
                 {**{k: a[k] for k in ("vin", "make", "model", "year") if a.get(k) is not None},
                  "type": config.vehicle_type(a.get("model"))}
@@ -1683,8 +1705,20 @@ def api_consolidation_stage(body: dict = Body(...)):
     order = next((o for o in search.get("orders", []) if o.get("guid") == guid), None)
     if not order:
         raise HTTPException(400, "that order isn't in the latest search — run a VIN search first")
-    if order.get("loadboard_status") == "accepted":
-        raise HTTPException(400, "that order is already accepted by a carrier — VINs can't be added to it")
+    # Never stage onto a load a carrier holds. The old guard checked only
+    # loadboard_status == 'accepted', which SD CLEARS to null on acceptance — so it
+    # never fired for truly accepted loads; order_editable checks both status fields.
+    import consolidation
+    if not consolidation.order_editable(order):
+        st = ((order.get("status") or order.get("loadboard_status") or "").strip().lower()
+              or "in carrier hands")
+        raise HTTPException(400, f"order {order.get('number')} is '{st}' — "
+                            "accepted/pending/picked-up loads are never edited")
+    already = {(v.get("vin") or "").strip().upper() for v in (order.get("vehicles") or [])}
+    dup_req = sorted(v for v in vins if (v or "").strip().upper() in already)
+    if dup_req:
+        raise HTTPException(400, f"already on order {order.get('number')}: "
+                            f"{', '.join(dup_req)} — refusing to add duplicate VIN(s)")
 
     path, batch = _load_batch()
     moved = []

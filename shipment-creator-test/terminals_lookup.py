@@ -174,8 +174,14 @@ def resolve_or_record(location: str) -> Optional[dict]:
     if hit:
         return hit
     try:
-        n = len(terminals_db.rows_by_name(name))
-        terminals_db.record_miss(name, "ambiguous" if n > 1 else "not_found")
+        _, kind = terminals_db.resolve_row(name)
+        if kind == "ambiguous_site":
+            # hub-level code in a multi-terminal zip — refused on purpose (see
+            # terminals_db.resolve_row); posting keeps the shipment's own venue.
+            terminals_db.record_miss(name, "ambiguous_site")
+        else:
+            n = len(terminals_db.rows_by_name(name))
+            terminals_db.record_miss(name, "ambiguous" if n > 1 else "not_found")
     except Exception:
         pass                              # never let bookkeeping break posting
     return None

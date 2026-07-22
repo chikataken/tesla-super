@@ -67,6 +67,23 @@ def _order_status(o: dict) -> str:
     return (o.get("status") or o.get("state") or "").strip()
 
 
+# Once a carrier is involved (or the run is finished), the order is theirs — appending
+# VINs would silently change a dispatch they already agreed to. Only new/posted orders
+# are safely ours to modify.
+NON_EDITABLE_STATUSES = ("accepted", "pending", "picked_up", "delivered",
+                         "invoiced", "paid", "canceled")
+
+
+def order_editable(o: dict) -> bool:
+    """True when the order may still be modified on SD: NEITHER its lifecycle status nor
+    the loadboard tab it was found on indicates a carrier holds it. Checked on both
+    fields because SD clears loadboard_status to null once a carrier accepts — the
+    lifecycle `status` is then the only live signal (and vice versa for tab scrapes)."""
+    life = (o.get("status") or "").strip().lower()
+    lb = (o.get("loadboard_status") or "").strip().lower()
+    return life not in NON_EDITABLE_STATUSES and lb not in NON_EDITABLE_STATUSES
+
+
 def normalize_order(o: dict) -> dict:
     """Full SD order -> the compact shape the UI needs."""
     vehicles = []
@@ -192,14 +209,18 @@ def match_against_routes(orders, board_orders, *, use_street: bool = True,
                 if key not in matched_keys:
                     matched_keys.append(key)
         # "live" = found on a scanned tab (Posted / Accepted / Pending) or flagged
-        # posted-to-loadboard by the API — any of these is consolidatable.
+        # posted-to-loadboard by the API. But only EDITABLE orders are candidates:
+        # accepted/pending/picked-up loads belong to a carrier and are never modified
+        # (see order_editable) — they used to be offered, which is how VINs got
+        # appended onto already-accepted loads.
         status = (o.get("loadboard_status") or "").strip().lower()
         live = bool(o.get("is_posted_to_loadboard")) or status in ("posted", "accepted", "pending")
         on_order = {v.get("vin") for v in o.get("vehicles") or [] if v.get("vin")}
         annotated = dict(o)
         annotated["matches_board_routes"] = matched_keys
         annotated["already_on"] = sorted(my & on_order)
-        annotated["is_candidate"] = bool(matched_keys) and live
+        annotated["editable"] = order_editable(o)
+        annotated["is_candidate"] = bool(matched_keys) and live and annotated["editable"]
         out.append(annotated)
     return out
 

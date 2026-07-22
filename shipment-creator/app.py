@@ -1515,6 +1515,18 @@ def api_post_all(body: dict = Body(default=None)):
         item_id = None
         try:
             existing = sd_api.get_order(entry.get("order_guid"))
+            # Add only VINs NOT already on the freshly-fetched order (case/space-proof) —
+            # the price sum below must match what's actually appended, and a re-post of an
+            # already-added VIN must never reach SD even if it was staged.
+            have = {(v.get("vin") or "").strip().upper()
+                    for v in (existing.get("vehicles") or [])}
+            fresh = [a for a in add if (a.get("vin") or "").strip().upper() not in have]
+            if not fresh:
+                failures.append({"number": entry.get("number"),
+                                 "error": "skipped: all staged VIN(s) already on the order — "
+                                          "nothing to add"})
+                continue
+            add = fresh
             new_vehicles = [
                 {**{k: a[k] for k in ("vin", "make", "model", "year") if a.get(k) is not None},
                  "type": config.vehicle_type(a.get("model"))}
@@ -2012,6 +2024,11 @@ def api_consolidation_stage(body: dict = Body(...)):
         raise HTTPException(400, "that order isn't in the latest search — run a VIN search first")
     if order.get("loadboard_status") == "accepted":
         raise HTTPException(400, "that order is already accepted by a carrier — VINs can't be added to it")
+    already = {(v.get("vin") or "").strip().upper() for v in (order.get("vehicles") or [])}
+    dup_req = sorted(v for v in vins if (v or "").strip().upper() in already)
+    if dup_req:
+        raise HTTPException(400, f"already on order {order.get('number')}: "
+                            f"{', '.join(dup_req)} — refusing to add duplicate VIN(s)")
 
     path, batch = _load_batch()
     moved = []

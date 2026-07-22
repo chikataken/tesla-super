@@ -79,3 +79,7 @@ sd_photos/
 **/*.db.bak.*
 .promote-backup-*/
 **/.promote-backup-*/
+
+# ───── business-data DBs: keep OUT of the (public) repo ─────
+**/terminals.db
+wells-check/data/wells.db

@@ -27,6 +27,40 @@ def log(msg: str) -> None:
     print(f"[sd_login] {msg}")
 
 
+# ---- 2FA lockout (SHARED across every tool) ---------------------------------
+# Once one auto-login attempt lands on SD's email-code page, every FURTHER attempt
+# makes SD send ANOTHER code — spamming the inbox and invalidating the code the
+# human is about to type. So the first 2FA sighting writes a lock file in the
+# shared Chrome profile dir (tesla-reconcile/.auth), and every project's sd_login
+# copy refuses to auto-login while it exists. It clears itself the moment any run
+# sees the session logged in again (i.e. after the human signs in), or explicitly
+# via clear_2fa_lock() in the manual login flows.
+_2FA_LOCK = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "tesla-reconcile", ".auth", "sd_2fa.lock")
+
+
+def twofa_lock_active() -> bool:
+    return os.path.exists(_2FA_LOCK)
+
+
+def _set_2fa_lock() -> None:
+    try:
+        os.makedirs(os.path.dirname(_2FA_LOCK), exist_ok=True)
+        with open(_2FA_LOCK, "w") as fh:
+            fh.write(time.strftime("%Y-%m-%dT%H:%M:%S")
+                     + " SD asked for an email 2FA code; auto-login stood down\n")
+    except OSError:
+        pass
+
+
+def clear_2fa_lock() -> None:
+    try:
+        os.remove(_2FA_LOCK)
+    except OSError:
+        pass
+
+
 def _signin_again(page):
     """Return the visible 'Sign in again' interstitial button/link, or None.
 
@@ -150,14 +184,24 @@ def _surface_window(page) -> None:
         pass
 
 
-def ensure_logged_in(page) -> bool:
+def ensure_logged_in(page, force: bool = False) -> bool:
     """If `page` is on the SD login screen, log in from Vaultwarden creds.
 
     Returns True if it ends logged in (or already was), False if it couldn't (missing
     creds, a visible captcha, or a 2FA code page) — the caller should then fall back
-    to a manual `run_login`. Never raises on the captcha/2FA path."""
+    to a manual `run_login`. Never raises on the captcha/2FA path.
+
+    While the shared 2FA lock is set, NO attempt is made (each one triggers another
+    email code) unless `force=True` — the human-invoked `python sd_login.py` path."""
     if not is_login_page(page):
+        clear_2fa_lock()                   # session is healthy again — the human signed in
         return True
+    if twofa_lock_active() and not force:
+        log("a 2FA email code is already pending from an earlier attempt — standing down "
+            "(every retry makes SD send ANOTHER code). Sign in yourself: "
+            "`python sd_login.py` or `./run.sh login`. The lock clears once a run sees "
+            f"the session logged in. lock: {_2FA_LOCK}")
+        return False
 
     item = os.getenv("BW_SD_ITEM", "SuperDispatch").strip()
     try:
@@ -214,10 +258,14 @@ def ensure_logged_in(page) -> bool:
         log("sd_login: captcha after submit — surfacing the window for a human"); _surface_window(page); return False
     if not is_login_page(page):
         log("sd_login: re-login succeeded")
+        clear_2fa_lock()
         return True
     # Still on a login-ish page — likely a 2FA email/SMS code prompt we can't fill.
     if page.locator("input[autocomplete=one-time-code], input[name*=code], input[name*=otp]").count():
-        log("sd_login: SD wants a 2FA code (email/SMS) — can't auto-fill; surfacing for a human")
+        log("sd_login: SD wants a 2FA email code — LOCKING further auto-logins (each "
+            "attempt sends a fresh code). Enter the code / sign in yourself; the lock "
+            "clears once a run sees the session logged in.")
+        _set_2fa_lock()
         _surface_window(page)
     else:
         log("sd_login: still on the login page after submit — wrong creds or unknown layout")
@@ -232,4 +280,5 @@ if __name__ == "__main__":
         page.goto(config.SD_BASE + "/orders", wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
         print("on login page?:", is_login_page(page))
-        print("ensure_logged_in ->", ensure_logged_in(page))
+        # force=True: this IS the human-invoked path, so it may attempt past the lock.
+        print("ensure_logged_in ->", ensure_logged_in(page, force=True))

@@ -28,18 +28,29 @@ ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
 PHOTOS_OLDEST_FIRST = True
 
 
-def invoiced_url(start: date, end: date, page: int = 1, ascending: bool = True) -> str:
-    """Build the Invoiced list URL with a Delivered-On window and sort."""
+def list_url(tab: str, start: date, end: date, page: int = 1, ascending: bool = True) -> str:
+    """Build an orders-LIST URL (any lifecycle tab: 'invoiced', 'delivered', …) with a
+    Delivered-On window and sort — the same filter params work on every tab."""
     s = f"{start.isoformat()}T09:00:00.000-0700"
     e = f"{end.isoformat()}T09:00:00.000-0700"
     order = "ASC" if ascending else "DESC"
     return (
-        f"{config.SD_BASE}/orders/invoiced"
+        f"{config.SD_BASE}/orders/{tab}"
         f"?delivered_on_date%5B0%5D={quote(s)}"
         f"&delivered_on_date%5B1%5D={quote(e)}"
         f"&page={page}"
         f"&sort%5B0%5D=delivery.scheduledAt&sort%5B1%5D={order}"
     )
+
+
+def invoiced_url(start: date, end: date, page: int = 1, ascending: bool = True) -> str:
+    """The Invoiced list with a Delivered-On window (see list_url)."""
+    return list_url("invoiced", start, end, page=page, ascending=ascending)
+
+
+def delivered_url(start: date, end: date, page: int = 1, ascending: bool = True) -> str:
+    """The Delivered list with a Delivered-On window (see list_url)."""
+    return list_url("delivered", start, end, page=page, ascending=ascending)
 
 
 def default_window(today: date | None = None) -> tuple[date, date]:

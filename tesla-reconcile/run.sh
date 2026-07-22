@@ -4,6 +4,7 @@
 #   ./run.sh                          -> reconciliation (test_superdispatch.py) in
 #                                        batches of 100; auto-exits when the window
 #                                        is exhausted
+#   ./run.sh --delivered              -> same, but on the DELIVERED tab (not yet invoiced)
 #   ./run.sh --count 200 --dry-run    -> reconciliation with args (one pass)
 #   ./run.sh login                    -> one-time Tesla/SuperDispatch login
 #   ./run.sh cleanup [--apply]        -> Tesla Dispatch Dashboard cleanup
