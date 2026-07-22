@@ -102,6 +102,17 @@ async def _capture_profile(request: Request):
 
 app = FastAPI(title="Shipment Creator", dependencies=[Depends(_capture_profile)])
 
+# CORS for the bidboard userscript: it runs on the Tesla supplier portal and
+# fire-and-forget POSTs each submitted bid to /api/bids here (cross-origin, so the
+# browser preflights). Scoped to that one origin; adds nothing for same-origin use.
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://suppliers.teslamotors.com"],
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
 # ---- driver_marks: OPEN (no-auth) intake for the Tesla-portal Chrome extension ----------
 # Stores "driver_marked" events into app-delivery/dropoffs.db driver_marks (the same DB the
 # App-tab dashboard reads), so they can be correlated to our own drop-offs. OPEN for now —
@@ -2276,6 +2287,20 @@ def api_tender_costs(token: str = "", days: int = 45):
         cost = "" if r["cost_usd"] is None else f"{r['cost_usd']:.2f}"
         lines.append(f"{r['shp']},{r['vin']},{cost}")
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/csv")
+
+
+# ---- Bid audit intake (bidboard userscript) ----------------------------------
+@app.post("/api/bids")
+def api_bids(body: dict = Body(...)):
+    """Record the bids the bidboard helper just submitted to Tesla (one record per
+    VIN, one batch per card Enter-press). Append-only audit — see bids_db.py.
+    Fire-and-forget on the client: this endpoint must stay cheap and forgiving."""
+    import bids_db
+    recs = body.get("bids") or []
+    if not isinstance(recs, list):
+        raise HTTPException(status_code=422, detail="bids must be a list")
+    n = bids_db.insert_bids(body.get("batch_id"), body.get("client_ts"), recs)
+    return {"ok": True, "recorded": n}
 
 
 # ---- "App" tab: embed the app-delivery dashboard ----------------------------

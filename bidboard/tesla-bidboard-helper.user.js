@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      1.0.6
-// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card.
+// @version      1.1.0
+// @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card. Every submitted bid is also recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -149,6 +149,24 @@
     return `<div class="datesel" data-leg="${esc(legKey(g))}" data-base="${base.getTime()}">${dateBoxesFromBase(base, off)}</div>`;
   }
 
+  // --- Bid audit recording (server-side log of every bid we submit) ----------
+  // Fire-and-forget: recording must NEVER block or change the live bidding path.
+  // A down server / failed POST logs a console warning and nothing else.
+  const RECORDER_URL = 'https://shipments.wastake.com/api/bids';
+  const newBatchId = () => (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : 'b-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+  function shipBidRecords(batchId, clientTs, records) {
+    if (!records.length) return;
+    try {
+      fetch(RECORDER_URL, {
+        method: 'POST', mode: 'cors', credentials: 'omit', keepalive: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batch_id: batchId, client_ts: clientTs, bids: records }),
+      }).catch((e) => console.warn('[bidpanel] bid-record POST failed', e && e.message));
+    } catch (e) { console.warn('[bidpanel] bid-record POST failed', e && e.message); }
+  }
+
   // --- Bid submission (the captured UpdateOffer write) -----------------------
   // POST {base}/BidBoard/{bidId}/UpdateOffer  {CurrencyCode, BidAmount, EstimatedShipDate, NeededByDate, OfferExpiryDate}
   // verb: MakeOffer for a VIN with no offer yet, UpdateOffer to change an existing one (same id + payload).
@@ -247,8 +265,12 @@
 
   async function sendCardSnapshot(snapshot, slot) {
     let failed = 0;
+    // Audit trail: one record per VIN actually attempted, shipped fire-and-forget
+    // to the server on BOTH exit paths (normal finish and superseded-mid-batch).
+    const batchId = newBatchId(), clientTs = new Date().toISOString(), records = [];
     for (const offer of snapshot.offers) {
       const { g, vins } = bidsForKey(offer.key); if (!g) continue;
+      const vclass = offer.key.slice(offer.key.lastIndexOf('|') + 1);
       const requestBody = {
         CurrencyCode: 'USD', BidAmount: offer.price,
         EstimatedShipDate: offer.estimatedShipDate,
@@ -257,17 +279,38 @@
       for (const bid of vins) {
         // The current request cannot be recalled, but once it finishes skip the rest of this stale
         // batch and move immediately to the newest Entered snapshot.
-        if (slot.pending) return { failed, superseded: true };
-        const verb = (bid.carrierCounter && bid.carrierCounter.bidAmount != null) ? 'UpdateOffer' : 'MakeOffer';
+        if (slot.pending) { shipBidRecords(batchId, clientTs, records); return { failed, superseded: true }; }
+        // capture BEFORE postOffer: rememberSuccessfulOffer overwrites carrierCounter on success
+        const prevCounter = (bid.carrierCounter && bid.carrierCounter.bidAmount != null)
+          ? Number(bid.carrierCounter.bidAmount) : null;
+        const verb = prevCounter != null ? 'UpdateOffer' : 'MakeOffer';
+        const rec = {
+          origin: (g.origin && g.origin.name) || null,
+          destination: (g.destination && g.destination.name) || null,
+          origin_state: stOf(g.origin && g.origin.name) || null,
+          dest_state: stOf(g.destination && g.destination.name) || null,
+          vin: bid.vin, bid_id: bid.bidId, model: bid.model || null, vclass,
+          price: offer.price, currency: 'USD',
+          list_price: bid.price != null ? bid.price : null,
+          prev_counter: prevCounter, verb,
+          pickup_date: offer.estimatedShipDate, eta_date: offer.neededByDate,
+          eta_offset: state.dates[legKey(g)] || 0,
+          need_by_date: bid.needByDate || null,
+          success: 0, error: null,
+        };
         try {
           await postOffer(bid.bidId, verb, requestBody);
           rememberSuccessfulOffer(bid, offer);
+          rec.success = 1;
         } catch (e) {
           failed++;
+          rec.error = String((e && e.message) || e);
           console.warn('[bidpanel] bid FAILED for', bid.vin, '—', e && e.message);
         }
+        records.push(rec);
       }
     }
+    shipBidRecords(batchId, clientTs, records);
     return { failed, superseded: false };
   }
 

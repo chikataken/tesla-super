@@ -88,3 +88,5 @@ wells-check/data/wells.db
 *.swp
 .*.swp
 **/.*.swp
+**/bids.db
+**/bids.db-*
