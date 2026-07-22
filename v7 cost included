@@ -16,8 +16,9 @@ Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/c
 '    ShipmentNumber + VIN; latest email wins on re-tenders). First run asks once
 '    for the API token (stored per-user via SaveSetting; see ResetTenderCostToken).
 '    Shows "$800"; once a rate is typed on that row it LIVE-updates to
-'    "$800 (+30)" = cost minus rate (margin), recalculating as rates change.
-'    Yellow cost cell = no tender matched; red = tender says 0.00 (check it!).
+'    "(+30) $800" = cost minus rate (margin), green text when positive,
+'    red when the rate exceeds the cost. No tender match = left blank.
+'    Red-FILLED cell = the tender itself says 0.00 (check it!).
 '    Mac needs the one-time helper: copy TFITenderCosts.applescript into
 '    ~/Library/Application Scripts/com.microsoft.Excel/
 '  - Writes the result to a new "Formatted" sheet
@@ -288,11 +289,14 @@ Sub FormatTeslaExport()
         Next r
     End If
 
-    ' ---- cost column: "$800" with a LIVE "(+30)" margin vs rate ---------------
-    ' Each matched cell becomes a formula embedding the cost as a constant plus a
+    ' ---- cost column: LIVE "(+30) $800" margin-then-cost ----------------------
+    ' Each matched cell is a formula embedding the cost as a constant plus a
     ' same-row reference to the rate cell: shows "$800" while rate is empty, then
-    ' "$800 (+30)" (cost minus rate) recalculating live as rates are typed.
-    ' Yellow = no tender matched; red = the tender really says 0.00.
+    ' "(+30) $800" (cost minus rate) recalculating live as rates are typed.
+    ' Conditional formatting colors the text green when the margin is "(+" and
+    ' red when "(-" (a formula cell can only carry ONE font color, so the whole
+    ' cell colors - substring-only coloring is impossible on live formulas).
+    ' No-match rows stay plain blank; red FILL still marks a real 0.00 tender.
     With outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
         .HorizontalAlignment = xlRight
     End With
@@ -300,23 +304,32 @@ Sub FormatTeslaExport()
         Dim cv As Variant, costTxt As String, rateAddr As String
         For r = 2 To keptCount + 1
             cv = outSheet.Cells(r, costCol).Value
-            If Len(Trim$(CStr(cv))) = 0 Then
-                If Not costs Is Nothing Then
-                    outSheet.Cells(r, costCol).Interior.Color = RGB(255, 255, 153)  ' no match
-                End If
-            ElseIf IsNumeric(cv) Then
+            If IsNumeric(cv) And Len(Trim$(CStr(cv))) > 0 Then
                 If CDbl(cv) = 0 Then
                     outSheet.Cells(r, costCol).Interior.Color = RGB(255, 199, 206)  ' 0.00 tender
                 End If
                 costTxt = Format$(CDbl(cv), "0.############")
                 rateAddr = outSheet.Cells(r, rateCol).Address(False, False)
                 outSheet.Cells(r, costCol).Formula = _
-                    "=""$""&TEXT(" & costTxt & ",""#,##0"")" & _
-                    "&IF(" & rateAddr & "="""",""""," & _
-                    """ (""&IF(" & costTxt & "-" & rateAddr & ">=0,""+"","""")" & _
-                    "&TEXT(" & costTxt & "-" & rateAddr & ",""#,##0"")&"")"")"
+                    "=IF(" & rateAddr & "="""",""""," & _
+                    """(""&IF(" & costTxt & "-" & rateAddr & ">=0,""+"",""-"")" & _
+                    "&TEXT(ABS(" & costTxt & "-" & rateAddr & "),""#,##0"")&"") "")" & _
+                    "&""$""&TEXT(" & costTxt & ",""#,##0"")"
             End If
         Next r
+
+        ' green text when the cell shows "(+", red when "(-" (live via CF)
+        Dim costRng As Range, firstAddr As String
+        Set costRng = outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
+        firstAddr = costRng.Cells(1, 1).Address(False, False)
+        With costRng.FormatConditions.Add(Type:=xlExpression, _
+                Formula1:="=ISNUMBER(SEARCH(""(-""," & firstAddr & "))")
+            .Font.Color = RGB(192, 0, 0)      ' red: rate above cost
+        End With
+        With costRng.FormatConditions.Add(Type:=xlExpression, _
+                Formula1:="=ISNUMBER(SEARCH(""(+""," & firstAddr & "))")
+            .Font.Color = RGB(0, 140, 0)      ' green: cost above rate
+        End With
     End If
 
     ' ---- borders: outline every cell in the data range ----
