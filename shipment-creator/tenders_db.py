@@ -78,6 +78,16 @@ CREATE TABLE IF NOT EXISTS tender_vins (
 CREATE INDEX IF NOT EXISTS ix_tender_vins_vin ON tender_vins(vin);
 CREATE INDEX IF NOT EXISTS ix_tender_vins_leg ON tender_vins(leg_id);
 
+-- Single-row incremental-sync cursor (Gmail history API). last_history_id is
+-- the mailbox historyId already processed; the minute tick asks Gmail only for
+-- changes after it. NULL -> next sync does a full day-sweep and reseeds.
+CREATE TABLE IF NOT EXISTS sync_state (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    last_history_id TEXT,
+    last_sync_at    REAL,
+    note            TEXT
+);
+
 -- Latest email per SHP wins; earlier ones remain as history.
 CREATE VIEW IF NOT EXISTS current_tenders AS
     SELECT * FROM tender_emails e
@@ -281,3 +291,19 @@ def upsert_email(con: sqlite3.Connection, gmail_id: str, sent_at: float,
 def have_gmail_id(con: sqlite3.Connection, gmail_id: str) -> bool:
     return con.execute("SELECT 1 FROM tender_emails WHERE gmail_id = ?",
                        (gmail_id,)).fetchone() is not None
+
+
+def get_history_id(con: sqlite3.Connection) -> Optional[str]:
+    row = con.execute("SELECT last_history_id FROM sync_state WHERE id = 1").fetchone()
+    return row["last_history_id"] if row else None
+
+
+def set_history_id(con: sqlite3.Connection, history_id: Optional[str],
+                   note: str = "") -> None:
+    with con:
+        con.execute(
+            """INSERT INTO sync_state (id, last_history_id, last_sync_at, note)
+               VALUES (1, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET last_history_id = excluded.last_history_id,
+                   last_sync_at = excluded.last_sync_at, note = excluded.note""",
+            (history_id, time.time(), note))

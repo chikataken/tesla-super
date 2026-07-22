@@ -3,9 +3,16 @@ Pull Tesla Load Tender emails from didi@tfitrans.com (Gmail API, read-only)
 into the local tenders.db mirror. Idempotent: keyed on Gmail message id, so
 re-runs skip already-recorded emails and a crashed run resumes cleanly.
 
-    python tenders_ingest.py             # last 7 days
+    python tenders_ingest.py --sync      # incremental tick (the minute timer)
+    python tenders_ingest.py             # sweep the last 7 days
     python tenders_ingest.py --days 30   # deeper backfill
     python tenders_ingest.py --refetch   # re-parse even already-seen ids
+
+--sync uses Gmail's history API: it asks only for mailbox changes since the
+last recorded historyId (sync_state row in tenders.db), so a quiet tick is one
+tiny API call. First run — or when Gmail says the stored id is too old (~a
+week, HTTP 404) — it falls back to a 2-day sweep and reseeds the cursor.
+Driven every minute by systemd (tenders-sync.timer).
 
 Auth: secrets/gmail_credentials.json (OAuth client) + secrets/didi_gmail_token.json
 (refresh token, minted once via a browser consent). Read-only scope only.
@@ -20,6 +27,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 import tenders_db
 
@@ -60,9 +68,91 @@ def _html_body(payload) -> str:
     return ""
 
 
-def ingest(days: int, refetch: bool = False) -> None:
-    svc = gmail_service()
-    con = tenders_db.connect()
+def _record(svc, con, mid: str, msg=None) -> bool:
+    """Fetch (if needed), parse and store one message. True if recorded."""
+    if msg is None:
+        msg = svc.users().messages().get(userId="me", id=mid, format="full").execute()
+    headers = {h["name"].lower(): h["value"]
+               for h in msg["payload"].get("headers", [])}
+    html = _html_body(msg["payload"])
+    try:
+        parsed = tenders_db.parse_tender(html)
+    except ValueError as e:
+        print(f"  PARSE FAIL {mid}: {e} (subject: {headers.get('subject')})")
+        return False
+    tenders_db.upsert_email(
+        con, mid,
+        sent_at=int(msg["internalDate"]) / 1000.0,
+        subject=headers.get("subject", ""),
+        recipients=headers.get("to", ""),
+        raw_html=html, parsed=parsed)
+    return True
+
+
+def sync(con=None, svc=None) -> None:
+    """One incremental tick: process only mailbox changes since the stored
+    historyId. Quiet no-op when nothing new arrived."""
+    svc = svc or gmail_service()
+    con = con or tenders_db.connect()
+
+    start = tenders_db.get_history_id(con)
+    if not start:
+        # First tick: capture the cursor BEFORE sweeping so anything arriving
+        # mid-sweep is re-covered by the next tick (idempotent either way).
+        seed = svc.users().getProfile(userId="me").execute()["historyId"]
+        print(f"no sync cursor — seeding at historyId {seed} after a 2-day sweep")
+        ingest(days=2, svc=svc, con=con)
+        tenders_db.set_history_id(con, str(seed), "seeded")
+        return
+
+    new_hist, added, token = start, [], None
+    try:
+        while True:
+            resp = svc.users().history().list(
+                userId="me", startHistoryId=start, historyTypes=["messageAdded"],
+                pageToken=token, maxResults=500).execute()
+            new_hist = resp.get("historyId", new_hist)
+            for h in resp.get("history", []):
+                added += [m["message"]["id"] for m in h.get("messagesAdded", [])]
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+    except HttpError as e:
+        if e.resp.status == 404:   # cursor older than Gmail keeps history
+            print("history cursor expired — falling back to a 2-day sweep")
+            seed = svc.users().getProfile(userId="me").execute()["historyId"]
+            ingest(days=2, svc=svc, con=con)
+            tenders_db.set_history_id(con, str(seed), "reseeded after 404")
+            return
+        raise
+
+    new = 0
+    for mid in dict.fromkeys(added):          # dedupe, keep order
+        if tenders_db.have_gmail_id(con, mid):
+            continue
+        try:
+            msg = svc.users().messages().get(userId="me", id=mid, format="full").execute()
+        except HttpError as e:
+            if e.resp.status == 404:          # deleted before we fetched it
+                continue
+            raise
+        hdrs = {h["name"].lower(): h["value"]
+                for h in msg["payload"].get("headers", [])}
+        if ("sa-appuser@tesla.com" not in hdrs.get("from", "").lower()
+                or "tesla load tender" not in hdrs.get("subject", "").lower()):
+            continue
+        if _record(svc, con, mid, msg):
+            new += 1
+            print(f"  recorded {hdrs.get('subject')}")
+    tenders_db.set_history_id(con, str(new_hist),
+                              f"+{new} of {len(added)} new msgs")
+    print(f"sync ok: {len(added)} mailbox additions, {new} tenders recorded "
+          f"(history {start} -> {new_hist})")
+
+
+def ingest(days: int, refetch: bool = False, svc=None, con=None) -> None:
+    svc = svc or gmail_service()
+    con = con or tenders_db.connect()
 
     ids, token = [], None
     q = f"{QUERY} newer_than:{days}d"
@@ -80,25 +170,11 @@ def ingest(days: int, refetch: bool = False) -> None:
         if not refetch and tenders_db.have_gmail_id(con, mid):
             skipped += 1
             continue
-        msg = svc.users().messages().get(userId="me", id=mid, format="full").execute()
-        headers = {h["name"].lower(): h["value"]
-                   for h in msg["payload"].get("headers", [])}
-        html = _html_body(msg["payload"])
-        try:
-            parsed = tenders_db.parse_tender(html)
-        except ValueError as e:
+        if _record(svc, con, mid):
+            new += 1
+        else:
             failed += 1
-            print(f"  [{i}/{len(ids)}] PARSE FAIL {mid}: {e} "
-                  f"(subject: {headers.get('subject')})")
-            continue
-        tenders_db.upsert_email(
-            con, mid,
-            sent_at=int(msg["internalDate"]) / 1000.0,
-            subject=headers.get("subject", ""),
-            recipients=headers.get("to", ""),
-            raw_html=html, parsed=parsed)
-        new += 1
-        if new % 50 == 0:
+        if new and new % 50 == 0:
             print(f"  [{i}/{len(ids)}] {new} recorded…")
 
     n_shp = con.execute("SELECT COUNT(DISTINCT shp) FROM tender_emails").fetchone()[0]
@@ -112,11 +188,16 @@ def ingest(days: int, refetch: bool = False) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--sync", action="store_true",
+                    help="incremental tick via Gmail history API (the timer mode)")
     ap.add_argument("--days", type=int, default=7)
     ap.add_argument("--refetch", action="store_true",
                     help="re-parse emails already in the db")
     args = ap.parse_args()
     try:
-        ingest(args.days, args.refetch)
+        if args.sync:
+            sync()
+        else:
+            ingest(args.days, args.refetch)
     except KeyboardInterrupt:
         sys.exit("interrupted — rerun to resume (idempotent)")

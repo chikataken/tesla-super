@@ -1,0 +1,15 @@
+[Unit]
+Description=Run the Tesla load-tender email sync every minute
+
+[Timer]
+# First tick shortly after boot, then one minute after each run finishes.
+# (OnUnitActiveSec, not OnCalendar: ticks can never pile up behind a slow run —
+# systemd won't start the service while it's still active.)
+OnBootSec=2min
+OnUnitActiveSec=1min
+# The sync is idempotent and self-catches-up via the Gmail history cursor, so a
+# missed window needs no Persistent= replay; the next tick recovers everything.
+Unit=tenders-sync.service
+
+[Install]
+WantedBy=timers.target

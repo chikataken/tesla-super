@@ -1,0 +1,26 @@
+[Unit]
+# One incremental pull of Tesla Load Tender emails (didi@'s Gmail) into the local
+# tenders.db mirror. Driven every minute by tenders-sync.timer. A quiet tick is a
+# single Gmail history-API call (~2s); new tenders land in the db within a minute
+# of hitting the inbox. Pure API — no browser, no Chrome/CDP involvement.
+Description=Tesla load-tender email sync (Gmail -> tenders.db)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=mbdtf
+Group=mbdtf
+WorkingDirectory=/home/mbdtf/projects/tesla-super/shipment-creator
+ExecStart=/home/mbdtf/projects/tesla-super/shipment-creator/.venv/bin/python tenders_ingest.py --sync
+
+# A tick is seconds; a fallback 2-day sweep is minutes. Never hang past that.
+TimeoutStartSec=600
+
+# Structured logs -> journald: journalctl -u tenders-sync -f
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
