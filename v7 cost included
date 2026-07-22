@@ -15,10 +15,10 @@ Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/c
 '    emailed load tender, fetched live from shipments.wastake.com (matched on
 '    ShipmentNumber + VIN; latest email wins on re-tenders). First run asks once
 '    for the API token (stored per-user via SaveSetting; see ResetTenderCostToken).
-'    cost shows "$800" (plain black, real number - summable/sortable); the
-'    "margin" column next to it LIVE-shows cost minus rate ("+30" green /
-'    "-30" red) as soon as a rate is typed on the row. No tender match =
-'    both left blank. Red-FILLED cost = the tender itself says 0.00.
+'    cost shows "$800" (real number - summable/sortable). LIVE color: once a
+'    rate is typed on the row, the cost text turns DARK RED when cost >= rate,
+'    stays black otherwise (and while rate is empty). No tender match = blank.
+'    Red-FILLED cost cell = the tender itself says 0.00.
 '    Mac needs the one-time helper: copy TFITenderCosts.applescript into
 '    ~/Library/Application Scripts/com.microsoft.Excel/
 '  - Writes the result to a new "Formatted" sheet
@@ -70,8 +70,7 @@ Sub FormatTeslaExport()
         "DestinationZip", 11, _
         "rate", 10, _
         "model", 5, _
-        "cost", 7, _
-        "margin", 6.5)
+        "cost", 7)
 
     ' ---- EDIT HERE: exact widths in PIXELS. Pairs of name, pixels. ----
     Dim pixelWidths As Variant
@@ -149,16 +148,14 @@ Sub FormatTeslaExport()
     Next i
 
     Dim outCols As Long
-    outCols = (UBound(outNames) - LBound(outNames) + 1) + 4
+    outCols = (UBound(outNames) - LBound(outNames) + 1) + 3
 
     Dim rateCol As Long
     Dim modelCol As Long
     Dim costCol As Long
-    Dim marginCol As Long
-    rateCol = outCols - 3
-    modelCol = outCols - 2
-    costCol = outCols - 1
-    marginCol = outCols
+    rateCol = outCols - 2
+    modelCol = outCols - 1
+    costCol = outCols
 
     Dim vinSrcCol As Long
     vinSrcCol = ColIdx(arr, "Vin")
@@ -172,7 +169,6 @@ Sub FormatTeslaExport()
     outArr(1, rateCol) = "rate"
     outArr(1, modelCol) = "model"
     outArr(1, costCol) = "cost"
-    outArr(1, marginCol) = "margin"
 
     Dim vinText As String
     Dim vinCode As String
@@ -293,43 +289,35 @@ Sub FormatTeslaExport()
         Next r
     End If
 
-    ' ---- cost + margin columns ------------------------------------------------
-    ' cost: the tender's per-VIN payout as a real NUMBER shown "$800" (black,
-    ' summable, sorts numerically). Red FILL = the tender really says 0.00.
-    ' margin: live formula = cost minus the same-row rate, blank until a rate is
-    ' typed, then "+30" (green) / "-30" (red) recalculating as rates change.
-    ' No tender match = both cells stay blank.
+    ' ---- cost column ----------------------------------------------------------
+    ' The tender's per-VIN payout as a real NUMBER shown "$800" (summable, sorts
+    ' numerically). LIVE conditional format: once a rate is typed on the row the
+    ' cost text turns DARK RED when cost >= rate, stays black otherwise (and
+    ' while rate is empty). Red FILL = the tender really says 0.00.
+    ' No tender match = cell stays blank.
     With outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
         .NumberFormat = "$#,##0"
         .HorizontalAlignment = xlRight
     End With
     If keptCount > 0 Then
-        Dim cv As Variant, costTxt As String, rateAddr As String
+        Dim cv As Variant
         For r = 2 To keptCount + 1
             cv = outSheet.Cells(r, costCol).Value
             If IsNumeric(cv) And Len(Trim$(CStr(cv))) > 0 Then
                 If CDbl(cv) = 0 Then
                     outSheet.Cells(r, costCol).Interior.Color = RGB(255, 199, 206)  ' 0.00 tender
                 End If
-                costTxt = Format$(CDbl(cv), "0.############")
-                rateAddr = outSheet.Cells(r, rateCol).Address(False, False)
-                outSheet.Cells(r, marginCol).Formula = _
-                    "=IF(" & rateAddr & "="""",""""," & costTxt & "-" & rateAddr & ")"
             End If
         Next r
 
-        ' margin display "+30"/"-30" and live green/red by sign
-        Dim marginRng As Range
-        Set marginRng = outSheet.Range(outSheet.Cells(2, marginCol), outSheet.Cells(keptCount + 1, marginCol))
-        With marginRng
-            .NumberFormat = "+#,##0;-#,##0;0"
-            .HorizontalAlignment = xlRight
-        End With
-        With marginRng.FormatConditions.Add(Type:=xlCellValue, Operator:=xlGreater, Formula1:="=0")
-            .Font.Color = RGB(0, 140, 0)      ' green: cost above rate
-        End With
-        With marginRng.FormatConditions.Add(Type:=xlCellValue, Operator:=xlLess, Formula1:="=0")
-            .Font.Color = RGB(192, 0, 0)      ' red: rate above cost
+        Dim costRng As Range, costFirst As String, rateFirst As String
+        Set costRng = outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
+        costFirst = costRng.Cells(1, 1).Address(False, False)
+        rateFirst = outSheet.Cells(2, rateCol).Address(False, False)
+        With costRng.FormatConditions.Add(Type:=xlExpression, Formula1:= _
+                "=AND(ISNUMBER(" & costFirst & "),ISNUMBER(" & rateFirst & ")," & _
+                costFirst & ">=" & rateFirst & ")")
+            .Font.Color = RGB(139, 0, 0)      ' dark red: cost at or above rate
         End With
     End If
 
