@@ -117,6 +117,15 @@ def scrape_order_rows(page: Page) -> list[OrderRow]:
     try:
         page.locator(S.SD_ORDER_LINK).first.wait_for(timeout=10000)
     except Exception:
+        # Past-the-last-page renders the normal list chrome with ZERO order cards
+        # (e.g. a 1,442-order window = 73 pages of 20; page 74 is valid and empty).
+        # That's "no more orders" — return [] so the scan stops cleanly — not an
+        # error. Only pages missing the list chrome entirely are treated as broken.
+        try:
+            if page.locator("text=Page size:").count() > 0:
+                return []
+        except Exception:
+            pass
         import os
         os.makedirs("./output", exist_ok=True)
         page.screenshot(path="./output/sd_scrape_fail.png")

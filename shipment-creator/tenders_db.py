@@ -103,6 +103,9 @@ def connect(db_path: str = DB_PATH) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
+    # The minute sync tick and a long backfill can write concurrently; wait out
+    # the other writer's (short) transaction instead of erroring immediately.
+    con.execute("PRAGMA busy_timeout=15000")
     con.executescript(_SCHEMA)
     return con
 
