@@ -2250,6 +2250,34 @@ def index():
         return fh.read()
 
 
+# ---- Tender costs for the v6-sort Excel macro --------------------------------
+@app.get("/api/tenders/costs")
+def api_tender_costs(token: str = "", days: int = 45):
+    """CSV (shp,vin,cost) of per-VIN costs from the LATEST Tesla tender email per
+    shipment (current_vins view in tenders.db, kept fresh by tenders-sync.timer).
+    The Excel formatter macro fetches this to fill its 'cost' column. The site is
+    reachable from the public internet via the tunnel, so this endpoint is guarded
+    by TENDERS_API_TOKEN (secrets/.env) — constant-time compare, 401 otherwise."""
+    import hmac
+    import config  # noqa: F401  - ensures secrets/.env is loaded into the env
+    expected = os.getenv("TENDERS_API_TOKEN", "")
+    if not expected or not hmac.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="bad token")
+    import tenders_db
+    con = tenders_db.connect()
+    days = max(1, min(days, 365))
+    rows = con.execute(
+        """SELECT e.shp, v.vin, v.cost_usd
+           FROM current_vins v JOIN tender_emails e ON e.gmail_id = v.gmail_id
+           WHERE e.sent_at >= strftime('%s','now') - ? * 86400
+           ORDER BY e.shp, v.vin""", (days,)).fetchall()
+    lines = ["shp,vin,cost"]
+    for r in rows:
+        cost = "" if r["cost_usd"] is None else f"{r['cost_usd']:.2f}"
+        lines.append(f"{r['shp']},{r['vin']},{cost}")
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/csv")
+
+
 # ---- "App" tab: embed the app-delivery dashboard ----------------------------
 # The Tesla drop-off/pickup dashboard runs as its own local service on :8011
 # (app-delivery-web). We reverse-proxy it under /app/ so it appears as an "App" tab

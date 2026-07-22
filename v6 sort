@@ -1,6 +1,9 @@
 Attribute VB_Name = "TeslaFormatter"
 Option Explicit
 
+' Tender-cost endpoint (see cost-lookup section at the bottom of this module).
+Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/costs"
+
 ' ============================================================
 '  Tesla Export Formatter  (Mac & Windows compatible)
 '  - Deletes rows by OriginLocation
@@ -8,6 +11,13 @@ Option Explicit
 '  - Sorts by Origin/Destination State & City
 '  - Custom column widths (character + exact-pixel), auto-fits the rest
 '  - Adds model code after rate: YL=7SAY + 6th character B; otherwise 4th VIN character C=CT, A=CAB, X=X
+'  - Adds a "cost" column after model: Tesla's per-VIN payout from the latest
+'    emailed load tender, fetched live from shipments.wastake.com (matched on
+'    ShipmentNumber + VIN; latest email wins on re-tenders). First run asks once
+'    for the API token (stored per-user via SaveSetting; see ResetTenderCostToken).
+'    Yellow cost cell = no tender matched; red = tender says 0.00 (check it!).
+'    Mac needs the one-time helper: copy TFITenderCosts.applescript into
+'    ~/Library/Application Scripts/com.microsoft.Excel/
 '  - Writes the result to a new "Formatted" sheet
 '  Runs on the workbook that is currently active.
 ' ============================================================
@@ -56,7 +66,8 @@ Sub FormatTeslaExport()
         "OriginZip", 9, _
         "DestinationZip", 11, _
         "rate", 10, _
-        "model", 5)
+        "model", 5, _
+        "cost", 10)
 
     ' ---- EDIT HERE: exact widths in PIXELS. Pairs of name, pixels. ----
     Dim pixelWidths As Variant
@@ -134,12 +145,14 @@ Sub FormatTeslaExport()
     Next i
 
     Dim outCols As Long
-    outCols = (UBound(outNames) - LBound(outNames) + 1) + 2
+    outCols = (UBound(outNames) - LBound(outNames) + 1) + 3
 
     Dim rateCol As Long
     Dim modelCol As Long
-    rateCol = outCols - 1
-    modelCol = outCols
+    Dim costCol As Long
+    rateCol = outCols - 2
+    modelCol = outCols - 1
+    costCol = outCols
 
     Dim vinSrcCol As Long
     vinSrcCol = ColIdx(arr, "Vin")
@@ -152,6 +165,7 @@ Sub FormatTeslaExport()
     Next k
     outArr(1, rateCol) = "rate"
     outArr(1, modelCol) = "model"
+    outArr(1, costCol) = "cost"
 
     Dim vinText As String
     Dim vinCode As String
@@ -183,6 +197,31 @@ Sub FormatTeslaExport()
             outArr(r, modelCol) = vinCode
         End If
     Next i
+
+    ' ---- cost column: per-VIN Tesla payout from the latest emailed tender ----
+    Dim costs As Collection
+    Dim costStatus As String
+    Dim costMatched As Long, costBlank As Long
+    Set costs = GetTenderCosts(costStatus)
+    If Not costs Is Nothing Then
+        Dim shipOutCol As Long, vinOutCol As Long
+        shipOutCol = ColIdx(outArr, "ShipmentNumber")
+        vinOutCol = ColIdx(outArr, "Vin")
+        Dim cKey As String, cVal As String
+        For r = 2 To keptCount + 1
+            cKey = NormShp(CStr(outArr(r, shipOutCol))) & "|" & UCase$(Trim$(CStr(outArr(r, vinOutCol))))
+            cVal = ""
+            On Error Resume Next
+            cVal = costs(cKey)
+            On Error GoTo 0
+            If Len(cVal) > 0 Then
+                outArr(r, costCol) = Val(cVal)
+                costMatched = costMatched + 1
+            Else
+                costBlank = costBlank + 1
+            End If
+        Next r
+    End If
 
     On Error Resume Next
     Application.DisplayAlerts = False
@@ -247,6 +286,20 @@ Sub FormatTeslaExport()
         Next r
     End If
 
+    ' ---- cost column: 2-dp; yellow = no tender matched, red = 0.00 tender ----
+    With outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
+        .NumberFormat = "0.00"
+    End With
+    If Not costs Is Nothing And keptCount > 0 Then
+        For r = 2 To keptCount + 1
+            If Len(Trim$(CStr(outSheet.Cells(r, costCol).Value))) = 0 Then
+                outSheet.Cells(r, costCol).Interior.Color = RGB(255, 255, 153)  ' no match
+            ElseIf Val(CStr(outSheet.Cells(r, costCol).Value)) = 0 Then
+                outSheet.Cells(r, costCol).Interior.Color = RGB(255, 199, 206)  ' 0.00 tender
+            End If
+        Next r
+    End If
+
     ' ---- borders: outline every cell in the data range ----
     With outSheet.Range(outSheet.Cells(1, 1), outSheet.Cells(keptCount + 1, outCols)).Borders
         .LineStyle = xlContinuous
@@ -260,9 +313,16 @@ Sub FormatTeslaExport()
     RestoreApp
     outSheet.Activate
 
+    Dim costLine As String
+    If costs Is Nothing Then
+        costLine = "Costs:   " & costStatus
+    Else
+        costLine = "Costs:   " & costMatched & " filled, " & costBlank & " no match"
+    End If
     MsgBox "Done." & vbCrLf & _
            "Kept:    " & keptCount & " rows" & vbCrLf & _
            "Removed: " & (nRows - 1 - keptCount) & " rows" & vbCrLf & _
+           costLine & vbCrLf & _
            "Result is on the 'Formatted' sheet.", vbInformation, "Tesla Formatter"
 End Sub
 
@@ -298,4 +358,109 @@ Private Sub RestoreApp()
     Application.ScreenUpdating = True
     Application.Calculation = xlCalculationAutomatic
     Application.EnableEvents = True
+End Sub
+
+' ============================================================
+'  Tender-cost lookup (fills the "cost" column)
+'  Data: GET shipments.wastake.com/api/tenders/costs -> CSV shp,vin,cost
+'  (per-VIN payout from the LATEST Tesla tender email per shipment).
+'  Token: asked for once per user/machine, kept via SaveSetting.
+'  NEVER hardcode the token here - this file lives in a public repo.
+' ============================================================
+
+' Returns a Collection keyed "SHPSUFFIX|VIN" -> cost string, or Nothing with
+' a human-readable reason in status (macro then leaves the column blank).
+Private Function GetTenderCosts(ByRef status As String) As Collection
+    Dim tok As String
+    tok = GetSetting("TFITrans", "TenderCosts", "Token", "")
+    If Len(tok) = 0 Then
+        tok = Trim$(InputBox("Paste the tender-cost API token (ask Andrew)." & vbCrLf & _
+                             "Cancel = skip the cost column this run.", "TFI Tender Costs"))
+        If Len(tok) = 0 Then
+            status = "skipped (no token entered)"
+            Exit Function
+        End If
+    End If
+
+    Dim body As String, code As Long
+    code = FetchUrl(COSTS_URL & "?token=" & tok, body)
+    If code = 401 Then
+        On Error Resume Next
+        DeleteSetting "TFITrans", "TenderCosts", "Token"
+        On Error GoTo 0
+        status = "token rejected - run the macro again to re-enter it"
+        Exit Function
+    ElseIf code <> 200 Then
+        status = "lookup unavailable (HTTP " & code & ") - column left blank"
+        Exit Function
+    End If
+    SaveSetting "TFITrans", "TenderCosts", "Token", tok
+
+    Dim out As New Collection
+    Dim lines() As String, parts() As String, j As Long
+    body = Replace(body, vbCrLf, vbLf)
+    lines = Split(body, vbLf)
+    For j = 1 To UBound(lines)                       ' line 0 is the header
+        parts = Split(lines(j), ",")
+        If UBound(parts) >= 2 Then
+            On Error Resume Next                     ' duplicate key -> keep first
+            out.Add CStr(parts(2)), NormShp(parts(0)) & "|" & UCase$(Trim$(parts(1)))
+            On Error GoTo 0
+        End If
+    Next j
+    Set GetTenderCosts = out
+    status = ""
+End Function
+
+' "SHP2607-A3WW630" and "A3WW630" both -> "A3WW630" (export sometimes omits the
+' SHPyymm- prefix; the tender emails always include it).
+Private Function NormShp(ByVal s As String) As String
+    Dim p As Long
+    s = UCase$(Trim$(s))
+    If Left$(s, 3) = "SHP" Then
+        p = InStr(s, "-")
+        If p > 0 Then s = Mid$(s, p + 1)
+    End If
+    NormShp = s
+End Function
+
+' Cross-platform GET. Returns the HTTP status (0 = could not connect).
+' Windows: MSXML2 (built in). Mac: AppleScriptTask -> curl; needs
+' TFITenderCosts.applescript in ~/Library/Application Scripts/com.microsoft.Excel/
+Private Function FetchUrl(ByVal url As String, ByRef body As String) As Long
+#If Mac Then
+    Dim resp As String, p As Long
+    On Error GoTo failed
+    resp = AppleScriptTask("TFITenderCosts.applescript", "FetchCosts", url)
+    If Len(resp) = 0 Or resp = "CURLERR" Then GoTo failed
+    p = InStrRev(resp, vbLf)                         ' curl appends "\n<status>"
+    If p = 0 Then GoTo failed
+    FetchUrl = Val(Mid$(resp, p + 1))
+    body = Left$(resp, p - 1)
+    Exit Function
+failed:
+    FetchUrl = 0
+#Else
+    Dim http As Object
+    On Error GoTo failed
+    Set http = CreateObject("MSXML2.ServerXMLHTTP.6.0")
+    http.Open "GET", url, False
+    http.setTimeouts 5000, 5000, 10000, 15000
+    http.Send
+    FetchUrl = http.Status
+    body = http.responseText
+    Exit Function
+failed:
+    FetchUrl = 0
+#End If
+End Function
+
+' Run this to force the token prompt on the next FormatTeslaExport run
+' (e.g. after the server token is rotated).
+Public Sub ResetTenderCostToken()
+    On Error Resume Next
+    DeleteSetting "TFITrans", "TenderCosts", "Token"
+    On Error GoTo 0
+    MsgBox "Stored token cleared - the next run will ask for a new one.", _
+           vbInformation, "TFI Tender Costs"
 End Sub
