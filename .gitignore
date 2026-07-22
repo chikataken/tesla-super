@@ -83,3 +83,8 @@ sd_photos/
 # ───── business-data DBs: keep OUT of the (public) repo ─────
 **/terminals.db
 wells-check/data/wells.db
+
+# editor swap/lock files (a nano swap of secrets/.env once slipped into a commit)
+*.swp
+.*.swp
+**/.*.swp
