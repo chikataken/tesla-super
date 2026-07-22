@@ -492,6 +492,7 @@
       ].join(';');
       (document.body || document.documentElement).appendChild(pillEl);
     }
+    pillEl.style.display = '';
     pillEl.textContent = text;
   }
   function toast(text) { pill(text); }
@@ -526,9 +527,14 @@
     }, true);
   }
 
-  // Re-apply on SPA route changes (URL changes without a reload).
+  // Re-apply on SPA route changes (URL changes without a reload). The portal keeps the DOM
+  // across routes, so the pill must be hidden when leaving the fleet page.
   function hookHistory() {
-    const fire = () => { reapply(); if (isFleetPage()) scheduleCheck(); };
+    const fire = () => {
+      reapply();
+      if (isFleetPage()) scheduleCheck();
+      else if (pillEl) pillEl.style.display = 'none';
+    };
     const wrap = (name) => { const o = history[name]; history[name] = function () { const r = o.apply(this, arguments); fire(); return r; }; };
     wrap('pushState'); wrap('replaceState');
     window.addEventListener('popstate', fire);
