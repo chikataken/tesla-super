@@ -15,6 +15,8 @@ Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/c
 '    emailed load tender, fetched live from shipments.wastake.com (matched on
 '    ShipmentNumber + VIN; latest email wins on re-tenders). First run asks once
 '    for the API token (stored per-user via SaveSetting; see ResetTenderCostToken).
+'    Shows "$800"; once a rate is typed on that row it LIVE-updates to
+'    "$800 (+30)" = cost minus rate (margin), recalculating as rates change.
 '    Yellow cost cell = no tender matched; red = tender says 0.00 (check it!).
 '    Mac needs the one-time helper: copy TFITenderCosts.applescript into
 '    ~/Library/Application Scripts/com.microsoft.Excel/
@@ -67,7 +69,7 @@ Sub FormatTeslaExport()
         "DestinationZip", 11, _
         "rate", 10, _
         "model", 5, _
-        "cost", 10)
+        "cost", 12)
 
     ' ---- EDIT HERE: exact widths in PIXELS. Pairs of name, pixels. ----
     Dim pixelWidths As Variant
@@ -286,16 +288,33 @@ Sub FormatTeslaExport()
         Next r
     End If
 
-    ' ---- cost column: 2-dp; yellow = no tender matched, red = 0.00 tender ----
+    ' ---- cost column: "$800" with a LIVE "(+30)" margin vs rate ---------------
+    ' Each matched cell becomes a formula embedding the cost as a constant plus a
+    ' same-row reference to the rate cell: shows "$800" while rate is empty, then
+    ' "$800 (+30)" (cost minus rate) recalculating live as rates are typed.
+    ' Yellow = no tender matched; red = the tender really says 0.00.
     With outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
-        .NumberFormat = "0.00"
+        .HorizontalAlignment = xlRight
     End With
-    If Not costs Is Nothing And keptCount > 0 Then
+    If keptCount > 0 Then
+        Dim cv As Variant, costTxt As String, rateAddr As String
         For r = 2 To keptCount + 1
-            If Len(Trim$(CStr(outSheet.Cells(r, costCol).Value))) = 0 Then
-                outSheet.Cells(r, costCol).Interior.Color = RGB(255, 255, 153)  ' no match
-            ElseIf Val(CStr(outSheet.Cells(r, costCol).Value)) = 0 Then
-                outSheet.Cells(r, costCol).Interior.Color = RGB(255, 199, 206)  ' 0.00 tender
+            cv = outSheet.Cells(r, costCol).Value
+            If Len(Trim$(CStr(cv))) = 0 Then
+                If Not costs Is Nothing Then
+                    outSheet.Cells(r, costCol).Interior.Color = RGB(255, 255, 153)  ' no match
+                End If
+            ElseIf IsNumeric(cv) Then
+                If CDbl(cv) = 0 Then
+                    outSheet.Cells(r, costCol).Interior.Color = RGB(255, 199, 206)  ' 0.00 tender
+                End If
+                costTxt = Format$(CDbl(cv), "0.############")
+                rateAddr = outSheet.Cells(r, rateCol).Address(False, False)
+                outSheet.Cells(r, costCol).Formula = _
+                    "=""$""&TEXT(" & costTxt & ",""#,##0"")" & _
+                    "&IF(" & rateAddr & "="""",""""," & _
+                    """ (""&IF(" & costTxt & "-" & rateAddr & ">=0,""+"","""")" & _
+                    "&TEXT(" & costTxt & "-" & rateAddr & ",""#,##0"")&"")"")"
             End If
         Next r
     End If
