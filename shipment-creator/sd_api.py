@@ -30,7 +30,10 @@ def _parse_needby(s: str | None) -> datetime | None:
     for fmt in ("%b %d, %Y %I:%M%p", "%b %d, %Y %I:%M %p", "%b %d, %Y",
                 "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
                 # US M/d/Y forms — how Excel/Sheets render dates when copy-pasted
-                "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%m/%d/%Y", "%m/%d/%y"):
+                "%m/%d/%Y %I:%M %p", "%m/%d/%Y %H:%M", "%m/%d/%Y",
+                # 2-digit-year forms WITH a time — '7/21/26 16:00' is how the
+                # formatted/pasted sheet's NeedByDate cells arrive
+                "%m/%d/%y %H:%M", "%m/%d/%y %I:%M %p", "%m/%d/%y"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
