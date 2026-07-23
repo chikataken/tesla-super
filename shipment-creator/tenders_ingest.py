@@ -126,7 +126,9 @@ def sync(con=None, svc=None) -> None:
             return
         raise
 
-    new = 0
+    import sd_events_db
+    sd_con = None
+    new = sd_new = 0
     for mid in dict.fromkeys(added):          # dedupe, keep order
         if tenders_db.have_gmail_id(con, mid):
             continue
@@ -138,16 +140,23 @@ def sync(con=None, svc=None) -> None:
             raise
         hdrs = {h["name"].lower(): h["value"]
                 for h in msg["payload"].get("headers", [])}
-        if ("sa-appuser@tesla.com" not in hdrs.get("from", "").lower()
-                or "tesla load tender" not in hdrs.get("subject", "").lower()):
-            continue
-        if _record(svc, con, mid, msg):
-            new += 1
-            print(f"  recorded {hdrs.get('subject')}")
+        sender = hdrs.get("from", "").lower()
+        if ("sa-appuser@tesla.com" in sender
+                and "tesla load tender" in hdrs.get("subject", "").lower()):
+            if _record(svc, con, mid, msg):
+                new += 1
+                print(f"  recorded {hdrs.get('subject')}")
+        elif "broker.updates@superdispatch.com" in sender:
+            # every SD notification email -> sd_events.db (parsed + gzipped raw)
+            sd_con = sd_con or sd_events_db.connect()
+            if not sd_events_db.have(sd_con, mid):
+                sd_events_db.record(sd_con, mid, int(msg["internalDate"]) / 1000.0,
+                                    hdrs.get("subject", ""), _html_body(msg["payload"]))
+                sd_new += 1
     tenders_db.set_history_id(con, str(new_hist),
-                              f"+{new} of {len(added)} new msgs")
-    print(f"sync ok: {len(added)} mailbox additions, {new} tenders recorded "
-          f"(history {start} -> {new_hist})")
+                              f"+{new} tenders, +{sd_new} sd events of {len(added)} msgs")
+    print(f"sync ok: {len(added)} mailbox additions, {new} tenders + {sd_new} sd events "
+          f"recorded (history {start} -> {new_hist})")
 
 
 def ingest(days: int, refetch: bool = False, svc=None, con=None) -> None:
