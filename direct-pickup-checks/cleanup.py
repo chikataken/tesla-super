@@ -45,7 +45,7 @@ def _prune_empty_dirs(root: str) -> None:
 def cleanup(days: int, dry_run: bool = False) -> dict:
     cutoff = time.time() - days * 86400
     stats: dict = {}
-    conn = db.connect()
+    conn = db._open()          # raw open — this function commits/closes manually
     try:
         # 1) Photo files (then rows). Delete bytes first so a crash can't orphan files.
         rows = conn.execute(
@@ -90,7 +90,7 @@ def cleanup(days: int, dry_run: bool = False) -> dict:
         # VACUUM can't run in a transaction and needs its own connection. Best-effort:
         # if the listener/worker hold a write lock, skip rather than fail the run.
         try:
-            vc = db.connect()
+            vc = db._open()    # raw open — VACUUM can't run inside a transaction
             try:
                 vc.execute("VACUUM")
             finally:

@@ -25,6 +25,7 @@ import json
 import os
 import sqlite3
 import time
+from contextlib import contextmanager
 from typing import Any, Optional
 
 import config
@@ -119,9 +120,9 @@ INSERT OR IGNORE INTO auth_state (id, blocked, updated_at) VALUES (1, 0, 0);
 """
 
 
-def connect() -> sqlite3.Connection:
-    """Open a connection with WAL + a busy timeout so the listener and worker can
-    both write without 'database is locked'. Caller closes (or use a `with` block)."""
+def _open() -> sqlite3.Connection:
+    """Raw open with WAL + a busy timeout so the listener and worker can both
+    write without 'database is locked'."""
     os.makedirs(config.DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
@@ -130,6 +131,25 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+@contextmanager
+def connect():
+    """`with connect() as conn:` — transaction semantics (commit on success,
+    rollback on exception) AND a guaranteed close.
+
+    THE BUG THIS FIXES: `with sqlite3.connect(...)` alone does NOT close the
+    connection — Python's sqlite3 context manager only wraps a transaction.
+    Every call site leaked its connection to garbage collection; whatever GC
+    couldn't reclaim accumulated until the worker hit its 1024-fd limit
+    (492 leaked connections over 6 days) and every new open failed with
+    'unable to open database file'. Deterministic close ends that."""
+    conn = _open()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
