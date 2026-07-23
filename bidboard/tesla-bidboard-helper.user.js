@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      1.1.0
+// @version      1.1.1
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card. Every submitted bid is also recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -124,11 +124,13 @@
   function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); return addBusinessDays(d, 1); }   // next weekday
   const iso16 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T16:00:00.000Z`;
   // transitDays scales with origin->destination distance
-  // (US state centroids): <500mi:7  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 7).
+  // (US state centroids): <500mi:4  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 4).
   // Longer hauls lean a day later than the raw average (they ran ~1 day short vs actual bids).
   const STC = {AL:[32.8,-86.8],AZ:[34.3,-111.7],AR:[34.9,-92.4],CA:[37.2,-119.3],CO:[39.0,-105.5],CT:[41.6,-72.7],DE:[39.0,-75.5],FL:[28.6,-82.4],GA:[32.6,-83.4],ID:[44.2,-114.5],IL:[40.0,-89.2],IN:[39.9,-86.3],IA:[42.0,-93.5],KS:[38.5,-98.4],KY:[37.5,-85.3],LA:[31.0,-92.0],ME:[45.4,-69.2],MD:[39.0,-76.8],MA:[42.3,-71.8],MI:[44.3,-85.4],MN:[46.3,-94.3],MS:[32.7,-89.7],MO:[38.4,-92.5],MT:[47.0,-109.6],NE:[41.5,-99.8],NV:[39.3,-116.6],NH:[43.7,-71.6],NJ:[40.2,-74.7],NM:[34.4,-106.1],NY:[42.9,-75.5],NC:[35.6,-79.4],ND:[47.5,-100.3],OH:[40.3,-82.8],OK:[35.6,-97.5],OR:[43.9,-120.6],PA:[40.9,-77.8],RI:[41.7,-71.6],SC:[33.9,-80.9],SD:[44.4,-100.2],TN:[35.9,-86.4],TX:[31.5,-99.3],UT:[39.3,-111.7],VT:[44.1,-72.7],VA:[37.5,-78.9],WA:[47.4,-120.5],WV:[38.6,-80.6],WI:[44.6,-89.9],WY:[43.0,-107.6]};
   function milesBetween(a, b) { if (!a || !b) return null; const R = 3959, dLat = (b[0]-a[0])*Math.PI/180, dLon = (b[1]-a[1])*Math.PI/180, la1 = a[0]*Math.PI/180, la2 = b[0]*Math.PI/180; const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.sqrt(h)); }
-  function transitDays(g) { const d = milesBetween(STC[stOf(g.origin && g.origin.name)], STC[stOf(g.destination && g.destination.name)]); if (d == null) return 7; if (d < 500) return 7; if (d < 1000) return 9; if (d < 2000) return 11; return 12; }
+  // <500mi was 7 days; bids.db offsets showed short-haul ETAs hand-pulled ~3 days
+  // earlier (mode -3) once manual adjusting started — 4 matches where they land.
+  function transitDays(g) { const d = milesBetween(STC[stOf(g.origin && g.origin.name)], STC[stOf(g.destination && g.destination.name)]); if (d == null) return 4; if (d < 500) return 4; if (d < 1000) return 9; if (d < 2000) return 11; return 12; }
   // ETA = pickup + transitDays CALENDAR days (pickup day NOT counted); Sat/Sun count toward transit,
   // so the ETA may land on a weekend. The manual stepper offset is likewise in calendar days.
   // (Pickup itself is still forced to a weekday — see pickupDate.)
