@@ -2275,13 +2275,16 @@ def api_tender_costs(token: str = "", days: int = 45):
     if not expected or not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="bad token")
     import tenders_db
-    con = tenders_db.connect()
+    from contextlib import closing
     days = max(1, min(days, 365))
-    rows = con.execute(
-        """SELECT e.shp, v.vin, v.cost_usd
-           FROM current_vins v JOIN tender_emails e ON e.gmail_id = v.gmail_id
-           WHERE e.sent_at >= strftime('%s','now') - ? * 86400
-           ORDER BY e.shp, v.vin""", (days,)).fetchall()
+    # closing(): this app is long-lived; a per-request connection left to GC is
+    # the same fd-leak class that killed the direct-pickup worker.
+    with closing(tenders_db.connect()) as con:
+        rows = con.execute(
+            """SELECT e.shp, v.vin, v.cost_usd
+               FROM current_vins v JOIN tender_emails e ON e.gmail_id = v.gmail_id
+               WHERE e.sent_at >= strftime('%s','now') - ? * 86400
+               ORDER BY e.shp, v.vin""", (days,)).fetchall()
     lines = ["shp,vin,cost"]
     for r in rows:
         cost = "" if r["cost_usd"] is None else f"{r['cost_usd']:.2f}"
