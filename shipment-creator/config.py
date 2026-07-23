@@ -155,21 +155,34 @@ DISPATCHER = os.getenv("DISPATCHER", "<dispatcher>")
 # Shown on the load board, BEFORE a carrier books the load.
 LOADBOARD_INSTRUCTIONS = "PLEASE SEND A TEXT TO <dispatcher> TO BOOK THIS LOAD"
 
-# Shown on the order itself, AFTER a carrier books it.
-ORDER_INSTRUCTIONS = (
+# Shown on the order itself, AFTER a carrier books it. Split into three parts:
+# the HEADER and FOOTER are FIXED (each carries a <dispatcher> token, so the
+# dispatcher phone can never be edited away), while the middle BODY is editable
+# from the Settings tab (ORDER_INSTRUCTIONS_BODY via settings.json/env; empty ->
+# this default). HEADER + DEFAULT_BODY + FOOTER reproduces the legacy text
+# byte-for-byte.
+ORDER_INSTRUCTIONS_HEADER = (
     "!! PLEASE READ CAREFULLY !!\n"
     "After accepting load send driver info for TESLA LOGISTICS APP\n"
     "(Full name, phone #, and email) to <dispatcher>\n"
     "\n"
+)
+DEFAULT_ORDER_INSTRUCTIONS_BODY = (
     "Drivers must upload a photo of the windshield VIN # (all units) at both "
     "PICK UP AND DELIVERY on SuperDispatch and Tesla LOGISTICS APP\n"
     "Failure to comply may result in delayed payment and a 10% deduction from "
     "total payment\n"
     "\n"
     "IF THE VEHICLE DOES NOT HAVE A KEY CARD OR BATTERY IS UNDER 20%, PLEASE "
-    "NOTIFY US!\n"
-    "For all other questions contact TFI Trans dispatch: (TEXT ONLY) <dispatcher>"
+    "NOTIFY US!"
 )
+ORDER_INSTRUCTIONS_FOOTER = (
+    "\nFor all other questions contact TFI Trans dispatch: (TEXT ONLY) <dispatcher>"
+)
+_OI_BODY = os.getenv("ORDER_INSTRUCTIONS_BODY", "").replace("\r\n", "\n").strip()
+ORDER_INSTRUCTIONS = (ORDER_INSTRUCTIONS_HEADER
+                      + (_OI_BODY or DEFAULT_ORDER_INSTRUCTIONS_BODY)
+                      + ORDER_INSTRUCTIONS_FOOTER)
 
 
 def render_dispatcher(text: str, dispatcher: str | None = None) -> str:

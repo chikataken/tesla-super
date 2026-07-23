@@ -816,6 +816,22 @@
         </div>
         <div id="usersList"></div>
         <datalist id="usStatesList"></datalist>
+
+        <div class="users-bar" style="margin-top:26px">
+          <h2 class="users-h">Order instructions</h2>
+          <button class="btn green" id="oiSaveBtn" onclick="saveOrderInstructions()">Save</button>
+          <button class="btn ghost" onclick="resetOrderInstructions()">Reset to default</button>
+          <span class="count" id="oiMsg"></span>
+        </div>
+        <div style="max-width:720px;font-size:12.5px;color:#5c5e62;margin:0 0 8px">
+          Sent to the carrier after they book a load. The gray parts are fixed &mdash; they carry the
+          dispatcher phone number (<code>&lt;dispatcher&gt;</code>, filled per profile) and can't be
+          edited here. Only the middle section is editable; leaving it empty restores the default.
+        </div>
+        <pre id="oiHeader" style="max-width:720px;margin:0;padding:10px 12px;background:#f1f3f5;color:#7a7e85;border:1px solid #e0e3e6;border-radius:8px 8px 0 0;white-space:pre-wrap;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace"></pre>
+        <textarea id="oiBody" rows="7" spellcheck="false"
+          style="display:block;width:100%;max-width:720px;box-sizing:border-box;padding:10px 12px;border:1px solid #cfd3d6;border-left:3px solid #3457d5;border-radius:0;resize:vertical;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace"></textarea>
+        <pre id="oiFooter" style="max-width:720px;margin:0 0 14px;padding:10px 12px;background:#f1f3f5;color:#7a7e85;border:1px solid #e0e3e6;border-top:0;border-radius:0 0 8px 8px;white-space:pre-wrap;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace"></pre>
       </div>
       <aside class="users-side">
         <div class="side-title">Unclaimed states <span class="uc-count" id="unclaimedCount"></span></div>
@@ -890,7 +906,7 @@ document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
   t.classList.add('active'); $('#'+tab).classList.add('active');
   if(tab==='terminals') loadTerminals();
   if(tab==='users'){ USERS_EDIT=JSON.parse(JSON.stringify(PROFILES||[]));
-    const m=$('#usersMsg'); if(m) m.textContent=''; renderUsersEditor(); }   // Settings = edit users
+    const m=$('#usersMsg'); if(m) m.textContent=''; renderUsersEditor(); loadSettings(); }   // Settings = edit users + templates
   const onRecorded = tab==='recorded';
   const rn = $('#recNav'); if(rn) rn.hidden = !onRecorded;   // status groups stay Recorded-only
   // Centered header slot shows ONLY the active tab's own toolbar group.
@@ -1934,10 +1950,36 @@ async function onSpareDrop(ev){
 
 // ----- settings + one-time login -----
 async function loadSettings(){
-  // SuperDispatch credential fields were removed from the UI; nothing to populate here.
-  // (Credentials live in .env / settings.json.) Kept as a no-op so the Settings tab's
-  // open handler stays valid.
+  // Populate the order-instructions editor: fixed header/footer (hold the
+  // <dispatcher> phone token, not editable) around the editable body.
+  try{
+    const s = await api('/api/settings');
+    if($('#oiHeader')){
+      $('#oiHeader').textContent = (s.oi_header || '').trimEnd();
+      $('#oiFooter').textContent = (s.oi_footer || '').trim();
+      OI_DEFAULT_BODY = s.oi_default_body || '';
+      $('#oiBody').value = s.ORDER_INSTRUCTIONS_BODY || OI_DEFAULT_BODY;
+      $('#oiBody').placeholder = OI_DEFAULT_BODY;
+    }
+  }catch(e){}
   if(!$('#set_env')) return;
+}
+let OI_DEFAULT_BODY = '';
+async function saveOrderInstructions(){
+  const btn = $('#oiSaveBtn'); btn.disabled = true; $('#oiMsg').textContent = 'Saving\u2026';
+  const val = $('#oiBody').value.trim();
+  // storing the default text explicitly is pointless — treat it as "use default"
+  const body = { ORDER_INSTRUCTIONS_BODY: (val === OI_DEFAULT_BODY.trim()) ? '' : val };
+  try{
+    await api('/api/settings', body);
+    $('#oiMsg').textContent = 'Saved — applies to the next post.';
+    toast('Order instructions saved');
+  }catch(e){ $('#oiMsg').textContent = 'Save failed.'; }
+  finally{ btn.disabled = false; setTimeout(()=>$('#oiMsg').textContent='', 3000); }
+}
+async function resetOrderInstructions(){
+  $('#oiBody').value = OI_DEFAULT_BODY;
+  await saveOrderInstructions();
 }
 async function saveSettings(){
   const btn=$('#saveSetBtn'); btn.disabled=true; $('#setMsg').textContent='Saving…';

@@ -23,6 +23,9 @@ PUBLIC_KEYS = [
     "EXCEL_PATH",                # default sheet the GUI/pipeline uses
     "CHROME_PATH",               # optional explicit chrome.exe
     "CDP_PROFILE_DIR",           # persistent Chrome profile for the one-time login
+    "ORDER_INSTRUCTIONS_BODY",   # editable middle of the order instructions; the
+                                 # fixed header/footer in config.py carry the
+                                 # <dispatcher> phone token. Empty = default text.
 ]
 SECRET_KEY = "SUPERDISPATCH_CLIENT_SECRET"
 _KEYRING_SERVICE = "TFI Shipment Creator"

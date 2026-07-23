@@ -1027,9 +1027,16 @@ def api_profile_image(pid: str):
 @app.get("/api/settings")
 def api_settings_get():
     """Current settings for the GUI. The SuperDispatch secret is never returned —
-    only `has_secret` tells the UI whether one is stored."""
+    only `has_secret` tells the UI whether one is stored. Also ships the order-
+    instructions template parts so the Settings tab can render the fixed
+    header/footer (which hold the <dispatcher> phone token) around the editable
+    body."""
     import settings_store
-    return settings_store.public_view()
+    import config
+    return {**settings_store.public_view(),
+            "oi_header": config.ORDER_INSTRUCTIONS_HEADER,
+            "oi_footer": config.ORDER_INSTRUCTIONS_FOOTER,
+            "oi_default_body": config.DEFAULT_ORDER_INSTRUCTIONS_BODY}
 
 
 @app.post("/api/settings")
@@ -1037,10 +1044,16 @@ def api_settings_set(body: dict = Body(...)):
     """Save settings (non-secret -> settings.json, secret -> Windows Credential
     Manager) and hot-reload config so the new values take effect without a restart."""
     import importlib
+    import os as _os
     import settings_store
     import config
     settings_store.save(body or {})
     settings_store.apply_to_env(force=True)            # override env with the new values
+    # apply_to_env skips empty values, so a CLEARED instructions body would leave the
+    # previous force-set env var behind — drop it so config falls back to the default.
+    if "ORDER_INSTRUCTIONS_BODY" in (body or {}) \
+            and not str(body["ORDER_INSTRUCTIONS_BODY"] or "").strip():
+        _os.environ.pop("ORDER_INSTRUCTIONS_BODY", None)
     importlib.reload(config)                           # re-read credentials, env, excel
     _excel_cache_clear(all_profiles=True)               # config reload affects every profile
     return {"ok": True, **settings_store.public_view(),
