@@ -97,6 +97,29 @@ def _parse_ts(line: str):
         return None
 
 
+def _stats(today: str) -> dict:
+    """True all-time counters straight from the tables. The old version summed over
+    _history(), which caps at the newest 300 rows — so once lifetime marks passed
+    300, the dashboard's marked-total froze near ~287 (300 minus the error rows in
+    the window) while the real count kept growing. COUNT(*) can't saturate."""
+    if not os.path.exists(DB):
+        return {"total": 0, "today": 0, "pickups": 0, "dropoffs": 0, "api_errors": 0}
+    con = sqlite3.connect(DB)
+    try:
+        q = lambda sql, *a: con.execute(sql, a).fetchone()[0]
+        drop = q("SELECT COUNT(*) FROM dropoffs")
+        pick = q("SELECT COUNT(*) FROM pickups")
+        errs = q("SELECT COUNT(*) FROM api_errors WHERE TRIM(COALESCE(stage,'')) != 'no_photos'")
+        today_n = (q("SELECT COUNT(*) FROM dropoffs WHERE dropped_at LIKE ?", today + "%")
+                   + q("SELECT COUNT(*) FROM pickups WHERE picked_at LIKE ?", today + "%"))
+        return {"total": drop + pick + q("SELECT COUNT(*) FROM api_errors"),
+                "today": today_n, "pickups": pick, "dropoffs": drop, "api_errors": errs}
+    except sqlite3.Error:
+        return {"total": 0, "today": 0, "pickups": 0, "dropoffs": 0, "api_errors": 0}
+    finally:
+        con.close()
+
+
 def _history(limit: int = 300) -> list[dict]:
     """Unified marks: Drop Off (dropoffs table) + Pick Up (pickups table), newest first."""
     if not os.path.exists(DB):
@@ -442,11 +465,7 @@ def snapshot() -> dict:
         "now": now,
         "current_vin": _current(log_lines),
         "log": [_fmt_log_line(ln) for ln in log_lines[-LOG_TAIL:]],
-        "stats": {"total": len(history),
-                  "today": sum(1 for h in history if (h["at"] or "").startswith(today)),
-                  "pickups": sum(1 for h in history if h["action"] == "Pick Up"),
-                  "dropoffs": sum(1 for h in history if h["action"] == "Drop Off"),
-                  "api_errors": sum(1 for h in history if h["action"] == "API ERROR")},
+        "stats": _stats(today),
         "history": history,
         "generated_at": datetime.datetime.now().isoformat(timespec="seconds"),
     }
