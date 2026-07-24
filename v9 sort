@@ -7,7 +7,7 @@ Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/c
 ' ============================================================
 '  Tesla Export Formatter  (Mac & Windows compatible)
 '  - Deletes rows by OriginLocation
-'  - Keeps / reorders columns, adds narrow reference columns, adds a blank "rate" column and model column
+'  - Keeps / reorders columns, adds narrow reference columns, adds a blank "rate" column ($ formatted) and model column
 '  - Sorts by Origin/Destination State & City
 '  - Custom column widths (character + exact-pixel), auto-fits the rest
 '  - Adds model code after rate: YL=7SAY + 6th character B; otherwise 4th VIN character C=CT, A=CAB, X=X
@@ -16,8 +16,9 @@ Private Const COSTS_URL As String = "https://shipments.wastake.com/api/tenders/c
 '    ShipmentNumber + VIN; latest email wins on re-tenders). First run asks once
 '    for the API token (stored per-user via SaveSetting; see ResetTenderCostToken).
 '    cost shows "$800" (real number - summable/sortable, black text). LIVE:
-'    once a rate is typed on the row, the cost CELL highlights red when
-'    cost >= rate, plain otherwise (and while rate is empty). No match = blank.
+'    once a rate is typed on the row, the cost CELL goes soft green when
+'    rate < cost, red when rate >= cost, plain while rate is empty.
+'    No match = blank.
 '    Light-red fill from the start = the tender itself says 0.00.
 '    Mac needs the one-time helper: copy TFITenderCosts.applescript into
 '    ~/Library/Application Scripts/com.microsoft.Excel/
@@ -271,7 +272,7 @@ Sub FormatTeslaExport()
         If c > 0 Then SetColumnPixels outSheet.Columns(c), CDbl(pixelWidths(k + 1))
     Next k
 
-    ' ---- model column: centered; darker highlights for CT and CAB only (YL has no highlight) ----
+    ' ---- model column: centered; highlights: YL black/white, CT gray, CAB gold ----
     With outSheet.Range(outSheet.Cells(1, modelCol), outSheet.Cells(keptCount + 1, modelCol))
         .HorizontalAlignment = xlCenter
         .VerticalAlignment = xlCenter
@@ -279,6 +280,11 @@ Sub FormatTeslaExport()
     If keptCount > 0 Then
         For r = 2 To keptCount + 1
             Select Case CStr(outSheet.Cells(r, modelCol).Value)
+                Case "YL"
+                    With outSheet.Cells(r, modelCol)
+                        .Interior.Color = RGB(0, 0, 0)          ' completely black
+                        .Font.Color = RGB(255, 255, 255)        ' white text
+                    End With
                 Case "CT"
                     outSheet.Cells(r, modelCol).Interior.Color = RGB(191, 191, 191)   ' darker gray
                 Case "CAB"
@@ -292,10 +298,16 @@ Sub FormatTeslaExport()
     ' ---- cost column ----------------------------------------------------------
     ' The tender's per-VIN payout as a real NUMBER shown "$800" (summable, sorts
     ' numerically, black text). LIVE conditional format: once a rate is typed on
-    ' the row the CELL highlights red when cost >= rate, plain otherwise (and
-    ' while rate is empty). Static light-red fill = the tender really says 0.00.
-    ' No tender match = cell stays blank.
+    ' the row the CELL goes soft green when rate < cost, red when rate >= cost,
+    ' plain while rate is empty. Static light-red fill = the tender really
+    ' says 0.00. No tender match = cell stays blank.
     With outSheet.Range(outSheet.Cells(2, costCol), outSheet.Cells(keptCount + 1, costCol))
+        .NumberFormat = "$#,##0"
+        .HorizontalAlignment = xlRight
+    End With
+
+    ' ---- rate column: $ format by default, so typed rates show as "$800" ----
+    With outSheet.Range(outSheet.Cells(2, rateCol), outSheet.Cells(keptCount + 1, rateCol))
         .NumberFormat = "$#,##0"
         .HorizontalAlignment = xlRight
     End With
@@ -316,8 +328,14 @@ Sub FormatTeslaExport()
         rateFirst = outSheet.Cells(2, rateCol).Address(False, False)
         With costRng.FormatConditions.Add(Type:=xlExpression, Formula1:= _
                 "=AND(ISNUMBER(" & costFirst & "),ISNUMBER(" & rateFirst & ")," & _
-                costFirst & ">=" & rateFirst & ")")
-            .Interior.Color = RGB(255, 153, 153)  ' soft red cell: cost at or above rate
+                rateFirst & "<" & costFirst & ")")
+            .Interior.Color = RGB(198, 239, 206)  ' soft green: rate below cost
+            .Font.Color = RGB(0, 0, 0)            ' text stays black
+        End With
+        With costRng.FormatConditions.Add(Type:=xlExpression, Formula1:= _
+                "=AND(ISNUMBER(" & costFirst & "),ISNUMBER(" & rateFirst & ")," & _
+                rateFirst & ">=" & costFirst & ")")
+            .Interior.Color = RGB(255, 153, 153)  ' red: rate at or above cost
             .Font.Color = RGB(0, 0, 0)            ' text stays black
         End With
     End If
@@ -420,14 +438,22 @@ Private Function GetTenderCosts(ByRef status As String) As Collection
 
     Dim out As New Collection
     Dim lines() As String, parts() As String, j As Long
+    Dim dupKey As String
     body = Replace(body, vbCrLf, vbLf)
     lines = Split(body, vbLf)
     For j = 1 To UBound(lines)                       ' line 0 is the header
         parts = Split(lines(j), ",")
         If UBound(parts) >= 2 Then
-            On Error Resume Next                     ' duplicate key -> keep first
-            out.Add CStr(parts(2)), NormShp(parts(0)) & "|" & UCase$(Trim$(parts(1)))
+            ' Duplicate key -> keep LAST. The API sorts by full SHP string, and
+            ' the SHPyymm- prefix sorts chronologically, so when the same
+            ' shipment suffix appears under two prefixes (re-tendered in a
+            ' later month) the last row is the newest tender. Keeping first
+            ' let an old empty-cost row block the real price -> blank cell.
+            dupKey = NormShp(parts(0)) & "|" & UCase$(Trim$(parts(1)))
+            On Error Resume Next
+            out.Remove dupKey
             On Error GoTo 0
+            out.Add CStr(parts(2)), dupKey
         End If
     Next j
     Set GetTenderCosts = out
