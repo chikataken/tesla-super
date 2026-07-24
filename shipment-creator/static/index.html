@@ -1953,7 +1953,8 @@ async function loadSettings(){
   // Populate the order-instructions editor: fixed header/footer (hold the
   // <dispatcher> phone token, not editable) around the editable body.
   try{
-    const s = await api('/api/settings');
+    // GET, not the api() helper - api() always POSTs (it's the save path)
+    const s = await fetch('/api/settings').then(r=>r.json());
     if($('#oiHeader')){
       $('#oiHeader').textContent = (s.oi_header || '').trimEnd();
       $('#oiFooter').textContent = (s.oi_footer || '').trim();
