@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.21.2
-// @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, shows a SuperDispatch status bubble next to each shipment number (with a regular-fleet-style hover card), and provides Cleaner/Marker actions for pickups, ETAs, Driver Needed shipments, and Tesla-status reconciliation.
+// @version      0.21.3
+// @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, shows a SuperDispatch status bubble next to each shipment number (with a regular-fleet-style hover card), and provides Cleaner/Marker actions for pickups, ETAs, and Driver Needed shipments.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -54,10 +54,9 @@
 
   // Dispatcher-by-pickup-state (mirrors shipment-creator/profiles.json + regular-fleet).
   const DISPATCHER_STATES = {
-    Soyo:  ['CT','WI','UT','IL','IN','OH','MI','KY','TN','MS','AL','SC','NC','NJ','RI','MA','NH','VT','ME','NY','PA'],
-    Kelly: ['VA','MD','GA','FL','DE','WV','DC'],
+    Kelly: ['VA','MD','DC','GA','FL','DE','WV','PA','NY','NJ','CT','RI','MA','NH','VT','ME','NC','SC','TN','AL','KY'],
     Duka:  ['CA'],
-    Burte: ['NV','AZ','NM','CO','ID','WY','MT','ND','SD','NE','KS','OK','MO','IA','MN','AR','LA','TX','OR','WA'],
+    Burte: ['IL','IN','OH','MI','MS','UT','WI','NV','AZ','NM','CO','ID','WY','MT','ND','SD','NE','KS','OK','MO','IA','MN','AR','LA','TX','OR','WA'],
   };
   const STATE_DISPATCHER = {};
   for (const name in DISPATCHER_STATES) for (const st of DISPATCHER_STATES[name]) STATE_DISPATCHER[st] = name;
@@ -106,14 +105,6 @@
   function originState(loc) {
     const m = String(loc || '').match(/(?:^|-)US-([A-Z]{2})(?:-|$)/);
     return m ? m[1] : '';
-  }
-  function fmt(iso) {
-    if (!iso) return '';
-    const [d, t] = String(iso).split('T');
-    if (!d) return '';
-    const p = d.split('-'); if (p.length < 3) return d;
-    const hm = t ? t.slice(0, 5) : '';
-    return (+p[1]) + '/' + (+p[2]) + (hm && hm !== '00:00' ? ' ' + hm : '');
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
