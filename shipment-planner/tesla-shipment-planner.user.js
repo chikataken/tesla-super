@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Shipment Planner Helper
 // @namespace    wastake.shipment-planner
-// @version      1.0.0
+// @version      1.1.0
 // @description  Bidboard-style split panel for Tesla's Shipment Planner, SPLICED INTO the page — replaces Tesla's planner board in-place. Left: every route + its shipments (from the API). Right: focused bidding cards with a recommended-ETA picker and one price box per shipment. LIVE: pressing Enter to finish a card PUTs UpsertBid for every typed shipment. REVIEW/CONFIRMED/REJECTED tabs show those boards read-only. EU shipments are hidden everywhere. Every submitted bid is recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
@@ -21,7 +21,7 @@
  *   Right half: one focused card per route — route, recommended-ETA date picker, and ONE PRICE BOX
  *               PER SHIPMENT (labeled VIN count, model mix, shipment number). Shipments differ in
  *               size, so prices are per shipment — nothing is fanned.
- *   Submit    : Enter only sends boxes you've TYPED into; pickup = next weekday 16:00 local,
+ *   Submit    : Enter only sends boxes you've TYPED into; pickup = today + 3 calendar days (rolled to Monday if weekend) 16:00 local,
  *               ETA = pickup + distance-based transit days (stepper offsets in calendar days), USD.
  *               Submissions are serialized per route; the newest Entered snapshot wins.
  *               Card green on success, red on failure.
@@ -200,10 +200,10 @@
   }
 
   // --- Pickup + recommended ETA (bidboard logic, verbatim) --------------------
-  // Pickup DATE = the NEXT WEEKDAY (tomorrow, or Monday if that falls on a weekend), 16:00 local.
+  // Pickup DATE = today + 3 CALENDAR days, rolled forward to Monday when that lands on a weekend
+  // (Wed/Thu/Fri all bid for Monday; Tue bids for Friday), 16:00 local.
   const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
-  function addBusinessDays(d, n) { const x = new Date(d); const step = n < 0 ? -1 : 1; let rem = Math.abs(n); while (rem > 0) { x.setDate(x.getDate() + step); if (!isWeekend(x)) rem--; } return x; }
-  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); return addBusinessDays(d, 1); }
+  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + 3); while (isWeekend(d)) d.setDate(d.getDate() + 1); return d; }
   // The planner wants local "YYYY-MM-DD HH:mm:ss" strings (findings.md), not bidboard's 16:00Z ISO.
   const local16 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 16:00:00`;
   // transitDays scales with origin->destination distance (US state centroids):

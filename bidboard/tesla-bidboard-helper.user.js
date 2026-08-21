@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      2.1.0
+// @version      2.2.0
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card. Every submitted bid is also recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -17,7 +17,7 @@
  *   Right half: one focused card per route — route, recommended-ETA date picker, and price box(es). CT, CAB
  *               (Cybercab, VIN starts 5YJA), and YL (VIN starts 7SAY and its 6th character is B)
  *               each get their own box; one price -> every VIN in that subset.
- *   Submit    : Enter only sends boxes you've TYPED into; pickup = next weekday at 16:00Z, USD (ETA counts calendar days, may be a weekend).
+ *   Submit    : Enter only sends boxes you've TYPED into; pickup = today + 3 calendar days (rolled to Monday if weekend) at 16:00Z, USD (ETA counts calendar days, may be a weekend).
  *               Submissions are serialized per route: if Enter is pressed again while a send is
  *               running, the newest card snapshot runs last and is the one that leaves the card green.
  *               Card stays green on success (HTTP 200), red on failure. Only sent VINs are committed.
@@ -115,13 +115,11 @@
   const fullyPriced = (subset) => subset.length > 0 && subset.every((b) => b.carrierCounter && b.carrierCounter.bidAmount != null);
 
   // --- Pickup + recommended ETA ---------------------------------------------
-  // Pickup is always 16:00Z (4 PM), USD. Pickup DATE = the NEXT WEEKDAY (tomorrow, or Monday if that
-  // falls on a weekend). Pickup is never Sat/Sun (the ETA may be); there is no time-of-day cutoff.
+  // Pickup is always 16:00Z (4 PM), USD. Pickup DATE = today + 3 CALENDAR days, rolled forward to
+  // Monday when that lands on a weekend (Wed/Thu/Fri all bid for Monday; Tue bids for Friday).
+  // Pickup is never Sat/Sun (the ETA may be); there is no time-of-day cutoff.
   const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;   // 0 = Sun, 6 = Sat
-  // Advance `n` BUSINESS days from `d` (n may be negative), skipping Sat/Sun — weekends never count
-  // toward n, and the result is always a weekday when `d` is a weekday.
-  function addBusinessDays(d, n) { const x = new Date(d); const step = n < 0 ? -1 : 1; let rem = Math.abs(n); while (rem > 0) { x.setDate(x.getDate() + step); if (!isWeekend(x)) rem--; } return x; }
-  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); return addBusinessDays(d, 1); }   // next weekday
+  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + 3); while (isWeekend(d)) d.setDate(d.getDate() + 1); return d; }   // today + 3 calendar days, rolled to Monday if weekend
   const iso16 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}T16:00:00.000Z`;
   // transitDays scales with origin->destination distance
   // (US state centroids): <500mi:4  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 4).
