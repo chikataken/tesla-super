@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.3
+// @version      0.3.4
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -186,8 +186,8 @@
     const note = r.cancel_note ? ` <span class="tv-note" title="${esc(r.cancel_note)}">↩</span>` : '';
     return `<span style="color:${col};font-weight:700">${lab}</span>` + note;
   };
-  const match = (r, q) => !q || [r.vin, r.shp, r.origin_city, r.dest_city, r.dest_name,
-    r.origin_name, r.driver, r.origin_state, r.dest_state]
+  const match = (r, q) => !q || [r.vin, r.shp, r.order_number, r.origin_city, r.dest_city,
+    r.dest_name, r.origin_name, r.driver, r.origin_state, r.dest_state]
     .some(v => v && String(v).toLowerCase().includes(q));
   const tvAge = ep => { const h = (Date.now() / 1000 - ep) / 3600;
     return h < 1 ? `${Math.max(1, Math.round(h * 60))}m` : h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`; };
@@ -203,17 +203,20 @@
   function shipments(rows) {
     const by = {};
     rows.forEach(r => {
-      const o = by[r.shp] || (by[r.shp] = { shp: r.shp, sent_at: r.sent_at, vins: 0, rows: [],
+      const key = r.order_number || ('T:' + r.shp);
+      const o = by[key] || (by[key] = { key, number: r.order_number || null, shp: r.shp,
+        sent_at: r.sent_at, vins: 0, rows: [],
         cost: 0, origin: `${r.origin_state || '~'} ${r.origin_city || '~'}`,
         dest: `${r.dest_state || '~'} ${r.dest_city || '~'}`, need_by: r.need_by, driver: r.driver });
       o.vins++; o.rows.push(r);
       o.cost += Number(r.cost_usd) || 0;
+      if (r.sent_at > o.sent_at) o.sent_at = r.sent_at;
     });
     return Object.values(by);
   }
 
   const COLS = [
-    { k: 'shp', lab: 'Shipment #', w: 92, v: o => o.shp },
+    { k: 'shp', lab: 'Shipment #', w: 120, v: o => o.number || o.shp },
     { k: 'vin', lab: 'VIN', w: 150, v: o => o.vins },
     { k: 'status', lab: 'Status', w: 92, v: o => Math.min(...o.rows.map(r => RANKS[r.stage] ?? -1)) },
     { k: 'tesla', lab: 'Tesla', w: 118, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
@@ -245,7 +248,11 @@
       ? `<span class="tv-dir">${UI.sort.dir > 0 ? '▴' : '▾'}</span>` : ''}</th>`).join('');
     const secRow = (lab, n) => `<tr class="tv-sec"><td colspan="${COLS.length}">${lab} · ${n} shipments</td></tr>`;
     const bodyOf = list => list.map(o => o.rows.map((r, i) => {
-      const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}">${short(o.shp)}</td>` : '';
+      const tn = short(o.shp);
+      const cell = o.number ? `${esc(o.number)}`
+        : (o.rows[0].stage === 'FLEET' || o.rows[0].stage === 'FLEET?'
+          ? tn : `<span class="tv-shp-t" title="no SD order — Tesla's shipment #">${tn}</span>`);
+      const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="Tesla: ${tn}">${cell}</td>` : '';
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         `<td>${esc(r.vin)}</td>` +
         `<td>${stageTxt(r)}</td>` +
@@ -295,6 +302,7 @@
   .tv-xlt tr.tv-grp td{border-top:1.5px solid #b9c0cb}
   .tv-xlt tr.tv-sec td{background:#eef1f5;color:#69707d;font-size:10.5px;font-weight:800;
     letter-spacing:.05em;padding:4px 9px;border-top:2px solid #b9c0cb}
+  .tv-shp-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
   .tv-num{text-align:right;font-variant-numeric:tabular-nums}
   .tv-ctr{text-align:center}
   .tv-dim{color:#69707d}
