@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.2
+// @version      0.3.3
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -221,7 +221,7 @@
     { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || '~' },
     { k: 'cost', lab: 'TotalCost', w: 78, v: o => o.cost },
     { k: 'origin', lab: 'Origin', w: 165, v: o => o.origin },
-    { k: 'dest', lab: 'Destination', w: 165, v: o => o.dest },
+    { k: 'dest', lab: 'Destination', w: 0, v: o => o.dest },
   ];
 
   // ---- rendering -------------------------------------------------------------
@@ -238,10 +238,13 @@
     const col = COLS.find(c => c.k === UI.sort.key) || COLS[6];
     ships.sort((a, b) => { const x = col.v(a), y = col.v(b);
       return (x < y ? -1 : x > y ? 1 : 0) * UI.sort.dir || b.sent_at - a.sent_at; });
-    const colgroup = COLS.map(c => `<col style="width:${c.w}px">`).join('').replace(`width:165px`, 'width:auto');
+    const isFleetShip = o => o.rows.every(r => r.stage === 'FLEET' || r.stage === 'FLEET?');
+    const brok = ships.filter(o => !isFleetShip(o)), fleet = ships.filter(isFleetShip);
+    const colgroup = COLS.map(c => `<col style="width:${c.w ? c.w + 'px' : 'auto'}">`).join('');
     const head = COLS.map(c => `<th data-sort="${c.k}">${c.lab}${UI.sort.key === c.k
       ? `<span class="tv-dir">${UI.sort.dir > 0 ? '▴' : '▾'}</span>` : ''}</th>`).join('');
-    const body = ships.map(o => o.rows.map((r, i) => {
+    const secRow = (lab, n) => `<tr class="tv-sec"><td colspan="${COLS.length}">${lab} · ${n} shipments</td></tr>`;
+    const bodyOf = list => list.map(o => o.rows.map((r, i) => {
       const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}">${short(o.shp)}</td>` : '';
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         `<td>${esc(r.vin)}</td>` +
@@ -254,6 +257,8 @@
         `<td class="tv-dim" title="${esc(r.dest_name || '')}">${esc(loc(r.dest_name, r.dest_city, r.dest_state))}</td>` +
         `</tr>`;
     }).join('')).join('');
+    const body = (brok.length ? secRow('BROKERED', brok.length) + bodyOf(brok) : '')
+      + (fleet.length ? secRow('FLEET', fleet.length) + bodyOf(fleet) : '');
     root.innerHTML = `<table class="tv-xlt"><colgroup>${colgroup}</colgroup><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
   }
 
@@ -288,6 +293,8 @@
     text-overflow:ellipsis;background:#fff}
   .tv-xlt tbody tr:hover td{background:#eef1f5}
   .tv-xlt tr.tv-grp td{border-top:1.5px solid #b9c0cb}
+  .tv-xlt tr.tv-sec td{background:#eef1f5;color:#69707d;font-size:10.5px;font-weight:800;
+    letter-spacing:.05em;padding:4px 9px;border-top:2px solid #b9c0cb}
   .tv-num{text-align:right;font-variant-numeric:tabular-nums}
   .tv-ctr{text-align:center}
   .tv-dim{color:#69707d}
