@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.0
+// @version      0.3.1
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -123,6 +123,12 @@
   // ---- state -----------------------------------------------------------------
   let DATA = null;                  // {rows, orphans}
   let UI = { q: '', sort: { key: 'origin', dir: 1 } };
+  const COLOR = { TENDERED: '#64748b', NEW: '#64748b', POSTED: '#2563eb', DISPATCHED: '#64748b',
+    'PICKED UP': '#b45309', DELIVERED: '#0f766e', INVOICED: '#8b5cf6', PAID: '#166534',
+    FLEET: '#7c3aed', CANCELED: '#d6453c', ARCHIVED: '#9aa1ab', 'RE-TENDERED': '#9aa1ab' };
+  const LABEL = { DISPATCHED: 'Accepted' };
+  const RANKS = { TENDERED: 0, NEW: 1, POSTED: 2, DISPATCHED: 3, 'PICKED UP': 4,
+    DELIVERED: 5, INVOICED: 6, PAID: 7 };
   let refreshTimer = null;
 
   // Tesla's page CSP (connect-src 'self' ...) blocks page-context fetch to our
@@ -173,6 +179,13 @@
   const iso = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? `${MON[+m[2] - 1]} ${+m[3]}` : '—'; };
   const money = v => (v == null || v === '') ? '—' : '$' + Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const loc = (name, city, st) => name ? name.replace(/^NA-US-[A-Z]{2}-/, '').replace(/^TI\d+-/, '') : `${city || '?'}, ${st || ''}`;
+  const stageTxt = r => {
+    const col = COLOR[r.stage] || COLOR.FLEET;
+    let lab = LABEL[r.stage] || (r.stage === 'FLEET?' ? 'Fleet?' : cap(r.stage || '?'));
+    if (r.superseded_by) lab = 'Re-tendered → ' + esc(r.superseded_by.replace(/^SHP\d+-/, ''));
+    const note = r.cancel_note ? ` <span class="tv-note" title="${esc(r.cancel_note)}">↩</span>` : '';
+    return `<span style="color:${col};font-weight:700">${lab}</span>` + note;
+  };
   const match = (r, q) => !q || [r.vin, r.shp, r.origin_city, r.dest_city, r.dest_name,
     r.origin_name, r.driver, r.origin_state, r.dest_state]
     .some(v => v && String(v).toLowerCase().includes(q));
@@ -202,6 +215,7 @@
   const COLS = [
     { k: 'shp', lab: 'Shipment #', w: 92, v: o => o.shp },
     { k: 'vin', lab: 'VIN', w: 150, v: o => o.vins },
+    { k: 'status', lab: 'Status', w: 92, v: o => Math.min(...o.rows.map(r => RANKS[r.stage] ?? -1)) },
     { k: 'tesla', lab: 'Tesla', w: 118, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
     { k: 'needby', lab: 'NeedByDate', w: 84, v: o => o.need_by || '~' },
     { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || '~' },
@@ -231,6 +245,7 @@
       const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}">${short(o.shp)}</td>` : '';
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         `<td>${esc(r.vin)}</td>` +
+        `<td>${stageTxt(r)}</td>` +
         `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
         `<td class="tv-num" title="${esc(r.need_by || '')}">${iso(r.need_by)}</td>` +
         `<td class="tv-dim" title="${esc(r.driver || '')}">${esc(r.driver || '—')}</td>` +
