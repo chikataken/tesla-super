@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.1.0
+// @version      0.2.0
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -25,12 +25,17 @@
  *     Dispatch Dashboard once per session and the column fills in.
  *   - Ledger data comes from shipments.wastake.com/api/tenders (CORS-allowed for this
  *     origin, X-Profile: didi = unfiltered). Refreshes every 60s while open.
+ *   - SHARED POOL: every Tesla status this instance fetches is POSTed back to
+ *     /api/tenders/tesla-status, so all other instances (and the /adv tab) see the
+ *     Tesla column too — one person's dashboard session feeds everyone. Pool entries
+ *     render with their age ("Delivered · 3h") when not fetched locally.
  */
 
 (function () {
   'use strict';
 
   const API = localStorage.getItem('tv_api') || 'https://shipments.wastake.com/api/tenders';
+  const API_STATUS = API.replace(/\/api\/tenders$/, '/api/tenders/tesla-status');
   const ENDPOINT = 'GetCarrierDispatchShipment';
   const LADDER = ['TENDERED', 'NEW', 'POSTED', 'DISPATCHED', 'PICKED UP', 'DELIVERED', 'INVOICED', 'PAID'];
   const ACTIVE = new Set(['TENDERED', 'NEW', 'POSTED', 'DISPATCHED', 'PICKED UP']);
@@ -85,11 +90,13 @@
     for (const ship of d.shipmentList) for (const stop of (ship.stops || []))
       for (const v of (stop.vins || [])) {
         if (!v || !v.vin) continue;
-        tesla.set(String(v.vin).toUpperCase(), {
+        const vin = String(v.vin).toUpperCase();
+        tesla.set(vin, {
           status: stop.stopStatusDescription || '',
           needBy: stop.needByDate || '', service: stop.serviceLevelDescription || '',
           shipment: stop.shipmentNumber || '',
         });
+        dirty.add(vin);
       }
   }
 
@@ -122,25 +129,43 @@
   // Tesla's page CSP (connect-src 'self' ...) blocks page-context fetch to our
   // server, so the ledger call goes through GM_xmlhttpRequest (extension-level,
   // CSP-immune — same pattern as the dispatch-dashboard SD calls).
-  function gmJson(url, headers) {
+  function gmJson(url, headers, method, body) {
+    method = method || 'GET';
     return new Promise((resolve, reject) => {
       const GM = (typeof GM_xmlhttpRequest !== 'undefined') ? GM_xmlhttpRequest
         : (typeof W.GM_xmlhttpRequest !== 'undefined') ? W.GM_xmlhttpRequest : null;
       if (GM) {
-        GM({ method: 'GET', url, headers, timeout: 25000,
+        GM({ method, url, headers, data: body || undefined, timeout: 25000,
           onload: r => { (r.status >= 200 && r.status < 300)
             ? resolve(JSON.parse(r.responseText))
             : reject(new Error('HTTP ' + r.status)); },
           onerror: () => reject(new Error('network error')),
           ontimeout: () => reject(new Error('timeout')) });
       } else {
-        fetch(url, { headers }).then(r => {
+        fetch(url, { method, headers, body }).then(r => {
           if (!r.ok) throw new Error('HTTP ' + r.status); return r.json();
         }).then(resolve, reject);
       }
     });
   }
   async function loadLedger() { DATA = await gmJson(API, { 'X-Profile': 'didi' }); }
+
+  // ---- shared Tesla-status pool ---------------------------------------------
+  // Everything ingested locally is pushed to the ledger so other instances (and
+  // the /adv tab) get the Tesla column without their own dashboard auth.
+  const dirty = new Set();
+  async function flushTesla() {
+    if (!dirty.size) return;
+    const batch = [...dirty].slice(0, 2000);
+    const statuses = batch.map(vin => { const t = tesla.get(vin) || {};
+      return { vin, status: t.status, shipment: t.shipment, needBy: t.needBy, service: t.service }; });
+    try {
+      await gmJson(API_STATUS, { 'Content-Type': 'application/json' }, 'POST',
+        JSON.stringify({ statuses }));
+      batch.forEach(v => dirty.delete(v));
+    } catch (e) { /* keep dirty; retried on the next flush tick */ }
+  }
+  setInterval(flushTesla, 20000);
 
   // ---- helpers (mirrors the /adv tender tab) ---------------------------------
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -156,13 +181,21 @@
     const note = r.cancel_note ? ` <span class="tv-note" title="${esc(r.cancel_note)}">↩</span>` : '';
     return `<span style="color:${col};font-weight:700">${lab}</span>` + note;
   };
-  const teslaTxt = vin => {
+  const tvAge = ep => { const h = (Date.now() / 1000 - ep) / 3600;
+    return h < 1 ? `${Math.max(1, Math.round(h * 60))}m` : h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`; };
+  const teslaCol = s => /deliver/i.test(s) ? '#0f766e' : /transit|pick/i.test(s) ? '#b45309'
+    : /cancel/i.test(s) ? '#d6453c' : /tender/i.test(s) ? '#64748b' : '#1b2330';
+  const teslaTxt = (vin, pooled) => {
     const t = tesla.get(vin);
-    if (!t) return `<span class="tv-dim">${apiAuth ? '—' : 'visit dashboard'}</span>`;
-    const s = t.status || '?';
-    const col = /deliver/i.test(s) ? '#0f766e' : /transit|pick/i.test(s) ? '#b45309'
-      : /cancel/i.test(s) ? '#d6453c' : /tender/i.test(s) ? '#64748b' : '#1b2330';
-    return `<span style="color:${col};font-weight:700" title="${esc(t.shipment)} · ${esc(t.service)} · need-by ${esc(t.needBy).slice(0, 10)}">${esc(s)}</span>`;
+    if (t) {
+      const s = t.status || '?';
+      return `<span style="color:${teslaCol(s)};font-weight:700" title="${esc(t.shipment)} · ${esc(t.service)} · need-by ${esc(t.needBy).slice(0, 10)}">${esc(s)}</span>`;
+    }
+    if (pooled && pooled.status) {
+      return `<span style="color:${teslaCol(pooled.status)};font-weight:700" title="${esc(pooled.shipment || '')} · from the shared pool">${esc(pooled.status)}</span>` +
+        ` <span class="tv-dim" style="font-size:10.5px">${tvAge(pooled.fetched_at)}</span>`;
+    }
+    return `<span class="tv-dim">${apiAuth ? '—' : 'visit dashboard'}</span>`;
   };
   const alertTxt = r => r.mismatch
     ? `<span class="tv-warn ${r.mismatch.level}" title="Address mismatch (${r.mismatch.level}) — tender: ${esc(r.mismatch.tender)} · SD: ${esc(r.mismatch.sd)}">⚠</span>` : '';
@@ -245,7 +278,7 @@
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         `<td>${esc(r.vin)}</td>` +
         `<td>${stageTxt(r)}</td>` +
-        `<td>${teslaTxt(r.vin)}</td>` +
+        `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
         `<td class="tv-num"${late ? ' style="color:#d6453c;font-weight:800"' : ''} title="${esc(r.need_by || '')}">${iso(r.need_by)}</td>` +
         `<td class="tv-dim" title="${esc(r.driver || r.carrier || '')}">${esc(r.driver || r.carrier || '—')}</td>` +
         `<td class="tv-num">${money(r.cost_usd)}</td>` +
@@ -262,7 +295,7 @@
       `<td class="tv-num" title="${esc(r.order_number || '')}">${esc(r.order_number || '?')}</td>` +
       `<td>${esc(r.vin)}</td>` +
       `<td><span style="font-weight:700">${cap(String(r.status || '?'))}</span></td>` +
-      `<td>${teslaTxt(r.vin)}</td>` +
+      `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
       `<td class="tv-num">—</td><td class="tv-dim">—</td><td class="tv-num">—</td>` +
       `<td class="tv-dim">${esc(r.pickup_city || '?')}, ${esc(r.pickup_state || '')}</td>` +
       `<td class="tv-dim">${esc(r.delivery_city || '?')}, ${esc(r.delivery_state || '')}</td>` +
