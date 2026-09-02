@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.2.1
+// @version      0.3.0
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -14,6 +14,9 @@
 // ==/UserScript==
 
 /*
+ * CLEAN BASELINE (2026-09-02 rules restart): raw tender rows + Tesla column only —
+ * all derived statuses/categories removed pending the new rule set.
+ *
  * WHAT IT DOES
  *   - A full-page overlay ("Tender View") inside the Tesla supplier portal showing the
  *     TFI tender ledger: every tender-move (SHP + VIN) with our SD-derived status
@@ -37,12 +40,6 @@
   const API = localStorage.getItem('tv_api') || 'https://shipments.wastake.com/api/tenders';
   const API_STATUS = API.replace(/\/api\/tenders$/, '/api/tenders/tesla-status');
   const ENDPOINT = 'GetCarrierDispatchShipment';
-  const LADDER = ['TENDERED', 'NEW', 'POSTED', 'DISPATCHED', 'PICKED UP', 'DELIVERED', 'INVOICED', 'PAID'];
-  const ACTIVE = new Set(['TENDERED', 'NEW', 'POSTED', 'DISPATCHED', 'PICKED UP']);
-  const COLOR = { TENDERED: '#64748b', NEW: '#64748b', POSTED: '#2563eb', DISPATCHED: '#64748b',
-    'PICKED UP': '#b45309', DELIVERED: '#0f766e', INVOICED: '#8b5cf6', PAID: '#166534',
-    FLEET: '#7c3aed', CANCELED: '#d6453c', ARCHIVED: '#9aa1ab', 'RE-TENDERED': '#9aa1ab' };
-  const LABEL = { DISPATCHED: 'Accepted' };
   const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const TODAY = (d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`)(new Date());
 
@@ -125,8 +122,7 @@
 
   // ---- state -----------------------------------------------------------------
   let DATA = null;                  // {rows, orphans}
-  let UI = { view: 'brokered', alerts: false, retendered: false, orphans: false,
-             q: '', sort: { key: 'origin', dir: 1 } };
+  let UI = { q: '', sort: { key: 'origin', dir: 1 } };
   let refreshTimer = null;
 
   // Tesla's page CSP (connect-src 'self' ...) blocks page-context fetch to our
@@ -177,62 +173,41 @@
   const iso = s => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s || ''); return m ? `${MON[+m[2] - 1]} ${+m[3]}` : '—'; };
   const money = v => (v == null || v === '') ? '—' : '$' + Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
   const loc = (name, city, st) => name ? name.replace(/^NA-US-[A-Z]{2}-/, '').replace(/^TI\d+-/, '') : `${city || '?'}, ${st || ''}`;
-  const stageTxt = r => {
-    const col = COLOR[r.stage] || COLOR.FLEET;
-    let lab = LABEL[r.stage] || (r.stage === 'FLEET?' ? 'Fleet?' : cap(r.stage));
-    if (r.superseded_by) lab = 'Re-tendered → ' + esc(r.superseded_by.replace(/^SHP\d+-/, ''));
-    const note = r.cancel_note ? ` <span class="tv-note" title="${esc(r.cancel_note)}">↩</span>` : '';
-    return `<span style="color:${col};font-weight:700">${lab}</span>` + note;
-  };
+  const match = (r, q) => !q || [r.vin, r.shp, r.origin_city, r.dest_city, r.dest_name,
+    r.origin_name, r.driver, r.origin_state, r.dest_state]
+    .some(v => v && String(v).toLowerCase().includes(q));
   const tvAge = ep => { const h = (Date.now() / 1000 - ep) / 3600;
     return h < 1 ? `${Math.max(1, Math.round(h * 60))}m` : h < 48 ? `${Math.round(h)}h` : `${Math.round(h / 24)}d`; };
-  const teslaCol = s => /deliver/i.test(s) ? '#0f766e' : /transit|pick/i.test(s) ? '#b45309'
-    : /cancel/i.test(s) ? '#d6453c' : /tender/i.test(s) ? '#64748b' : '#1b2330';
   const teslaTxt = (vin, pooled) => {
     const t = tesla.get(vin);
-    if (t) {
-      const s = t.status || '?';
-      return `<span style="color:${teslaCol(s)};font-weight:700" title="${esc(t.shipment)} · ${esc(t.service)} · need-by ${esc(t.needBy).slice(0, 10)}">${esc(s)}</span>`;
-    }
-    if (pooled && pooled.status) {
-      return `<span style="color:${teslaCol(pooled.status)};font-weight:700" title="${esc(pooled.shipment || '')} · from the shared pool">${esc(pooled.status)}</span>` +
+    if (t) return `<span style="font-weight:700" title="${esc(t.shipment)} · ${esc(t.service)}">${esc(t.status || '?')}</span>`;
+    if (pooled && pooled.status)
+      return `<span style="font-weight:700" title="${esc(pooled.shipment || '')} · shared pool">${esc(pooled.status)}</span>` +
         ` <span class="tv-dim" style="font-size:10.5px">${tvAge(pooled.fetched_at)}</span>`;
-    }
     return `<span class="tv-dim">${apiAuth ? '—' : 'visit dashboard'}</span>`;
   };
-  const alertTxt = r => r.mismatch
-    ? `<span class="tv-warn ${r.mismatch.level}" title="Address mismatch (${r.mismatch.level}) — tender: ${esc(r.mismatch.tender)} · SD: ${esc(r.mismatch.sd)}">⚠</span>` : '';
-  const match = (r, q) => !q || [r.vin, r.shp, r.origin_city, r.dest_city, r.dest_name, r.carrier,
-    r.origin_state, r.dest_state, r.order_number].some(v => v && String(v).toLowerCase().includes(q));
 
   function shipments(rows) {
     const by = {};
     rows.forEach(r => {
       const o = by[r.shp] || (by[r.shp] = { shp: r.shp, sent_at: r.sent_at, vins: 0, rows: [],
-        stages: {}, nAlerts: 0, cost: 0, origin: `${r.origin_state || '~'} ${r.origin_city || '~'}`,
-        dest: `${r.dest_state || '~'} ${r.dest_city || '~'}`, need_by: r.need_by, driver: r.driver, carrier: r.carrier });
-      o.vins++; o.rows.push(r); o.stages[r.stage] = 1;
-      if (r.mismatch) o.nAlerts++;
+        cost: 0, origin: `${r.origin_state || '~'} ${r.origin_city || '~'}`,
+        dest: `${r.dest_state || '~'} ${r.dest_city || '~'}`, need_by: r.need_by, driver: r.driver });
+      o.vins++; o.rows.push(r);
       o.cost += Number(r.cost_usd) || 0;
     });
-    return Object.values(by).map(o => {
-      const idxs = Object.keys(o.stages).filter(s => LADDER.includes(s)).map(s => LADDER.indexOf(s));
-      o.stageIdx = idxs.length ? Math.min(...idxs) : -1;
-      return o;
-    });
+    return Object.values(by);
   }
 
   const COLS = [
     { k: 'shp', lab: 'Shipment #', w: 92, v: o => o.shp },
     { k: 'vin', lab: 'VIN', w: 150, v: o => o.vins },
-    { k: 'status', lab: 'Status', w: 92, v: o => o.stageIdx },
-    { k: 'tesla', lab: 'Tesla', w: 110, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
+    { k: 'tesla', lab: 'Tesla', w: 118, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
     { k: 'needby', lab: 'NeedByDate', w: 84, v: o => o.need_by || '~' },
-    { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || o.carrier || '~' },
+    { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || '~' },
     { k: 'cost', lab: 'TotalCost', w: 78, v: o => o.cost },
     { k: 'origin', lab: 'Origin', w: 165, v: o => o.origin },
     { k: 'dest', lab: 'Destination', w: 165, v: o => o.dest },
-    { k: 'alert', lab: '⚠', w: 26, v: o => o.nAlerts },
   ];
 
   // ---- rendering -------------------------------------------------------------
@@ -240,36 +215,13 @@
     const root = document.getElementById('tv-body');
     if (!root || !DATA) return;
     const q = UI.q.toLowerCase();
-    const all = (DATA.rows || []).filter(r => match(r, q));
-    const isFleet = r => r.stage === 'FLEET' || r.stage === 'FLEET?';
-    const isDone = r => !isFleet(r) && ['DELIVERED', 'INVOICED', 'PAID', 'ARCHIVED'].includes(r.stage);
-    const isBrok = r => !isFleet(r) && !isDone(r);
-    const base = all.filter(r => UI.retendered || r.stage !== 'RE-TENDERED');
-    const inView = r => UI.view === 'fleet' ? isFleet(r) : UI.view === 'done' ? isDone(r) : isBrok(r);
-    let rows = base.filter(inView);
-    let ships = shipments(rows);
-    const nAlerts = ships.filter(o => o.nAlerts).length;
-    if (UI.alerts) { ships = ships.filter(o => o.nAlerts); }
-    const orph = (DATA.orphans || []).filter(r => match({ vin: r.vin, shp: r.order_number,
-      origin_city: r.pickup_city, origin_state: r.pickup_state,
-      dest_city: r.delivery_city, dest_state: r.delivery_state }, q));
-    const nSet = f => new Set(base.filter(f).map(r => r.shp)).size;
-    const chips = [
-      ['view:brokered', 'Brokered', nSet(isBrok), UI.view === 'brokered' && !UI.orphans],
-      ['view:fleet', 'Fleet', nSet(isFleet), UI.view === 'fleet' && !UI.orphans],
-      ['view:done', 'Delivered + Invoiced', nSet(isDone), UI.view === 'done' && !UI.orphans],
-      ['alerts', '⚠ Alerts', nAlerts, UI.alerts],
-      ['retendered', 'Re-tendered', all.filter(r => r.stage === 'RE-TENDERED').length, UI.retendered],
-      ['orphans', 'No tender', orph.length, UI.orphans],
-    ].map(([act, lab, n, on]) =>
-      `<button class="tv-chip${on ? ' on' : ''}" data-act="${act}">${lab}<span>${n}</span></button>`).join('');
-    document.getElementById('tv-chips').innerHTML = chips;
-    document.getElementById('tv-stats').textContent = UI.orphans
-      ? `${orph.length} SD orders with no Tesla tender`
-      : `${ships.length} ${UI.view} shipments · ${rows.length} VIN moves · window ${DATA.window_days || 21}d`;
-    if (UI.orphans) { root.innerHTML = orphanTable(orph); return; }
+    const rows = (DATA.rows || []).filter(r => match(r, q));
+    const ships = shipments(rows);
+    document.getElementById('tv-chips').innerHTML = '';
+    document.getElementById('tv-stats').textContent =
+      `${ships.length} shipments · ${rows.length} VINs · window ${DATA.window_days || 21}d`;
     if (!ships.length) { root.innerHTML = '<div class="tv-empty">No tenders match.</div>'; return; }
-    const col = COLS.find(c => c.k === UI.sort.key) || COLS[7];
+    const col = COLS.find(c => c.k === UI.sort.key) || COLS[6];
     ships.sort((a, b) => { const x = col.v(a), y = col.v(b);
       return (x < y ? -1 : x > y ? 1 : 0) * UI.sort.dir || b.sent_at - a.sent_at; });
     const colgroup = COLS.map(c => `<col style="width:${c.w}px">`).join('').replace(`width:165px`, 'width:auto');
@@ -277,34 +229,17 @@
       ? `<span class="tv-dir">${UI.sort.dir > 0 ? '▴' : '▾'}</span>` : ''}</th>`).join('');
     const body = ships.map(o => o.rows.map((r, i) => {
       const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}">${short(o.shp)}</td>` : '';
-      const late = r.need_by && r.need_by < TODAY && ACTIVE.has(r.stage);
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         `<td>${esc(r.vin)}</td>` +
-        `<td>${stageTxt(r)}</td>` +
         `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
-        `<td class="tv-num"${late ? ' style="color:#d6453c;font-weight:800"' : ''} title="${esc(r.need_by || '')}">${iso(r.need_by)}</td>` +
-        `<td class="tv-dim" title="${esc(r.driver || r.carrier || '')}">${esc(r.driver || r.carrier || '—')}</td>` +
+        `<td class="tv-num" title="${esc(r.need_by || '')}">${iso(r.need_by)}</td>` +
+        `<td class="tv-dim" title="${esc(r.driver || '')}">${esc(r.driver || '—')}</td>` +
         `<td class="tv-num">${money(r.cost_usd)}</td>` +
         `<td class="tv-dim" title="${esc(r.origin_name || '')}">${esc(loc(r.origin_name, r.origin_city, r.origin_state))}</td>` +
         `<td class="tv-dim" title="${esc(r.dest_name || '')}">${esc(loc(r.dest_name, r.dest_city, r.dest_state))}</td>` +
-        `<td class="tv-ctr">${alertTxt(r)}</td></tr>`;
+        `</tr>`;
     }).join('')).join('');
     root.innerHTML = `<table class="tv-xlt"><colgroup>${colgroup}</colgroup><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-  }
-
-  function orphanTable(orph) {
-    if (!orph.length) return '<div class="tv-empty">No orphan VINs.</div>';
-    const rows = orph.map(r => `<tr>` +
-      `<td class="tv-num" title="${esc(r.order_number || '')}">${esc(r.order_number || '?')}</td>` +
-      `<td>${esc(r.vin)}</td>` +
-      `<td><span style="font-weight:700">${cap(String(r.status || '?'))}</span></td>` +
-      `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
-      `<td class="tv-num">—</td><td class="tv-dim">—</td><td class="tv-num">—</td>` +
-      `<td class="tv-dim">${esc(r.pickup_city || '?')}, ${esc(r.pickup_state || '')}</td>` +
-      `<td class="tv-dim">${esc(r.delivery_city || '?')}, ${esc(r.delivery_state || '')}</td>` +
-      `<td></td></tr>`).join('');
-    return `<table class="tv-xlt"><thead><tr><th>SD Order</th><th>VIN</th><th>Status</th><th>Tesla</th>` +
-      `<th>NeedByDate</th><th>Driver</th><th>TotalCost</th><th>Origin</th><th>Destination</th><th>⚠</th></tr></thead><tbody>${rows}</tbody></table>`;
   }
 
   // ---- overlay chrome --------------------------------------------------------
@@ -391,10 +326,8 @@
     render();
     // Tesla's own statuses for the active + orphan VINs (needs auth piggybacked
     // from one Dispatch Dashboard visit this session)
-    const want = [...new Set([
-      ...(DATA.rows || []).filter(r => ACTIVE.has(r.stage)).map(r => r.vin),
-      ...(DATA.orphans || []).map(r => r.vin),
-    ])].filter(v => /^[A-HJ-NPR-Z0-9]{17}$/.test(v));
+    const want = [...new Set((DATA.rows || []).map(r => r.vin))]
+      .filter(v => /^[A-HJ-NPR-Z0-9]{17}$/.test(v));
     if (await fetchTeslaStatuses(want)) render();
   }
 
