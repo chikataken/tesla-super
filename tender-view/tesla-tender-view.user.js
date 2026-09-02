@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.5
+// @version      0.3.6
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -216,9 +216,9 @@
   }
 
   const COLS = [
-    { k: 'shp', lab: 'Shipment #', w: 120, v: o => o.number || o.shp },
-    { k: 'vin', lab: 'VIN', w: 150, v: o => o.vins },
-    { k: 'status', lab: 'Status', w: 92, v: o => Math.min(...o.rows.map(r => RANKS[r.stage] ?? -1)) },
+    { k: 'shp', lab: 'Shipment #', w: 140, v: o => o.number || o.shp },
+    { k: 'vin', lab: 'VIN', w: 170, v: o => o.vins },
+    { k: 'status', lab: 'Status', w: 200, v: o => Math.min(...o.rows.map(r => RANKS[r.stage] ?? -1)) },
     { k: 'tesla', lab: 'Tesla', w: 118, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
     { k: 'needby', lab: 'NeedByDate', w: 84, v: o => o.need_by || '~' },
     { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || '~' },
@@ -252,12 +252,14 @@
       const cell = o.number ? `${esc(o.number)}`
         : (o.rows[0].stage === 'FLEET' || o.rows[0].stage === 'FLEET?'
           ? tn : `<span class="tv-shp-t" title="no SD order — Tesla's shipment #">${tn}</span>`);
-      const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="Tesla: ${tn}">${cell}</td>` : '';
+      const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="${o.number ? `SD: ${esc(o.number)} · ` : ''}Tesla: ${tn}">${cell}</td>` : '';
       const tsuf = (r.shp || '').split('-').slice(1).join('-').toUpperCase();
       const off = r.order_number && tsuf && !String(r.order_number).toUpperCase().includes(tsuf);
-      const vinCell = off
+      const vinCell = (r.stage === 'RE-TENDERED'
+          ? `<span class="tv-vin-arr" title="re-tendered${r.superseded_by ? ' → ' + esc(r.superseded_by.replace(/^SHP\d+-/, '')) : ''}">→</span>` : '')
+        + (off
         ? `<span class="tv-vin-t" title="rode ${esc(r.order_number)} — Tesla tendered this VIN as ${esc(tsuf)}">${esc(r.vin)}</span>`
-        : esc(r.vin);
+        : esc(r.vin));
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         `<td>${vinCell}</td>` +
         `<td>${stageTxt(r)}</td>` +
@@ -309,6 +311,7 @@
     letter-spacing:.05em;padding:4px 9px;border-top:2px solid #b9c0cb}
   .tv-shp-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
   .tv-vin-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
+  .tv-vin-arr{color:#9aa1ab;font-weight:800;margin-right:6px}
   .tv-num{text-align:right;font-variant-numeric:tabular-nums}
   .tv-ctr{text-align:center}
   .tv-dim{color:#69707d}
