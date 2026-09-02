@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.8
+// @version      0.3.9
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -218,7 +218,7 @@
   const COLS = [
     { k: 'shp', lab: 'Shipment #', w: 140, v: o => o.number || o.shp },
     { k: 'vin', lab: 'VIN', w: 170, v: o => o.vins },
-    { k: 'status', lab: 'Status', w: 200, v: o => Math.min(...o.rows.map(r => RANKS[r.stage] ?? -1)) },
+    { k: 'status', lab: 'Status', w: 100, v: o => Math.min(...o.rows.map(r => RANKS[r.stage] ?? -1)) },
     { k: 'tesla', lab: 'Tesla', w: 118, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
     { k: 'needby', lab: 'NeedByDate', w: 84, v: o => o.need_by || '~' },
     { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || '~' },
