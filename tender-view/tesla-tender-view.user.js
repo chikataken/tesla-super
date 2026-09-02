@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.2.0
+// @version      0.2.1
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -111,7 +111,10 @@
         const res = await fetch(apiUrl, { method: 'POST',
           headers: { 'Authorization': apiAuth, 'Content-Type': 'application/json',
                      'Accept': 'application/json', 'x-selectedCarrierId': apiCarrier || '' },
-          body: JSON.stringify({ skip: 0, take: 5000, vins: part, carrierId: null }) });
+          body: JSON.stringify({ skip: 0, take: 5000, vins: part, carrierId: null,
+            // the API returns NOTHING without a created-date window
+            createdDateStart: new Date(Date.now() - 90 * 86400000).toISOString(),
+            createdDateEnd: new Date(Date.now() + 86400000).toISOString() }) });
         if (!res.ok) break;
         ingestTesla(await res.json());
       } catch (e) { break; }
