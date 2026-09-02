@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.7
+// @version      0.3.8
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -260,8 +260,10 @@
           ? tn : `<span class="tv-shp-t" title="no SD order — Tesla's shipment #">${tn}</span>`);
       const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="${o.number ? `SD: ${esc(o.number)} · ` : ''}Tesla: ${tn}">${cell}</td>` : '';
       const tsuf = (r.shp || '').split('-').slice(1).join('-').toUpperCase();
-      const off = r.order_number && tsuf && !String(r.order_number).toUpperCase().includes(tsuf);
       const from = (UI._retFrom || {})[r.shp + '|' + r.vin];
+      const ordU = String(r.order_number || '').toUpperCase();
+      const chainOk = ordU && (ordU.includes(tsuf) || (from || []).some(f => ordU.includes(String(f).toUpperCase())));
+      const off = r.order_number && tsuf && !chainOk;
       const vinCell = (from
           ? `<span class="tv-vin-arr" title="re-tendered from ${esc(from.join(', '))}">→</span>` : '')
         + (off
