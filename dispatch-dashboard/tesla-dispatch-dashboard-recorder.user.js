@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.21.3
+// @version      0.22.0
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, shows a SuperDispatch status bubble next to each shipment number (with a regular-fleet-style hover card), and provides Cleaner/Marker actions for pickups, ETAs, and Driver Needed shipments.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -15,6 +15,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      api.shipper.superdispatch.com
+// @connect      shipments.wastake.com
 // ==/UserScript==
 
 /*
@@ -28,7 +29,11 @@
  *     and a derived dispatcher (from the origin state). Accumulates across every pull you
  *     look at, keyed by VIN, persisted in Tampermonkey storage (survives reloads).
  *   - Shows a floating dev panel with everything captured (search + status filter, counts,
- *     copy/download JSON, clear). NOTHING is sent to any server.
+ *     copy/download JSON, clear). The panel's data itself stays local — the ONLY
+ *     thing sent anywhere: each live-captured VIN status is mirrored (fire-and-forget,
+ *     invisible, batched every 20s) to the TFI tender pool at shipments.wastake.com,
+ *     where the in-development master tender list reads it. Failures are swallowed
+ *     and retried next batch; nothing here can affect the dashboard features.
  *
  *   Tampermonkey menu: "Toggle recorder panel", "Clear recorded data".
  */
@@ -157,6 +162,7 @@
             seen: prev ? (prev.seen || 1) + 1 : 1,
           };
           if (!prev) added++;
+          try { poolDirty.add(String(v.vin).toUpperCase()); } catch (e) {}
         }
       }
     }
@@ -170,6 +176,35 @@
     scheduleSdBubbles();
     if (added) updateBadge();
   }
+
+  // ---- TFI tender-pool mirror (invisible; additive only) ---------------------
+  // Every VIN status captured live off the dashboard's own responses is batched to
+  // the shared tender pool. Fail-silent by design: errors re-queue the batch for
+  // the next tick and can never surface in the UI or interfere with any feature.
+  const POOL_URL = 'https://shipments.wastake.com/api/tenders/tesla-status';
+  const poolDirty = new Set();
+  function poolFlush() {
+    try {
+      if (!poolDirty.size || typeof GM_xmlhttpRequest !== 'function') return;
+      const batch = [...poolDirty].slice(0, 2000);
+      batch.forEach((v) => poolDirty.delete(v));
+      const statuses = batch.map((vin) => {
+        const e = store.vins[vin] || store.vins[Object.keys(store.vins).find((k) => k.toUpperCase() === vin)] ;
+        return e && { vin, status: e.status || '', shipment: e.shipment || '',
+                      needBy: e.needBy || '', service: e.service || '' };
+      }).filter(Boolean);
+      if (!statuses.length) return;
+      const requeue = () => { try { batch.forEach((v) => poolDirty.add(v)); } catch (e) {} };
+      GM_xmlhttpRequest({
+        method: 'POST', url: POOL_URL, timeout: 20000,
+        headers: { 'Content-Type': 'application/json' },
+        data: JSON.stringify({ statuses }),
+        onload: (r) => { if (!(r.status >= 200 && r.status < 300)) requeue(); },
+        onerror: requeue, ontimeout: requeue,
+      });
+    } catch (e) {}
+  }
+  setInterval(poolFlush, 20000);
 
   // Hook the PAGE's XHR (Tampermonkey shares the XHR prototype with the page, so this
   // catches Tesla's own requests). We only READ responses — we never open/send our own.
