@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.4
+// @version      0.3.5
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -253,8 +253,13 @@
         : (o.rows[0].stage === 'FLEET' || o.rows[0].stage === 'FLEET?'
           ? tn : `<span class="tv-shp-t" title="no SD order — Tesla's shipment #">${tn}</span>`);
       const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="Tesla: ${tn}">${cell}</td>` : '';
+      const tsuf = (r.shp || '').split('-').slice(1).join('-').toUpperCase();
+      const off = r.order_number && tsuf && !String(r.order_number).toUpperCase().includes(tsuf);
+      const vinCell = off
+        ? `<span class="tv-vin-t" title="rode ${esc(r.order_number)} — Tesla tendered this VIN as ${esc(tsuf)}">${esc(r.vin)}</span>`
+        : esc(r.vin);
       return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
-        `<td>${esc(r.vin)}</td>` +
+        `<td>${vinCell}</td>` +
         `<td>${stageTxt(r)}</td>` +
         `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
         `<td class="tv-num" title="${esc(r.need_by || '')}">${iso(r.need_by)}</td>` +
@@ -303,6 +308,7 @@
   .tv-xlt tr.tv-sec td{background:#eef1f5;color:#69707d;font-size:10.5px;font-weight:800;
     letter-spacing:.05em;padding:4px 9px;border-top:2px solid #b9c0cb}
   .tv-shp-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
+  .tv-vin-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
   .tv-num{text-align:right;font-variant-numeric:tabular-nums}
   .tv-ctr{text-align:center}
   .tv-dim{color:#69707d}
