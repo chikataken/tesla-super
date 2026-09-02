@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.3.6
+// @version      0.3.7
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -232,7 +232,13 @@
     const root = document.getElementById('tv-body');
     if (!root || !DATA) return;
     const q = UI.q.toLowerCase();
-    const rows = (DATA.rows || []).filter(r => match(r, q));
+    const all = (DATA.rows || []).filter(r => match(r, q));
+    const retFrom = {};
+    all.forEach(r => { if (r.stage === 'RE-TENDERED' && r.superseded_by) {
+      const k = r.superseded_by + '|' + r.vin;
+      (retFrom[k] = retFrom[k] || []).push((r.shp || '').replace(/^SHP\d+-/, '')); } });
+    const rows = all.filter(r => r.stage !== 'RE-TENDERED');
+    UI._retFrom = retFrom;
     const ships = shipments(rows);
     document.getElementById('tv-chips').innerHTML = '';
     document.getElementById('tv-stats').textContent =
@@ -255,8 +261,9 @@
       const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="${o.number ? `SD: ${esc(o.number)} · ` : ''}Tesla: ${tn}">${cell}</td>` : '';
       const tsuf = (r.shp || '').split('-').slice(1).join('-').toUpperCase();
       const off = r.order_number && tsuf && !String(r.order_number).toUpperCase().includes(tsuf);
-      const vinCell = (r.stage === 'RE-TENDERED'
-          ? `<span class="tv-vin-arr" title="re-tendered${r.superseded_by ? ' → ' + esc(r.superseded_by.replace(/^SHP\d+-/, '')) : ''}">→</span>` : '')
+      const from = (UI._retFrom || {})[r.shp + '|' + r.vin];
+      const vinCell = (from
+          ? `<span class="tv-vin-arr" title="re-tendered from ${esc(from.join(', '))}">→</span>` : '')
         + (off
         ? `<span class="tv-vin-t" title="rode ${esc(r.order_number)} — Tesla tendered this VIN as ${esc(tsuf)}">${esc(r.vin)}</span>`
         : esc(r.vin));
@@ -311,7 +318,7 @@
     letter-spacing:.05em;padding:4px 9px;border-top:2px solid #b9c0cb}
   .tv-shp-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
   .tv-vin-t{background:#fff4e5;color:#b45309;border-radius:4px;padding:1px 6px;font-weight:700}
-  .tv-vin-arr{color:#9aa1ab;font-weight:800;margin-right:6px}
+  .tv-vin-arr{color:#64748b;font-weight:900;font-size:14px;margin-right:6px}
   .tv-num{text-align:right;font-variant-numeric:tabular-nums}
   .tv-ctr{text-align:center}
   .tv-dim{color:#69707d}
