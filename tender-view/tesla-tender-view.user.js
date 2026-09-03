@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.5.1
+// @version      0.5.2
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -256,8 +256,8 @@
     const secRow = (lab, n) => `<tr class="tv-sec"><td colspan="${COLS.length}">${lab} · ${n} shipments</td></tr>`;
     const bodyOf = list => list.map(o => o.rows.map((r, i) => {
       const tn = short(o.shp);
-      const shpHl = !o.number && !(o.rows[0].stage === 'FLEET' || o.rows[0].stage === 'FLEET?');
-      const shared = i === 0 ? `<td class="tv-num${shpHl ? ' tv-cell-t' : ''}" rowspan="${o.rows.length}" title="${o.number ? `SD: ${esc(o.number)} · ` : ''}${shpHl ? 'no SD order — ' : ''}Tesla: ${tn}">${o.number ? esc(o.number) : tn}</td>` : '';
+      const noSd = !o.number && !(o.rows[0].stage === 'FLEET' || o.rows[0].stage === 'FLEET?');
+      const shared = i === 0 ? `<td class="tv-num" rowspan="${o.rows.length}" title="${o.number ? `SD: ${esc(o.number)} · ` : ''}${noSd ? 'no SD order — ' : ''}Tesla: ${tn}">${o.number ? esc(o.number) : (noSd ? '' : tn)}</td>` : '';
       const tsuf = (r.shp || '').split('-').slice(1).join('-').toUpperCase();
       const from = (UI._retFrom || {})[r.shp + '|' + r.vin];
       const ordU = String(r.order_number || '').toUpperCase();
