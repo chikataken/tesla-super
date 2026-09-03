@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.4.0
+// @version      0.5.0
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -39,6 +39,7 @@
 
   const API = localStorage.getItem('tv_api') || 'https://shipments.wastake.com/api/tenders';
   const API_STATUS = API.replace(/\/api\/tenders$/, '/api/tenders/tesla-status');
+  const API_JOURNEY = API.replace(/\/api\/tenders$/, '/api/tenders/journey');
   const ENDPOINT = 'GetCarrierDispatchShipment';
   const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const TODAY = (d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`)(new Date());
@@ -262,13 +263,17 @@
       const ordU = String(r.order_number || '').toUpperCase();
       const chainOk = ordU && (ordU.includes(tsuf) || (from || []).some(f => ordU.includes(String(f).toUpperCase())));
       const off = r.order_number && tsuf && !chainOk;
+      const posts = r.posts || [];
+      const pd = new Set(posts.map(x => x.dest));
+      const badge = posts.length > 1
+        ? `<span class="tv-posts${pd.size > 1 ? ' hedge' : ''}" title="${esc(posts.map(x => `${x.number} (${x.status}) → ${x.dest}`).join('\n'))}">⧉${posts.length}</span>` : '';
       const vinCell = (from
           ? `<span class="tv-vin-arr" title="re-tendered from ${esc(from.join(', '))}">→</span>` : '')
-        + esc(r.vin);
+        + esc(r.vin) + badge;
       const vinTd = off
         ? `<td class="tv-cell-t" title="rode ${esc(r.order_number)} — Tesla tendered this VIN as ${esc(tsuf)}">${vinCell}</td>`
         : `<td>${vinCell}</td>`;
-      return `<tr${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
+      return `<tr data-vin="${esc(r.vin)}"${i === 0 ? ' class="tv-grp"' : ''}>` + shared +
         vinTd +
         `<td>${stageTxt(r)}</td>` +
         `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
@@ -320,6 +325,20 @@
   .tv-xlt td.tv-cell-t{background:#fff4e5;color:#b45309;font-weight:700}
   .tv-xlt tbody tr:hover td.tv-cell-t{background:#ffe9cc}
   .tv-vin-arr{color:#64748b;font-weight:900;font-size:14px;margin-right:6px}
+  .tv-posts{margin-left:6px;background:#e8f0fe;color:#2563eb;border-radius:4px;
+    padding:0 5px;font-size:10.5px;font-weight:800;cursor:help}
+  .tv-posts.hedge{background:#fdecea;color:#d6453c}
+  .tv-xlt tbody tr[data-vin]{cursor:pointer}
+  tr.tv-drawer td{background:#f8fafc;padding:12px 16px;cursor:default}
+  .tv-j{display:flex;gap:26px;flex-wrap:wrap;font-size:12px;align-items:flex-start}
+  .tv-j h4{margin:0 0 5px;font-size:10.5px;letter-spacing:.05em;color:#69707d;
+    text-transform:uppercase;font-weight:800}
+  .tv-j .sec{min-width:250px;max-width:430px;flex:1}
+  .tv-j .ln{padding:2.5px 0;border-bottom:1px solid rgba(0,0,0,.05);white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .tv-j .dim{color:#69707d}
+  .tv-j .live{color:#2563eb;font-weight:700} .tv-j .done{color:#0f766e;font-weight:700}
+  .tv-j .dead{color:#9aa1ab}
   .tv-num{text-align:right;font-variant-numeric:tabular-nums}
   .tv-ctr{text-align:center}
   .tv-dim{color:#69707d}
@@ -327,6 +346,47 @@
   .tv-warn{cursor:help} .tv-warn.state{color:#d6453c} .tv-warn.city{color:#b9791a}
   .tv-note{cursor:help;color:#b9791a}
   .tv-empty{padding:40px;color:#69707d;text-align:center}`;
+
+  function closeDrawer() {
+    document.querySelectorAll('tr.tv-drawer').forEach(e => e.remove());
+    UI._openVin = null;
+  }
+  async function openDrawer(tr, vin) {
+    if (UI._openVin === vin) { closeDrawer(); return; }
+    closeDrawer(); UI._openVin = vin;
+    let last = tr;
+    while (last.nextElementSibling && !last.nextElementSibling.querySelector('td[rowspan]')
+           && !last.nextElementSibling.classList.contains('tv-sec')
+           && last.nextElementSibling.hasAttribute('data-vin')) last = last.nextElementSibling;
+    const dr = document.createElement('tr'); dr.className = 'tv-drawer';
+    dr.innerHTML = `<td colspan="9"><span class="dim">Loading journey for ${esc(vin)}…</span></td>`;
+    last.after(dr);
+    let j;
+    try { j = await gmJson(API_JOURNEY + '?vin=' + encodeURIComponent(vin)); }
+    catch (e) { dr.firstChild.innerHTML = 'Could not load the journey.'; return; }
+    if (UI._openVin !== vin) return;
+    const day = ep => { const d = new Date(ep * 1000); return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); };
+    const LIVE = new Set(['new', 'posted', 'accepted', 'pending']);
+    const tenders = (j.tenders || []).map(t =>
+      `<div class="ln"><b>${day(t.sent_at)}</b> ${short(t.shp)} · ${esc(t.origin)} → ${esc(t.dest)}` +
+      ` · $${Math.round(t.cost_usd || 0)} · need-by ${iso(t.need_by)}` +
+      `${t.cancel_note ? ` <span class="tv-note" title="${esc(t.cancel_note)}">↩</span>` : ''}</div>`).join('') || '<div class="ln dim">none</div>';
+    const orders = (j.orders || []).map(o => {
+      const cls = (o.number || '').toLowerCase().includes('(dup') ? 'dead' : LIVE.has(o.status) ? 'live' : 'done';
+      return `<div class="ln"><b>${esc((o.created_at || '').slice(5, 10))}</b> ${esc(o.number)} ` +
+        `<span class="${cls}">${esc(o.status)}</span> · ${esc(o.pickup_city || '?')} → ${esc(o.delivery_city || '?')}, ${esc(o.delivery_state || '')}` +
+        `${o.delivery_terminal ? ` <span class="dim">(${esc(o.delivery_terminal)})</span>` : ''}</div>`;
+    }).join('') || '<div class="ln dim">never on SD</div>';
+    const KEEP = new Set(['accepted', 'picked_up', 'delivered', 'offer_cancel', 'req_cancel', 'declined']);
+    const emails = (j.emails || []).filter(e => KEEP.has(e.event_type)).slice(0, 8).map(e =>
+      `<div class="ln"><b>${day(e.sent_at)}</b> ${esc(e.event_type)} · ${esc(e.order_id || '')} · ${esc(e.carrier || '')}` +
+      `${e.reason ? ` <span class="dim">— ${esc(e.reason)}</span>` : ''}</div>`).join('') || '<div class="ln dim">none</div>';
+    const teslaLn = j.tesla ? `${esc(j.tesla.status)} <span class="dim">(${esc(j.tesla.shipment || '')} · ${tvAge(j.tesla.fetched_at)} ago)</span>` : '<span class="dim">unknown</span>';
+    dr.firstChild.innerHTML = `<div class="tv-j">` +
+      `<div class="sec"><h4>Tesla tenders · ${esc(vin)}</h4>${tenders}<h4 style="margin-top:8px">Tesla portal says</h4><div class="ln">${teslaLn}</div></div>` +
+      `<div class="sec"><h4>SD orders (${(j.orders || []).length})</h4>${orders}</div>` +
+      `<div class="sec"><h4>Carrier activity</h4>${emails}</div></div>`;
+  }
 
   function openPage() {
     if (document.getElementById('tv-page')) return;
@@ -343,6 +403,10 @@
     page.querySelector('#tv-x').onclick = closePage;
     page.querySelector('#tv-q').oninput = e => { UI.q = e.target.value; render(); };
     page.addEventListener('click', e => {
+      if (!e.target.closest('tr.tv-drawer')) {
+        const vinRow = e.target.closest('tr[data-vin]');
+        if (vinRow) { openDrawer(vinRow, vinRow.getAttribute('data-vin')); return; }
+      }
       const chip = e.target.closest('.tv-chip');
       if (chip) {
         const act = chip.dataset.act;
