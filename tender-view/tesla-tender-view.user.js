@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.5.3
+// @version      0.6.0
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -205,12 +205,13 @@
     const by = {};
     rows.forEach(r => {
       const key = r.order_number || ('T:' + r.shp);
-      const o = by[key] || (by[key] = { key, number: r.order_number || null, shp: r.shp,
+      const o = by[key] || (by[key] = { key, number: r.order_number || null, shp: r.shp, sd_price: null,
         sent_at: r.sent_at, vins: 0, rows: [],
         cost: 0, origin: `${r.origin_state || '~'} ${r.origin_city || '~'}`,
         dest: `${r.dest_state || '~'} ${r.dest_city || '~'}`, need_by: r.need_by, driver: r.driver });
       o.vins++; o.rows.push(r);
       o.cost += Number(r.cost_usd) || 0;
+      if (r.sd_price != null) o.sd_price = r.sd_price;
       if (r.sent_at > o.sent_at) o.sent_at = r.sent_at;
     });
     return Object.values(by);
@@ -223,6 +224,7 @@
     { k: 'tesla', lab: 'Tesla', w: 118, v: o => (tesla.get(o.rows[0].vin) || {}).status || '~' },
     { k: 'needby', lab: 'NeedByDate', w: 84, v: o => o.need_by || '~' },
     { k: 'driver', lab: 'Driver', w: 140, v: o => o.driver || '~' },
+    { k: 'sdcost', lab: 'SD Cost', w: 118, v: o => o.sd_price == null ? -1e9 : (o.cost - o.sd_price) },
     { k: 'cost', lab: 'TotalCost', w: 78, v: o => o.cost },
     { k: 'origin', lab: 'Origin', w: 165, v: o => o.origin },
     { k: 'dest', lab: 'Destination', w: 0, v: o => o.dest },
@@ -275,6 +277,15 @@
       const vinCell = (from
           ? `<span class="tv-vin-arr" title="re-tendered from ${esc(from.join(', '))}">→</span>` : '')
         + esc(r.vin) + badge;
+      let sdTd = '';
+      if (i === 0) {
+        if (o.sd_price == null) sdTd = `<td class="tv-num" rowspan="${o.rows.length}">—</td>`;
+        else {
+          const m = Math.round(o.cost - o.sd_price);
+          const mspan = ` <span class="${m >= 0 ? 'tv-mar-p' : 'tv-mar-n'}">(${m >= 0 ? '+' : '−'}$${Math.abs(m).toLocaleString()})</span>`;
+          sdTd = `<td class="tv-num" rowspan="${o.rows.length}" title="SD carrier price $${Math.round(o.sd_price).toLocaleString()} · Tesla total $${Math.round(o.cost).toLocaleString()}">$${Math.round(o.sd_price).toLocaleString()}${mspan}</td>`;
+        }
+      }
       const vinTd = off
         ? `<td class="tv-cell-t" title="rode ${esc(r.order_number)} — Tesla tendered this VIN as ${esc(tsuf)}">${vinCell}</td>`
         : `<td>${vinCell}</td>`;
@@ -284,6 +295,7 @@
         `<td>${teslaTxt(r.vin, r.tesla)}</td>` +
         `<td class="tv-num" title="${esc(r.need_by || '')}">${iso(r.need_by)}</td>` +
         `<td class="tv-dim" title="${esc(r.driver || '')}">${esc(r.driver || '—')}</td>` +
+        sdTd +
         `<td class="tv-num">${money(r.cost_usd)}</td>` +
         `<td class="tv-dim" title="${esc(r.origin_name || '')}">${esc(loc(r.origin_name, r.origin_city, r.origin_state))}</td>` +
         `<td class="tv-dim" title="${esc(r.dest_name || '')}">${esc(loc(r.dest_name, r.dest_city, r.dest_state))}</td>` +
@@ -330,6 +342,8 @@
   .tv-xlt td.tv-cell-t{background:#fff4e5;color:#b45309;font-weight:700}
   .tv-xlt tbody tr:hover td.tv-cell-t{background:#ffe9cc}
   .tv-vin-arr{color:#64748b;font-weight:900;font-size:14px;margin-right:6px}
+  .tv-mar-p{color:#15803d;font-weight:800}
+  .tv-mar-n{color:#d6453c;font-weight:800}
   .tv-posts{margin-left:6px;background:#e8f0fe;color:#2563eb;border-radius:4px;
     padding:0 5px;font-size:10.5px;font-weight:800;cursor:help}
   .tv-posts.hedge{background:#fdecea;color:#d6453c}
