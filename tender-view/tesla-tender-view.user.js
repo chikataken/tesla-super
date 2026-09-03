@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.5.2
+// @version      0.5.3
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -233,14 +233,19 @@
     const root = document.getElementById('tv-body');
     if (!root || !DATA) return;
     const q = UI.q.toLowerCase();
-    const all = (DATA.rows || []).filter(r => match(r, q));
+    const every = (DATA.rows || []);
     const retFrom = {};
-    all.forEach(r => { if (r.stage === 'RE-TENDERED' && r.superseded_by) {
+    every.forEach(r => { if (r.stage === 'RE-TENDERED' && r.superseded_by) {
       const k = r.superseded_by + '|' + r.vin;
       (retFrom[k] = retFrom[k] || []).push((r.shp || '').replace(/^SHP\d+-/, '')); } });
-    const rows = all.filter(r => r.stage !== 'RE-TENDERED');
     UI._retFrom = retFrom;
-    const ships = shipments(rows);
+    let ships = shipments(every.filter(r => r.stage !== 'RE-TENDERED'));
+    if (q) {
+      ships = ships.filter(o => o.rows.some(r => match(r, q)));
+      ships.forEach(o => { o.rows = [...o.rows.filter(r => match(r, q)),
+                                     ...o.rows.filter(r => !match(r, q))]; });
+    }
+    const rows = { length: ships.reduce((a, o) => a + o.rows.length, 0) };
     document.getElementById('tv-chips').innerHTML = '';
     document.getElementById('tv-stats').textContent =
       `${ships.length} shipments · ${rows.length} VINs · window ${DATA.window_days || 21}d`;
