@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Shipment Planner Helper
 // @namespace    wastake.shipment-planner
-// @version      1.1.0
+// @version      1.2.0
 // @description  Bidboard-style split panel for Tesla's Shipment Planner, SPLICED INTO the page — replaces Tesla's planner board in-place. Left: every route + its shipments (from the API). Right: focused bidding cards with a recommended-ETA picker and one price box per shipment. LIVE: pressing Enter to finish a card PUTs UpsertBid for every typed shipment. REVIEW/CONFIRMED/REJECTED tabs show those boards read-only. EU shipments are hidden everywhere. Every submitted bid is recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
@@ -200,18 +200,18 @@
   }
 
   // --- Pickup + recommended ETA (bidboard logic, verbatim) --------------------
-  // Pickup DATE = today + 3 CALENDAR days, rolled forward to Monday when that lands on a weekend
+  // Pickup DATE: Fri/Sat/Sun bids -> next Wednesday; otherwise today + 3 CALENDAR days, rolled forward to Monday when that lands on a weekend
   // (Wed/Thu/Fri all bid for Monday; Tue bids for Friday), 16:00 local.
   const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
-  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + 3); while (isWeekend(d)) d.setDate(d.getDate() + 1); return d; }
+  function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); const wd = d.getDay(); if (wd === 5 || wd === 6 || wd === 0) { d.setDate(d.getDate() + ((3 - wd + 7) % 7 || 7)); return d; } d.setDate(d.getDate() + 3); while (isWeekend(d)) d.setDate(d.getDate() + 1); return d; }   // Fri/Sat/Sun bid -> next Wednesday; else today + 3 calendar days, rolled to Monday if weekend
   // The planner wants local "YYYY-MM-DD HH:mm:ss" strings (findings.md), not bidboard's 16:00Z ISO.
   const local16 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 16:00:00`;
   // transitDays scales with origin->destination distance (US state centroids):
-  // <500mi:4  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 4).
+  // <500mi:5  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 4).
   const STC = {AL:[32.8,-86.8],AZ:[34.3,-111.7],AR:[34.9,-92.4],CA:[37.2,-119.3],CO:[39.0,-105.5],CT:[41.6,-72.7],DE:[39.0,-75.5],FL:[28.6,-82.4],GA:[32.6,-83.4],ID:[44.2,-114.5],IL:[40.0,-89.2],IN:[39.9,-86.3],IA:[42.0,-93.5],KS:[38.5,-98.4],KY:[37.5,-85.3],LA:[31.0,-92.0],ME:[45.4,-69.2],MD:[39.0,-76.8],MA:[42.3,-71.8],MI:[44.3,-85.4],MN:[46.3,-94.3],MS:[32.7,-89.7],MO:[38.4,-92.5],MT:[47.0,-109.6],NE:[41.5,-99.8],NV:[39.3,-116.6],NH:[43.7,-71.6],NJ:[40.2,-74.7],NM:[34.4,-106.1],NY:[42.9,-75.5],NC:[35.6,-79.4],ND:[47.5,-100.3],OH:[40.3,-82.8],OK:[35.6,-97.5],OR:[43.9,-120.6],PA:[40.9,-77.8],RI:[41.7,-71.6],SC:[33.9,-80.9],SD:[44.4,-100.2],TN:[35.9,-86.4],TX:[31.5,-99.3],UT:[39.3,-111.7],VT:[44.1,-72.7],VA:[37.5,-78.9],WA:[47.4,-120.5],WV:[38.6,-80.6],WI:[44.6,-89.9],WY:[43.0,-107.6]};
   function milesBetween(a, b) { if (!a || !b) return null; const R = 3959, dLat = (b[0]-a[0])*Math.PI/180, dLon = (b[1]-a[1])*Math.PI/180, la1 = a[0]*Math.PI/180, la2 = b[0]*Math.PI/180; const h = Math.sin(dLat/2)**2 + Math.cos(la1)*Math.cos(la2)*Math.sin(dLon/2)**2; return 2*R*Math.asin(Math.sqrt(h)); }
   const routeMiles = (g) => milesBetween(STC[stOf(g.origin && g.origin.name)], STC[stOf(g.destination && g.destination.name)]);
-  function transitDays(g) { const d = routeMiles(g); if (d == null || d < 500) return 4; if (d < 1000) return 9; if (d < 2000) return 11; return 12; }
+  function transitDays(g) { const d = routeMiles(g); if (d == null || d < 500) return 5; if (d < 1000) return 9; if (d < 2000) return 11; return 12; }
   function needByEta(g) { const ds = (g.shipments || []).map((s) => s.needByDate && new Date(s.needByDate)).filter((d) => d && !isNaN(d)); if (!ds.length) return null; const t = new Date(Math.min(...ds)); t.setHours(0, 0, 0, 0); return t; }
   // ETA = pickup + transitDays CALENDAR days (may land on a weekend). State unparseable (service
   // centers, street addresses): recommend Tesla's earliest need-by, floored at the pickup date.
