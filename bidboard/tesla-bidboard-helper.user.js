@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      2.3.0
+// @version      2.3.1
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card. Every submitted bid is also recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -106,9 +106,7 @@
     return legKey(a).localeCompare(legKey(b));
   }
   function needByLabel(bids) { const ds = [...new Set(bids.map((b) => b.needByDate).filter(Boolean))].map((t) => new Date(t)).filter((d) => !isNaN(d)).sort((a, b) => a - b); if (!ds.length) return '—'; const a = fmtDate(ds[0]), b = fmtDate(ds[ds.length - 1]); return a === b ? a : `${a} – ${b}`; }
-  const hasCounter = (bids) => bids.some((b) => b.carrierCounter && b.carrierCounter.bidAmount != null);
   function centerInPane(pane, el, smooth) { if (!pane || !el) return; const pr = pane.getBoundingClientRect(), er = el.getBoundingClientRect(); const top = pane.scrollTop + (er.top - pr.top) - (pane.clientHeight / 2 - el.clientHeight / 2); pane.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' }); }
-  const existingCounter = (subset) => { const b = subset.find((x) => x.carrierCounter && x.carrierCounter.bidAmount != null); return b ? b.carrierCounter.bidAmount : null; };
   // Most common existing counter price across the subset's VINs (for the faded placeholder).
   function existingMajority(subset) { const c = {}; let best = null, bn = 0; for (const b of subset) { const a = b.carrierCounter && b.carrierCounter.bidAmount; if (a == null) continue; c[a] = (c[a] || 0) + 1; if (c[a] > bn) { bn = c[a]; best = a; } } return best; }
   // A box is "done" (skipped by Enter) only when EVERY VIN already has a counter; partials are not skipped.

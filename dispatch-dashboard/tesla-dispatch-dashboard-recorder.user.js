@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.22.1
+// @version      0.22.2
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, shows a SuperDispatch status bubble next to each shipment number (with a regular-fleet-style hover card), and provides Cleaner/Marker actions for pickups, ETAs, and Driver Needed shipments.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -60,25 +60,6 @@
   };
   const STATE_DISPATCHER = {};
   for (const name in DISPATCHER_STATES) for (const st of DISPATCHER_STATES[name]) STATE_DISPATCHER[st] = name;
-
-  // Status pill colors.
-  const STATUS_COLOR = {
-    'Tendered':       { bg: '#fff4e5', fg: '#8a5000', bd: '#f2c98a' },
-    'Transit':        { bg: '#e8f1ff', fg: '#0b4aa2', bd: '#a9c8f5' },
-    'In Transit':     { bg: '#e8f1ff', fg: '#0b4aa2', bd: '#a9c8f5' },
-    'At Destination': { bg: '#e6f7f4', fg: '#0a6b5e', bd: '#98d9cf' },
-    'Delivered':      { bg: '#e7f6ea', fg: '#0a7d33', bd: '#9bd6ac' },
-  };
-  // Alert id -> label, from the portal's own getdispatchalertsbycarrier definitions endpoint.
-  const ALERT_LABELS = {
-    1: 'Pickup Date Late',
-    2: 'Driver Needed',
-    3: 'Late ETA',
-    4: 'Incorrect Driver ETA',
-    5: 'No Action Needed',
-    6: 'ETA Today',
-    7: 'Pickup Date Today',
-  };
 
   // ---- store -----------------------------------------------------------------
   // { vins: { [vin]: record }, pulls: n, lastAt: ms, lastTotalCount: n }

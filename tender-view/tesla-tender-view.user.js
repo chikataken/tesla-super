@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Tender View — Ledger Overlay
 // @namespace    wastake.tenderview
-// @version      0.6.0
+// @version      0.6.1
 // @description  Adds a "Tender View" page to the Tesla supplier portal: the TFI tender ledger (shipments.wastake.com/api/tenders) rendered as an excel-style grid — one row per VIN grouped by shipment, our live SD-derived status, plus a column with Tesla's OWN stop status pulled through the Dispatch Dashboard 2.0 API (auth piggybacked off the page's own calls; opens with Alt+T or the floating button).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/tender-view/tesla-tender-view.user.js
@@ -28,21 +28,16 @@
  *     Dispatch Dashboard once per session and the column fills in.
  *   - Ledger data comes from shipments.wastake.com/api/tenders (CORS-allowed for this
  *     origin, X-Profile: didi = unfiltered). Refreshes every 60s while open.
- *   - SHARED POOL: every Tesla status this instance fetches is POSTed back to
- *     /api/tenders/tesla-status, so all other instances (and the /adv tab) see the
- *     Tesla column too — one person's dashboard session feeds everyone. Pool entries
- *     render with their age ("Delivered · 3h") when not fetched locally.
+ *   - Tesla statuses stay local to this tab: the shared /api/tenders/tesla-status pool
+ *     was removed server-side on 2026-09-11 (0.6.1 stops posting to it).
  */
 
 (function () {
   'use strict';
 
   const API = localStorage.getItem('tv_api') || 'https://shipments.wastake.com/api/tenders';
-  const API_STATUS = API.replace(/\/api\/tenders$/, '/api/tenders/tesla-status');
-  const API_JOURNEY = API.replace(/\/api\/tenders$/, '/api/tenders/journey');
   const ENDPOINT = 'GetCarrierDispatchShipment';
   const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  const TODAY = (d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`)(new Date());
 
   // ---- Tesla API piggyback ---------------------------------------------------
   // Same pattern as the dispatch-dashboard script: capture the bearer + endpoint off
@@ -94,7 +89,6 @@
           needBy: stop.needByDate || '', service: stop.serviceLevelDescription || '',
           shipment: stop.shipmentNumber || '',
         });
-        dirty.add(vin);
       }
   }
 
@@ -155,23 +149,6 @@
     });
   }
   async function loadLedger() { DATA = await gmJson(API, { 'X-Profile': 'didi' }); }
-
-  // ---- shared Tesla-status pool ---------------------------------------------
-  // Everything ingested locally is pushed to the ledger so other instances (and
-  // the /adv tab) get the Tesla column without their own dashboard auth.
-  const dirty = new Set();
-  async function flushTesla() {
-    if (!dirty.size) return;
-    const batch = [...dirty].slice(0, 2000);
-    const statuses = batch.map(vin => { const t = tesla.get(vin) || {};
-      return { vin, status: t.status, shipment: t.shipment, needBy: t.needBy, service: t.service }; });
-    try {
-      await gmJson(API_STATUS, { 'Content-Type': 'application/json' }, 'POST',
-        JSON.stringify({ statuses }));
-      batch.forEach(v => dirty.delete(v));
-    } catch (e) { /* keep dirty; retried on the next flush tick */ }
-  }
-  setInterval(flushTesla, 20000);
 
   // ---- helpers (mirrors the /adv tender tab) ---------------------------------
   const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
