@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.23.2
+// @version      0.24.0
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, shows a SuperDispatch status bubble next to each shipment number (with a regular-fleet-style hover card), and provides Cleaner/Marker actions for pickups, ETAs, and Driver Needed shipments.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
