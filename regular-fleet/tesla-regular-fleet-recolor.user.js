@@ -51,6 +51,15 @@
  *   pickup->delivery route, the hovered VIN's vehicle ("+N more" for others on the order), and the
  *   PER-UNIT CARRIER COST (order price divided by the number of VINs, rounded to a whole dollar).
  *   Over-long venue names are capped. Read from the cache -> instant, no API call on hover.
+ *
+ * ASSUMPTIONS (inferred from the sibling tools; adjust the constants below if off): SD auth is
+ *   OAuth client-credentials; the SD delivery date is order.delivery.completed_at
+ *   (DELIVERY_WINDOW_DAYS = ±3); YELLOW_STATUSES = picked_up/accepted/pending; the fleet response
+ *   fields are vin + deliveryDate (+ shipmentNumber) and the VIN DOM cell is .cdk-column-FullVin.
+ *
+ * PUBLISHING: clients install/update from the PUBLIC repo chikataken/tesla-super (the
+ * @updateURL above) and only pick up a change when @version increases — bump it, then run
+ * ./publish_userscripts.sh at the repo root (copies the six scripts into that repo and pushes).
  */
 
 (function () {

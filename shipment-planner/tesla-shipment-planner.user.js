@@ -14,7 +14,23 @@
 /*
  * This is the bidboard helper (bidboard/tesla-bidboard-helper.user.js) re-targeted at the Shipment
  * Planner, where Tesla is migrating the bid board: the bid unit is now a whole SHIPMENT (a
- * multi-VIN load priced once), not a VIN. See shipment-planner/findings.md for the recon.
+ * multi-VIN load priced once), not a VIN. Recon (2026-08-05, page …/logistics/fv-shipment-planner/review):
+ *   READ  POST …/api/v1/TMS/GetShipmentPlannerReviewDashboard {selectedTab, activeStatusId, carrierId:-1,
+ *         readyDateFrom, readyDateTo, reviewStatusIds:[…]} -> {data:[shipment…], total (meaningless — use
+ *         data.length)}. Tabs: Review Needed 0/20, Available To Bid 1/21 (the only bidding surface),
+ *         Confirmed 2/22, Rejected 3/23. Shipment = {shipmentId, shipmentNumber "SHP…", originLocation/
+ *         destinationLocation {locationId, locationName, city, state, country, zip…}, readyDate/needByDate
+ *         (local, no Z), totalWeight kg, noOfVins, modelCount {"model Y":2,"cybertruck":1}, bid:null |
+ *         {bidStatus "0"=placed 1=accepted 2=rejected 3=closed 5=cancelled, bidAmount, currencyCode,
+ *         fvShipmentCarrierBidId, readyByDate, neededByDate}}. NO VINs anywhere (ShipmentDetail/Packages/
+ *         Property/GetBidBoardShipmentIssues all empty or 500 for this carrier).
+ *   WRITE PUT …/api/v1/TMS/UpsertBid (verified live) {bidAmount (number), fvShipmentCarrierBidId null=create |
+ *         current id=edit/cancel, shipmentId, originLocationId, destinationLocationId, carrierId:"378" (string),
+ *         shipmentNumber, currencyCode:"USD", bidStatus 0=place 5=cancel, neededByDate/readyByDate
+ *         "YYYY-MM-DD HH:mm:ss" local} -> {data:true, success:true, message:"Successfully Upsert Bid"}.
+ *         EVERY upsert mints a NEW bid id and the response does not return it — re-read the dashboard.
+ *   Also: POST /TMS/bulkupdatecarriershipmentreview (Confirm/Reject: ReviewStatus 1/2), GET
+ *         /TMS/GetShipmentRejectReasons, GET /BidBoard/currencies.
  *
  * LIVE BIDDING — typing a price and pressing Enter to leave a card PUTs /TMS/UpsertBid per shipment.
  *   Left half : route list (origin -> destination), each expanded with its shipments / models / my bid.
@@ -30,7 +46,7 @@
  *   EU        : shipments touching an EU location are hidden everywhere (origin/destination name
  *               starts "EU" or a location's country is outside NA).
  *
- * Differences from bidboard forced by the new API (findings.md):
+ * Differences from bidboard forced by the new API:
  *   - One dashboard POST returns EVERYTHING (no skip/take paging). Only readyDateFrom/To filter
  *     server-side; we request today ± READY_DATE_DAYS.
  *   - One write verb: PUT /TMS/UpsertBid covers create AND edit (fvShipmentCarrierBidId null vs
@@ -41,6 +57,10 @@
  *   - Dates go as local "YYYY-MM-DD HH:mm:ss" strings, not 16:00Z ISO.
  *   - No VINs anywhere: classification is by modelCount (cybertruck / model 3|S|X|Y). The old
  *     CAB/YL VIN-prefix splits are gone until a shipment-creator join exists.
+ *
+ * PUBLISHING: clients install/update from the PUBLIC repo chikataken/tesla-super (the
+ * @updateURL above) and only pick up a change when @version increases — bump it, then run
+ * ./publish_userscripts.sh at the repo root (copies the six scripts into that repo and pushes).
  */
 
 (function () {
@@ -204,7 +224,7 @@
   // (Wed/Thu/Fri all bid for Monday; Tue bids for Friday), 16:00 local.
   const isWeekend = (d) => d.getDay() === 0 || d.getDay() === 6;
   function pickupDate() { const d = new Date(); d.setHours(0, 0, 0, 0); const wd = d.getDay(); if (wd === 5 || wd === 6 || wd === 0) { d.setDate(d.getDate() + ((3 - wd + 7) % 7 || 7)); return d; } d.setDate(d.getDate() + 3); while (isWeekend(d)) d.setDate(d.getDate() + 1); return d; }   // Fri/Sat/Sun bid -> next Wednesday; else today + 3 calendar days, rolled to Monday if weekend
-  // The planner wants local "YYYY-MM-DD HH:mm:ss" strings (findings.md), not bidboard's 16:00Z ISO.
+  // The planner wants local "YYYY-MM-DD HH:mm:ss" strings (recon.md), not bidboard's 16:00Z ISO.
   const local16 = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 16:00:00`;
   // transitDays scales with origin->destination distance (US state centroids):
   // <500mi:5  500-1000:9  1000-2000:11  >=2000:12  (intra-state -> 4).
@@ -250,7 +270,7 @@
     } catch (e) { console.warn('[planpanel] bid-record POST failed', e && e.message); }
   }
 
-  // --- Bid submission (PUT /TMS/UpsertBid — verified live, findings.md) ------
+  // --- Bid submission (PUT /TMS/UpsertBid — verified live, recon in the header; the recongs.md) ------
   const upsertUrl = () => String(state.endpoint).replace(/TMS\/GetShipmentPlannerReviewDashboard.*$/i, 'TMS/UpsertBid');
   const MIN_BID = 50;
   const cardSubmissionSlots = new Map(); // route -> {running, pending, promise}; newest pending wins
@@ -368,7 +388,7 @@
         destination: (g.destination && g.destination.name) || null,
         origin_state: stOf(g.origin && g.origin.name) || null,
         dest_state: stOf(g.destination && g.destination.name) || null,
-        // vin column now carries the shipment number (the planner has no VINs, findings.md);
+        // vin column now carries the shipment number (the planner has no VINs — see the header recon);
         // bid_id carries the shipmentId. Distinguishable from real 17-char VINs by the SHP prefix.
         vin: s.shipmentNumber, bid_id: s.shipmentId,
         model: modelBits(s).map((b) => b.n + 'x' + b.letter).join('+') || null,   // e.g. "1x3+3xY"

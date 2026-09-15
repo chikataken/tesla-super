@@ -30,6 +30,14 @@
  *     origin, X-Profile: didi = unfiltered). Refreshes every 60s while open.
  *   - Tesla statuses stay local to this tab: the shared /api/tenders/tesla-status pool
  *     was removed server-side on 2026-09-11 (0.6.1 stops posting to it).
+ *   - The grid MIRRORS the /adv Tender tab exactly (columns, grouping, colors) — every grid
+ *     change lands in both renderers in the same commit + republish. The ledger rules that
+ *     are not derivable from code are in TENDER_LEDGER.md at the repo root. Tesla's CSP blocks
+ *     page-context fetch() to our domain: use GM_xmlhttpRequest (@connect shipments.wastake.com).
+ *
+ * PUBLISHING: clients install/update from the PUBLIC repo chikataken/tesla-super (the
+ * @updateURL above) and only pick up a change when @version increases — bump it, then run
+ * ./publish_userscripts.sh at the repo root (copies the six scripts into that repo and pushes).
  */
 
 (function () {

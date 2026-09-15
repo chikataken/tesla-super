@@ -23,10 +23,28 @@
  *               Card stays green on success (HTTP 200), red on failure. Only sent VINs are committed.
  *   Note      : the panel is a snapshot loaded once (+ Reload). After bidding, hit Reload to see updated counters.
  *
- * Data model (see findings.md): POST {skip,take} -> { data:{ items:Group[], totalRecords }, success }
+ * Data model (recon of https://suppliers.teslamotors.com/logistics/bidboard2 — Angular SPA, "tsl"
+ * components, CDK overlays; paginated table 20/page grouped by route; the board's own calls are
+ * POST …/api/v1/BidBoard/groups + /origins + /destinations; a bare fetch() from page JS fails, so the
+ * app's bearer + x-selectedCarrierId are captured from its own XHRs at document-start):
+ *   POST {skip,take} -> { data:{ items:Group[], totalRecords }, success }
  *   Group = { origin:{name,…}, destination:{name,…}, bids:{ items:Bid[], totalRecords } }
  *   Bid   = { vin, model, scheduledPickupDate, needByDate, price, currencyCode,
  *             carrierCounter:{ bidAmount, currencyCode, estimatedShipDate, neededByDate, … }|null }
+ * Writes (captured from real edits): POST …/BidBoard/{bidId}/UpdateOffer EDITS an existing offer and
+ *   POST …/BidBoard/{bidId}/MakeOffer creates one — same bidId (= carrierCounter.legId), identical body
+ *   { CurrencyCode:"USD", BidAmount:"<price as string>", EstimatedShipDate:"…T16:00:00.000Z",
+ *     NeededByDate:"…T16:00:00.000Z", OfferExpiryDate:null (= Forever) }, credentials:'omit'.
+ *   The verb is picked per VIN (carrierCounter present -> UpdateOffer, else MakeOffer); an HTTP 200 with
+ *   success:false is a FAILURE (UpdateOffer on a new VIN silently no-op'd until this was checked).
+ * Pickup/ETA rules: pickup = today + 3 calendar days rolled past the weekend, and a Fri/Sat/Sun bid
+ *   goes to the NEXT WEDNESDAY (pickupDate()); transit days by state-centroid mileage: <500 mi 5,
+ *   <1000 9, <2000 11, else 12 (transitDays()). Same logic lives in the shipment-planner script.
+ * Every submitted bid is also POSTed to shipments.wastake.com/api/bids (bids.db) for the audit trail.
+ *
+ * PUBLISHING: clients install/update from the PUBLIC repo chikataken/tesla-super (the
+ * @updateURL above) and only pick up a change when @version increases — bump it, then run
+ * ./publish_userscripts.sh at the repo root (copies the six scripts into that repo and pushes).
  */
 
 (function () {

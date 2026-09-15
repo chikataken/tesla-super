@@ -21,11 +21,34 @@
  * READ-ONLY TESLA ACCESS — no writes and no editable fields. It hooks fetch/XHR at document-start,
  * captures requestcapacity, and stores Requested-value history privately in Tampermonkey.
  *
- * Data model (see findings.md), GET requestcapacity under …/api/v1/CapacityPlanner/carrier/ :
+ * PANEL (v0.5.0+): replaces the whole Capacity Planner page with a bidboard-style planner
+ * (Tesla's grid keeps running hidden underneath — its own fetches feed the panel): rows = the 14
+ * days Mon this week..Sun next, columns = lanes grouped by origin with a Total column; date cell =
+ * the (dummy) Confirm Capacity control, blue while the day still needs confirming; each cell =
+ * scheduled half (editable draft, red when it differs from requested) + requested half (amber
+ * until the change is acknowledged by click, ▲/▼ ticker vs the previous value); hover shows the
+ * value history; lane headers link to …/logistics/calendar-view/{originId}/{destGroupId}.
+ * "Tesla grid" button restores the native page. Tesla writes (CONFIRM CAPACITY) were never
+ * captured — the confirm buttons stay dummies until a real confirm is recorded with the XHR hook.
+ * SERVER MIRROR (v0.4.0+): both feeds are POSTed (GM_xmlhttpRequest, debounced ~2 s, identical
+ * payloads skipped) to shipments.wastake.com/api/capacity-snapshot; the server keeps append-only
+ * change logs in app-delivery/dropoffs.db (capacity_request_log / capacity_confirm_log, a row only
+ * when a value differs for carrier+origin+group+date) and GET /api/capacity-history?days=14 feeds
+ * the history cards. Changes are only observed when someone opens the planner.
+ *
+ * Data model (two GETs under …/api/v1/CapacityPlanner/carrier/, bearer from localStorage
+ * 'logisticsportal:token' + x-selectedCarrierId 378; joined on originLocationId + destinationGroupId +
+ * date). getcapacityconfirmations -> data={carrierId, locationCapacities[]={originLocationId,
+ * isOriginGroup, groupCapacities[]={destinationGroupId, confirmCapacities[]={capacityDate, capacity
+ * (=confirmed), scheduled, isConflict}}}} (≈19-day span, no names). requestcapacity (names live here):
  *   data = { carrierId, locationRequests[] = { originLocationId,
  *       originLocationName, groupRequests[] = { destinationGroupId, destinationGroupName,
  *           capacityRequests[] = { date, capacity (=Requested), latestRequestDate } } }
  *   Persistent key = carrierId + originLocationId + destinationGroupId + date.
+ *
+ * PUBLISHING: clients install/update from the PUBLIC repo chikataken/tesla-super (the
+ * @updateURL above) and only pick up a change when @version increases — bump it, then run
+ * ./publish_userscripts.sh at the repo root (copies the six scripts into that repo and pushes).
  */
 
 (function () {
