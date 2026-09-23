@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Regular Fleet — SuperDispatch Recolor
 // @namespace    wastake.regularfleet
-// @version      0.18.1
+// @version      0.18.2
 // @description  Shades Regular Fleet rows by SuperDispatch delivery status. Pulls every VIN off the page, looks each up in SuperDispatch (your own API creds), and matches by DELIVERY DATE: if any of the VIN's SD orders was delivered within 3 days of the Tesla delivery date -> green; else picked up/accepted/pending -> yellow; else (incl. no match) -> red. Results cached per day. Hover a VIN to see its SuperDispatch order card(s).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/regular-fleet/tesla-regular-fleet-recolor.user.js
@@ -706,5 +706,5 @@
   hookApply();
   startHover();
   reapply();     // paint on initial load too, in case rows are already present
-  LOG('installed (v0.18.0)');
+  LOG('installed (v' + ((typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '?') + ')');
 })();
