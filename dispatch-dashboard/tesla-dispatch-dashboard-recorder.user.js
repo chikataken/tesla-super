@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Dispatch Dashboard — Cleaner/Marker
 // @namespace    wastake.dispatchdash
-// @version      0.24.0
+// @version      0.24.1
 // @description  Defaults Dispatch Dashboard searches to Tesla's VIN API field without opening the selector, replaces each License Plate control with a native Tesla-styled Deliver / Andrew Enkh action, shows a SuperDispatch status bubble next to each shipment number (with a regular-fleet-style hover card), and provides Cleaner/Marker actions for pickups, ETAs, and Driver Needed shipments.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/dispatch-dashboard/tesla-dispatch-dashboard-recorder.user.js
@@ -24,9 +24,9 @@
  *     the browser already fetched — it never issues its own request to Tesla, so it adds
  *     ZERO extra load and nothing anomalous to detect ("piggyback").
  *   - For every VIN in that response it records: status, shipment #, service level,
- *     origin -> destination, pickup / need-by / ETA dates, ETA reason, alert ids, carrier id,
- *     and a derived dispatcher (from the origin state). Accumulates across every pull you
- *     look at, keyed by VIN, persisted in Tampermonkey storage (survives reloads).
+ *     origin -> destination, pickup / need-by / ETA dates, ETA reason, alert ids, carrier id.
+ *     Accumulates across every pull you look at, keyed by VIN, persisted in Tampermonkey
+ *     storage (survives reloads).
  *   - Shows a floating dev panel with everything captured (search + status filter, counts,
  *     copy/download JSON, clear). NOTHING is sent to any server.
  *
@@ -65,9 +65,9 @@
  *     EtaUpdateReasonId:4}] chunked 100. HTTP 200 with success:false counts as failure everywhere.
  *   Alert ids (getdispatchalertsbycarrier): 1 Pickup Date Late · 2 Driver Needed · 3 Late ETA ·
  *   4 Incorrect Driver ETA · 5 No Action Needed · 6 ETA Today · 7 Pickup Date Today.
- *   DISPATCHER_STATES below MIRRORS shipment-creator/profiles/profiles.json — change both, bump
- *   @version. Removed history: the server piggyback / red-VIN pipeline (0.21.0) and the tender-pool
- *   mirror (0.22.0, removed in 0.22.1) — this script no longer talks to shipments.wastake.com.
+ *   Removed history: the server piggyback / red-VIN pipeline (0.21.0), the tender-pool mirror
+ *   (0.22.0, removed in 0.22.1) — this script no longer talks to shipments.wastake.com — and the
+ *   dispatcher-by-state table + write-only store counters (0.24.1).
  *
  * PUBLISHING: clients install/update from the PUBLIC repo chikataken/tesla-super (the
  * @updateURL above) and only pick up a change when @version increases — bump it, then run
@@ -93,24 +93,15 @@
   // while the XHR hook guarantees that Tesla receives `vins`, never `shipmentNumbers`.
   let vinSearchMode = true;
 
-  // Dispatcher-by-pickup-state (mirrors shipment-creator/profiles.json + regular-fleet).
-  const DISPATCHER_STATES = {
-    Kelly: ['VA','MD','DC','GA','FL','DE','WV','PA','NY','NJ','CT','RI','MA','NH','VT','ME','NC','SC','TN','AL','KY'],
-    Duka:  ['CA'],
-    Burte: ['IL','IN','OH','MI','MS','UT','WI','NV','AZ','NM','CO','ID','WY','MT','ND','SD','NE','KS','OK','MO','IA','MN','AR','LA','TX','OR','WA'],
-  };
-  const STATE_DISPATCHER = {};
-  for (const name in DISPATCHER_STATES) for (const st of DISPATCHER_STATES[name]) STATE_DISPATCHER[st] = name;
-
   // ---- store -----------------------------------------------------------------
-  // { vins: { [vin]: record }, pulls: n, lastAt: ms, lastTotalCount: n }
+  // { vins: { [vin]: record } }
   let store = load();
   function load() {
     try {
       const s = JSON.parse(GM_getValue(STORE_KEY, '') || '{}');
       if (!s.vins) s.vins = {};
       return s;
-    } catch (e) { return { vins: {}, pulls: 0, lastAt: 0, lastTotalCount: 0 }; }
+    } catch (e) { return { vins: {} }; }
   }
   let saveTimer = null;
   function save() {
@@ -118,9 +109,8 @@
     saveTimer = setTimeout(() => { try { GM_setValue(STORE_KEY, JSON.stringify(store)); } catch (e) {} }, 250);
   }
   function clearStore() {
-    store = { vins: {}, pulls: 0, lastAt: 0, lastTotalCount: 0 };
+    store = { vins: {} };
     try { GM_deleteValue(STORE_KEY); } catch (e) {}
-    scheduleRender();
   }
 
   // ---- helpers ---------------------------------------------------------------
@@ -136,7 +126,6 @@
     try { d = (typeof json === 'string' ? JSON.parse(json) : json).data; } catch (e) { return; }
     if (!d || !Array.isArray(d.shipmentList)) return;
     const now = Date.now();
-    let added = 0;
     for (const ship of d.shipmentList) {
       for (const stop of (ship.stops || [])) {
         const st = originState(stop.originLocation);
@@ -173,7 +162,6 @@
             origin: stop.originLocation,
             dest: stop.destinationLocation,
             state: st,
-            dispatcher: STATE_DISPATCHER[st] || '',
             pickup: stop.estimatedShipDate,
             ready: stop.readyDate,
             needBy: stop.needByDate,
@@ -185,19 +173,13 @@
             lastSeen: now,
             seen: prev ? (prev.seen || 1) + 1 : 1,
           };
-          if (!prev) added++;
         }
       }
     }
-    store.pulls = (store.pulls || 0) + 1;
-    store.lastAt = now;
-    if (typeof d.totalCount === 'number') store.lastTotalCount = d.totalCount;
     save();
-    scheduleRender();
     scheduleDeliverUi();
     scheduleSdCheck();
     scheduleSdBubbles();
-    if (added) updateBadge();
   }
 
   // Hook the PAGE's XHR (Tampermonkey shares the XHR prototype with the page, so this
@@ -1115,12 +1097,6 @@
     if (j._404) return {};
     return sdUnwrapObject(j);
   }
-  async function sdFullOrder(o) {
-    const detailed = o && o.pickup && o.delivery && Array.isArray(o.vehicles) && o.price != null;
-    if (detailed) return o;
-    if (o && o.guid) { try { return await sdGetOrder(o.guid); } catch (_) {} }
-    return o || {};
-  }
 
   // ---- hover-card record (regular-fleet's makeCard, minus the price) ----
   const SD_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1524,9 +1500,6 @@
 
   // ---- UI: bottom-right pill + upward-expanding action menu ------------------
   let host, root, mounted = false, open = false;
-  // ingest()/clearStore() still call these; with the FAB menu there's no live view to repaint -> no-ops.
-  function scheduleRender() {}
-  function updateBadge() {}
 
   const CSS = `
     :host { all: initial; }
@@ -1548,14 +1521,10 @@
     .act:hover { transform: translateX(-2px); }
     .act .t { font-size: 13px; font-weight: 700; }
     .act .s { font-size: 11px; opacity: .72; }
-    .act.armed { background: #f5c518; color: #171a20; }        /* yellow — confirm */
-    .act.armed .s { opacity: .9; }
     .act.processing { background: #f5c518; color: #171a20; }   /* yellow — scanning/writing */
     .act.processing .s { opacity: .9; }
-    .act.run { background: #2a2f36; }
     .act.done { background: #0a7d33; }                         /* green — success */
     .act.err { background: #b42318; }
-    .act.soon { opacity: .85; }
   `;
 
   function mount() {
@@ -1566,8 +1535,8 @@
     root = host.attachShadow({ mode: 'open' });
     const style = document.createElement('style'); style.textContent = CSS; root.appendChild(style);
     const menu = document.createElement('div'); menu.className = 'menu'; menu.id = 'ddmenu';
-    menu.appendChild(actionButton('Clean Pickups', () => nextWeekdayCaption(), runCleanPickups, prepCleanPickups, { oneClick: true }));
-    menu.appendChild(actionButton('Clean ETA', () => nextCalendarDayCaption(), runCleanEta, prepCleanEta, { oneClick: true }));
+    menu.appendChild(actionButton('Clean Pickups', () => nextWeekdayCaption(), runCleanPickups, prepCleanPickups));
+    menu.appendChild(actionButton('Clean ETA', () => nextCalendarDayCaption(), runCleanEta, prepCleanEta));
     root.appendChild(menu);
     const launch = document.createElement('button');
     launch.className = 'launch';
@@ -1586,52 +1555,29 @@
     }
   }
 
-  // Standard actions retain confirm-to-run. With oneClick enabled, one press scans and writes
-  // while yellow, then turns green on success (including when the scan finds nothing to clean).
-  function actionButton(label, subtitle, runFn, prepFn, options) {
+  // One press scans and writes while yellow, then turns green on success (including when the
+  // scan finds nothing to clean). The confirm-to-run variant was removed in 0.24.1 (unused).
+  function actionButton(label, subtitle, runFn, prepFn) {
     const btn = document.createElement('button');
     btn.innerHTML = `<span class="t"></span><span class="s"></span>`;
     const T = btn.querySelector('.t'), S = btn.querySelector('.s');
-    const oneClick = !!(options && options.oneClick);
-    let state = 'idle', armTimer = null, prepData = null;
+    let state = 'idle';
     const subtitleText = () => typeof subtitle === 'function' ? subtitle() : subtitle;
     const setStatus = (msg) => { S.textContent = msg; };
-    function idle() { state = 'idle'; btn.className = 'act' + (runFn ? '' : ' soon'); T.textContent = label; S.textContent = subtitleText(); prepData = null; }
+    function idle() { state = 'idle'; btn.className = 'act'; T.textContent = label; S.textContent = subtitleText(); }
     btn.refreshSubtitle = () => { if (state === 'idle') S.textContent = subtitleText(); };
-    function armPlain() { state = 'armed'; btn.className = 'act armed'; T.textContent = 'Confirm?'; S.textContent = label; clearTimeout(armTimer); armTimer = setTimeout(idle, 4000); }
     function err(e) { btn.className = 'act err'; T.textContent = '✕ ' + label; S.textContent = String((e && e.message) || e).slice(0, 40); state = 'idle'; setTimeout(idle, 5000); }
     idle();
     btn.addEventListener('click', async () => {
-      if (state === 'running' || state === 'prepping') return;
-      if (oneClick) {
-        state = 'running'; btn.className = 'act processing'; T.textContent = label; S.textContent = 'scanning…';
-        try {
-          const prepared = prepFn ? await prepFn(setStatus) : null;
-          const summary = prepared && prepared.count
-            ? await runFn(setStatus, prepared)
-            : ((prepared && prepared.emptyMsg) || 'nothing to clean ✓');
-          state = 'done'; btn.className = 'act done'; T.textContent = '✓ ' + label; S.textContent = summary;
-          setTimeout(idle, 6000);
-        } catch (e) { err(e); }
-        return;
-      }
-      if (state === 'armed') {                              // confirmed -> run
-        clearTimeout(armTimer);
-        if (!runFn) { btn.className = 'act err'; T.textContent = 'Not wired yet'; S.textContent = ''; setTimeout(idle, 1800); return; }
-        state = 'running'; btn.className = 'act run'; T.textContent = label; S.textContent = '…';
-        try {
-          const summary = await runFn(setStatus, prepData);
-          state = 'done'; btn.className = 'act done'; T.textContent = '✓ ' + label; S.textContent = summary || 'done'; setTimeout(idle, 6000);
-        } catch (e) { err(e); }
-        return;
-      }
-      // idle/done -> arm (scan-first when prepFn is provided)
-      if (!runFn || !prepFn) { armPlain(); return; }
-      state = 'prepping'; btn.className = 'act run'; T.textContent = label;
+      if (state === 'running') return;
+      state = 'running'; btn.className = 'act processing'; T.textContent = label; S.textContent = 'scanning…';
       try {
-        const r = await prepFn(setStatus);
-        if (!r || !r.count) { btn.className = 'act'; T.textContent = label; S.textContent = (r && r.emptyMsg) || 'nothing to do'; state = 'idle'; setTimeout(idle, 2500); return; }
-        prepData = r; state = 'armed'; btn.className = 'act armed'; T.textContent = 'Confirm?'; S.textContent = r.confirmMsg; clearTimeout(armTimer); armTimer = setTimeout(idle, 6000);
+        const prepared = prepFn ? await prepFn(setStatus) : null;
+        const summary = prepared && prepared.count
+          ? await runFn(setStatus, prepared)
+          : ((prepared && prepared.emptyMsg) || 'nothing to clean ✓');
+        state = 'done'; btn.className = 'act done'; T.textContent = '✓ ' + label; S.textContent = summary;
+        setTimeout(idle, 6000);
       } catch (e) { err(e); }
     });
     return btn;

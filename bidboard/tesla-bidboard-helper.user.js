@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Bid-Board Helper (live bidding)
 // @namespace    wastake.bidboard
-// @version      2.3.1
+// @version      2.3.2
 // @description  Split panel for the Tesla bid board, SPLICED INTO the page — it replaces Tesla's own board in-place (in-flow, no header bar), so it reads as part of the page; falls back to a fixed overlay if the container isn't found. Left: focused bidding cards (separate boxes for CT/CAB/YL) with a recommended-ETA picker. Right: every route + its VINs (from the API). LIVE: pressing Enter to finish a card submits its prices to Tesla (UpdateOffer) for every VIN in the card. Every submitted bid is also recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/bidboard/tesla-bidboard-helper.user.js
@@ -53,9 +53,7 @@
 
   const state = {
     endpoint: null, headers: null, groups: [], total: 0, loading: false, error: null,
-    filter: '', sortByCount: false, prices: {}, dates: {}, todoOnly: true,   // TO-DO is the default view
-    floating: false,   // true once the user drags the panel off its docked position (overlay fallback only)
-    embedded: false,   // true when the panel is spliced into Tesla's own layout (in-flow, not overlaid)
+    filter: '', prices: {}, dates: {}, todoOnly: true,   // TO-DO is the default view
   };
 
   // ---- 1) Capture the groups POST (endpoint + auth) by hooking XHR ----------
@@ -412,7 +410,6 @@
         /* trow spans the left 50% (symmetric 12px padding cancels out), so the filter's right edge lands on the middle divider */
         .trow{display:flex;align-items:center;gap:10px;width:50%}
         .tools input{flex:1;min-width:0;padding:6px 8px;border:1px solid #d0d3d6;border-radius:6px;font-size:13px}
-        .tools label{font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;color:#5c5e62}
         .todobtn{background:#e6e8ea;color:#3a3f49;border:1px solid #cfd3d7;border-radius:6px;padding:6px 0;min-width:82px;text-align:center;font-size:12px;font-weight:700;cursor:pointer;font-family:Arial,Helvetica,sans-serif;letter-spacing:.04em}
         .todobtn:hover{background:#dcdfe2}
         .todobtn.on{background:#3457d5;color:#fff;border-color:#3457d5}
@@ -430,7 +427,6 @@
         .grp.sel{border-color:#3457d5;box-shadow:0 0 0 3px rgba(52,87,213,.18)}.grp.sel>.row{background:#eaf0ff}
         .grp>.row{display:flex;align-items:center;gap:6px;padding:8px 10px;cursor:pointer;background:#fafbfc}
         .grp>.row:hover{background:#f1f3f5}
-        .caret{background:none;border:0;color:#9a9da1;cursor:pointer;font-size:12px;width:14px;padding:0}
         .leg{flex:1;font-size:13px;font-weight:600;line-height:1.3}
         .cnt{font-size:12px;font-weight:700;color:#3457d5;background:#eaf0ff;border-radius:10px;padding:2px 8px;white-space:nowrap;font-family:Arial,Helvetica,sans-serif}
         .vins{padding:2px 8px 8px}
@@ -463,7 +459,7 @@
         .pin.filled .cur{opacity:1}
         .pin input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-size:16px;font-weight:700;color:#0a7d33;padding:0}
         .pin input::placeholder{color:#0a7d33;opacity:.45}
-        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
+        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.arrow{color:#9a9da1;margin:0 2px}
         .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
         /* loading arc (loading-ui style): a rounded gray arc spins */
         .arc{width:46px;height:46px;animation:bparcspin .9s linear infinite}
@@ -548,7 +544,6 @@
     host.style.cssText = flexRow
       ? `z-index:2147483647;flex:1 1 0%;min-width:0;align-self:stretch;display:block;padding-left:${PANEL_GAP}px;box-sizing:border-box;`
       : `z-index:2147483647;display:block;width:${boxW};height:${boxH};padding-left:${PANEL_GAP}px;box-sizing:border-box;`;
-    state.embedded = true;
     ensureObserver(parent);
     return true;
   }
@@ -588,7 +583,6 @@
       return;
     }
     if (embed()) return;
-    state.embedded = false;
     dock();
   }
 
@@ -619,7 +613,7 @@
     let groups = state.groups.slice();
     if (state.filter) { const f = state.filter; groups = groups.filter((g) => legKey(g).toLowerCase().includes(f) || ((g.bids && g.bids.items) || []).some((b) => (b.vin || '').toLowerCase().includes(f) || (b.model || '').toLowerCase().includes(f))); }
     if (state.todoOnly) groups = groups.filter((g) => ((g.bids && g.bids.items) || []).some((b) => !(b.carrierCounter && b.carrierCounter.bidAmount != null)));   // TO-DO = has an un-priced VIN
-    groups.sort(state.sortByCount ? (a, b) => ((b.bids && b.bids.totalRecords) || 0) - ((a.bids && a.bids.totalRecords) || 0) : geoCmp);
+    groups.sort(geoCmp);
     return groups;
   }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Shipment Planner Helper
 // @namespace    wastake.shipment-planner
-// @version      1.2.0
+// @version      1.2.1
 // @description  Bidboard-style split panel for Tesla's Shipment Planner, SPLICED INTO the page — replaces Tesla's planner board in-place. Left: every route + its shipments (from the API). Right: focused bidding cards with a recommended-ETA picker and one price box per shipment. LIVE: pressing Enter to finish a card PUTs UpsertBid for every typed shipment. REVIEW/CONFIRMED/REJECTED tabs show those boards read-only. EU shipments are hidden everywhere. Every submitted bid is recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
@@ -83,7 +83,6 @@
     view: 'bid',
     loading: false, error: null,
     filter: '', prices: {}, dates: {}, todoOnly: true,   // TO-DO is the default view
-    embedded: false,
   };
 
   // ---- 1) Capture the dashboard POST (endpoint + auth) by hooking XHR -------
@@ -547,7 +546,7 @@
         .pin.filled .cur{opacity:1}
         .pin input{flex:1;min-width:0;border:0;outline:0;background:transparent;font-size:16px;font-weight:700;color:#0a7d33;padding:0}
         .pin input::placeholder{color:#0a7d33;opacity:.45}
-        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.hidden{display:none}.arrow{color:#9a9da1;margin:0 2px}
+        .empty{padding:18px;text-align:center;color:#9a9da1;font-size:13px}.empty.done{color:#0a7d33;font-weight:800;font-size:29px;padding-top:40px}.err{color:#c0392b}.arrow{color:#9a9da1;margin:0 2px}
         .left.center-empty,.right.center-empty{padding:0;overflow:hidden;display:flex;align-items:center;justify-content:center}.center-empty .empty{padding:0}.empty.clock{font-size:34px;letter-spacing:.04em}
         /* loading arc: a rounded gray arc spins */
         .arc{width:46px;height:46px;animation:pparcspin .9s linear infinite}
@@ -640,7 +639,6 @@
     host.style.cssText = flexRow
       ? `z-index:2147483647;flex:1 1 0%;min-width:0;align-self:stretch;display:block;padding-left:${PANEL_GAP}px;box-sizing:border-box;`
       : `z-index:2147483647;display:block;width:${boxW};height:${boxH};padding-left:${PANEL_GAP}px;box-sizing:border-box;`;
-    state.embedded = true;
     ensureObserver(parent);
     return true;
   }
@@ -676,7 +674,6 @@
       return;
     }
     if (embed()) return;
-    state.embedded = false;
     dock();
   }
 
@@ -895,8 +892,6 @@
     if (lg) { lg.classList.add('sel'); if (center) centerInPane(body.left, lg); }
   }
   function selectRi(ri, centerLeft = true) { body.right.querySelectorAll('.fcard').forEach((c) => c.classList.toggle('active', +c.dataset.ri === ri)); highlightLeft(ri, centerLeft); }
-
-  window.__planpanelState = state; window.__planpanelRender = render; window.__planpanelLoad = loadView;
 
   if (document.documentElement) ensurePanel();
   else document.addEventListener('readystatechange', ensurePanel, { once: true });

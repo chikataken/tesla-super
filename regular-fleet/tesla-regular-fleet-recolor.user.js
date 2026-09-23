@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Regular Fleet — SuperDispatch Recolor
 // @namespace    wastake.regularfleet
-// @version      0.18.0
+// @version      0.18.1
 // @description  Shades Regular Fleet rows by SuperDispatch delivery status. Pulls every VIN off the page, looks each up in SuperDispatch (your own API creds), and matches by DELIVERY DATE: if any of the VIN's SD orders was delivered within 3 days of the Tesla delivery date -> green; else picked up/accepted/pending -> yellow; else (incl. no match) -> red. Results cached per day. Hover a VIN to see its SuperDispatch order card(s).
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/regular-fleet/tesla-regular-fleet-recolor.user.js
@@ -287,35 +287,31 @@
     return o || {};
   }
 
-  // Decide a VIN's color by DELIVERY DATE and build the hover-card list from its SD orders.
-  // Returns {color, status, deliveredAt, matched, cards} or {error} (leave uncached -> retry).
+  // Decide a VIN's color by DELIVERY DATE and pick the ONE hover card from its SD orders.
+  // Returns {color, card} or {error} (leave uncached -> retry).
   async function evaluateVin(vin, teslaDeliveryDate) {
     const tdd = parseDate(teslaDeliveryDate);
     let orders;
     try { orders = await findByVin(vin); }
     catch (e) { return { error: String((e && e.message) || e) }; }
-    if (!orders.length) return { color: 'red', status: '', deliveredAt: '', matched: false, card: null };
+    if (!orders.length) return { color: 'red', card: null };
 
-    let green = null, greenCard = null, yellowStatus = '', yellowCard = null, firstCard = null;
+    let greenCard = null, yellowCard = null, firstCard = null;
     for (const o0 of orders) {
       const o = await fullOrder(o0);
       const c = makeCard(o);
       if (!firstCard) firstCard = c;
       // GREEN: this order was actually delivered within the window of the Tesla delivery date.
-      if (!green && tdd != null) {
+      if (!greenCard && tdd != null) {
         const dd = parseDate(sdDeliveryDate(o));
-        if (dd != null && dayDiff(dd, tdd) <= DELIVERY_WINDOW_DAYS) {
-          green = { status: String(o.status || 'delivered'), deliveredAt: String(sdDeliveryDate(o) || '') };
-          greenCard = c;
-        }
+        if (dd != null && dayDiff(dd, tdd) <= DELIVERY_WINDOW_DAYS) greenCard = c;
       }
-      if (!yellowStatus && isYellowStatus(o.status)) { yellowStatus = normStatus(o.status); yellowCard = c; }
+      if (!yellowCard && isYellowStatus(o.status)) yellowCard = c;
     }
     // Show only the ONE relevant order: the date-matched (green) one, else in-transit (yellow), else the first.
-    const card = greenCard || yellowCard || firstCard || null;
-    if (green) return { color: 'green', status: green.status, deliveredAt: green.deliveredAt, matched: true, card };
-    if (yellowStatus) return { color: 'yellow', status: yellowStatus, deliveredAt: '', matched: true, card };
-    return { color: 'red', status: '', deliveredAt: '', matched: false, card };
+    if (greenCard) return { color: 'green', card: greenCard };
+    if (yellowCard) return { color: 'yellow', card: yellowCard };
+    return { color: 'red', card: firstCard || null };
   }
 
   // ============================ daily cache ================================
@@ -361,7 +357,7 @@
           const r = todo[i++];
           const res = await evaluateVin(r.vin, r.deliveryDate);
           if (!res.error) {
-            cache.vins[r.vin] = { color: res.color, status: res.status, deliveredAt: res.deliveredAt, matched: res.matched, card: res.card || null };
+            cache.vins[r.vin] = { color: res.color, card: res.card || null };
             saveCache(cache);
             applyColors();
           } else {
@@ -644,7 +640,7 @@
     if (shownVin === vin && panelEl && panelEl.style.opacity === '1') return;
     clearTimeout(showT);
     showT = setTimeout(() => {
-      const card = entry.card || (entry.cards && entry.cards[0]);   // fallback for pre-0.5 cache
+      const card = entry.card;
       if (!card) return;
       const p = ensurePanel();
       p.innerHTML = cardHtml(card, vin);
@@ -677,7 +673,7 @@
       const vin = vinFromCell(cell);
       if (!vin) return;
       const entry = loadCache().vins[vin];
-      if (!entry || !(entry.card || (entry.cards && entry.cards.length))) return;
+      if (!entry || !entry.card) return;
       showPanel(cell, vin, entry);
     }, true);
     document.addEventListener('mouseout', (e) => {

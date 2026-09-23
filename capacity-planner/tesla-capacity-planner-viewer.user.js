@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Tesla Capacity Planner — Requested History
 // @namespace    wastake.capacityplanner
-// @version      0.15.0
+// @version      0.15.1
 // @description  Full-screen replacement UI for Tesla Capacity Planner in the bidboard theme: This Week / Next Week grid, per-day cells with a schedule entry box (placeholder = Tesla's current confirmed) next to the requested number, hover history cards from the server change log, dummy Confirm Capacity buttons, and a bottom-right Tesla grid / Planner UI toggle. Still read-only toward Tesla; mirrors both capacity feeds to the shipment-creator change log.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/capacity-planner/tesla-capacity-planner-viewer.user.js
@@ -409,7 +409,7 @@
   const HISTORY_URL = 'https://shipments.wastake.com/api/capacity-history?days=14';
   const PANEL_GAP = 0;   // flush with Tesla's layout — no gutter line between panel and page
   let host = null, root = null, pill = null;
-  const panelState = { week: 0, nativeMode: false, embedded: false };
+  const panelState = { nativeMode: false };
   let hiddenEl = null, observedParent = null, mo = null, moScheduled = false;
   let serverHist = null, serverHistAt = 0, serverHistPending = false;
   let renderTimer = null, panelToastTimer = null;
@@ -623,7 +623,7 @@
         .tick{position:absolute;right:100%;margin-right:3px;top:50%;transform:translateY(-50%);font-size:10px;font-weight:700}
         .tick.up{color:#0a7d33}
         .tick.down{color:#c0392b}
-        .empty,.loadwrap{display:flex;align-items:center;justify-content:center;height:100%;min-height:300px;color:#9a9da1;font-size:13px}
+        .loadwrap{display:flex;align-items:center;justify-content:center;height:100%;min-height:300px;color:#9a9da1;font-size:13px}
         .arc{width:46px;height:46px;animation:cparcspin .9s linear infinite}
         .arc circle{stroke:#b0b3b7}
         @keyframes cparcspin{to{transform:rotate(360deg)}}
@@ -769,13 +769,13 @@
       html += `<td class="lane${confirmable ? ' confirmable' : ''}"${confirmable ? ` data-day="${esc(key)}" title="Confirm Capacity"` : ''}>` +
         `<span class="datepill">${esc(dow)} ${d.getDate()}</span></td>`;
       model.origins.forEach((origin) => {
-        let sumR = 0, sumC = 0, sumS = 0;
+        let sumR = 0, sumC = 0;
         origin.lanes.forEach((lane) => {
           const r = lane.reqByDay.get(key); const c = lane.confFor(key);
           const R = r ? Number(r.capacity) : null;
           const C = c ? Number(c.capacity) : null;
           const S = c ? Number(c.scheduled) : null;
-          sumR += R || 0; sumC += C || 0; sumS += S || 0;
+          sumR += R || 0; sumC += C || 0;
           const hk = historyKey(model.carrierId, lane.originId, lane.groupId, key);
           const tl = timelineFor(hk);
           const isChanged = tl.length >= 2;
@@ -890,7 +890,6 @@
     host.style.cssText = flexRow
       ? `z-index:2147483647;flex:1 1 0%;min-width:0;align-self:stretch;display:block;padding-left:${PANEL_GAP}px;box-sizing:border-box;`
       : `z-index:2147483647;display:block;width:${boxW};height:${boxH};padding-left:${PANEL_GAP}px;box-sizing:border-box;`;
-    panelState.embedded = true;
     ensurePanelObserver(parent);
     return true;
   }
@@ -924,7 +923,6 @@
       return;
     }
     if (embedPanel()) return;
-    panelState.embedded = false;
     dockPanel();
   }
 
@@ -1002,7 +1000,5 @@
     GM_registerMenuCommand('Toggle Tesla native grid', () => setNativeMode(!panelState.nativeMode));
   } catch (_) {}
 
-  PAGE.__capRequestedHistory = { state, requestedHistory: () => requestedHistory, applyRequestedAnnotations };
-  PAGE.__capPanel = { panelState, renderPanel, panelSync, fetchServerHistory, buildLanes, setNativeMode };
   LOG('installed (read-only Tesla access + planner panel + server change log). Waiting for Capacity Planner data…');
 })();
