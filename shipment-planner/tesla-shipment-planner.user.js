@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Tesla Shipment Planner Helper
 // @namespace    wastake.shipment-planner
-// @version      1.2.1
-// @description  Bidboard-style split panel for Tesla's Shipment Planner, SPLICED INTO the page — replaces Tesla's planner board in-place. Left: every route + its shipments (from the API). Right: focused bidding cards with a recommended-ETA picker and one price box per shipment. LIVE: pressing Enter to finish a card PUTs UpsertBid for every typed shipment. REVIEW/CONFIRMED/REJECTED tabs show those boards read-only. EU shipments are hidden everywhere. Every submitted bid is recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
+// @version      1.3.0
+// @description  Bidboard-style split panel for Tesla's Shipment Planner, SPLICED INTO the page — replaces Tesla's planner board in-place. Left: every route + its shipments (from the API). Right: focused bidding cards with a recommended-ETA picker and one PER-VIN price box per model class (3/S/X/Y together, Cybertruck apart); each shipment's bid = per-VIN price × its VINs. LIVE: pressing Enter to finish a card PUTs UpsertBid for every shipment a typed box covers. REVIEW/CONFIRMED/REJECTED tabs show those boards read-only. EU shipments are hidden everywhere. Every submitted bid is recorded (fire-and-forget) to shipments.wastake.com for the local bid-audit DB.
 // @author       wastake
 // @updateURL    https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
 // @downloadURL  https://raw.githubusercontent.com/chikataken/tesla-super/main/shipment-planner/tesla-shipment-planner.user.js
@@ -34,9 +34,16 @@
  *
  * LIVE BIDDING — typing a price and pressing Enter to leave a card PUTs /TMS/UpsertBid per shipment.
  *   Left half : route list (origin -> destination), each expanded with its shipments / models / my bid.
- *   Right half: one focused card per route — route, recommended-ETA date picker, and ONE PRICE BOX
- *               PER SHIPMENT (labeled VIN count, model mix, shipment number). Shipments differ in
- *               size, so prices are per shipment — nothing is fanned.
+ *   Right half: one focused card per route — route, recommended-ETA date picker, and ONE PER-VIN PRICE
+ *               BOX PER MODEL CLASS on the route (bidboard's boxes, 2026-11-24): 3/S/X/Y share 'std',
+ *               Cybertruck is 'ct', any other model name its own box. Classes come from modelCount
+ *               (no VINs, so bidboard's VIN-prefix CAB / YL boxes cannot exist here). The box caption
+ *               is the class's VIN count across the route's shipments.
+ *   Pricing   : a typed box prices EVERY shipment on the route carrying that class, replacing bids
+ *               already placed (one route = one price per class, like bidboard). Shipment bid =
+ *               sum over its classes of per-VIN price × that class's VIN count; a shipment mixing
+ *               classes is sent only when every one of its classes is typed (otherwise skipped, and
+ *               the card says so). Placeholder = our most common current per-VIN price on the class.
  *   Submit    : Enter only sends boxes you've TYPED into; pickup = today + 3 calendar days (rolled to Monday if weekend) 16:00 local,
  *               ETA = pickup + distance-based transit days (stepper offsets in calendar days), USD.
  *               Submissions are serialized per route; the newest Entered snapshot wins.
@@ -175,6 +182,30 @@
     if (!bits.length) return dash;
     return bits.map((b) => b.letter === 'CT' ? '<span class="badge ct">CT</span>' : b.letter).join('·');
   }
+  // Price classes (bidboard's per-VIN boxes). 3/S/X/Y share 'std', Cybertruck 'ct'; any other model
+  // name gets its own class 'm:<name>' so it never inherits a 3/S/X/Y price. A shipment without a
+  // model mix is class 'm:?' (its own box) for the same reason.
+  const STD_MODELS = new Set(['model 3', 'model s', 'model x', 'model y']);
+  const classOfModel = (name) => { const k = String(name || '').toLowerCase().trim(); return STD_MODELS.has(k) ? 'std' : (k === 'cybertruck' ? 'ct' : 'm:' + k); };
+  function classCounts(s) {                          // {class: VINs} for one shipment
+    const out = {}, mc = s.modelCount || {};
+    for (const k of Object.keys(mc)) { const n = Number(mc[k]) || 0; if (n > 0) { const c = classOfModel(k); out[c] = (out[c] || 0) + n; } }
+    if (!Object.keys(out).length) out['m:?'] = Number(s.noOfVins) || 1;
+    return out;
+  }
+  const CLASS_ORDER = (a, b) => (a === 'std' ? -1 : b === 'std' ? 1 : a === 'ct' ? -1 : b === 'ct' ? 1 : a.localeCompare(b));
+  function routeClasses(g) {                         // [[class, VINs on the route]] in box order
+    const tot = {};
+    for (const s of g.shipments) for (const [c, n] of Object.entries(classCounts(s))) tot[c] = (tot[c] || 0) + n;
+    return Object.entries(tot).sort((x, y) => CLASS_ORDER(x[0], y[0]));
+  }
+  // Shipment bid from per-VIN class prices: {total, missing} — missing = its classes with no price.
+  function shipmentTotal(s, prices) {
+    let total = 0; const missing = [];
+    for (const [c, n] of Object.entries(classCounts(s))) { if (prices[c] == null) missing.push(c); else total += n * prices[c]; }
+    return { total: Math.round(total * 100) / 100, missing };
+  }
+
   // vclass for the audit record: pure-CT loads 'ct', no-CT 'std', otherwise 'mix'.
   function vclassOf(s) {
     const bits = modelBits(s); if (!bits.length) return 'std';
@@ -286,8 +317,9 @@
     if (focusInvalid) { bad.focus({ preventScroll: true }); if (bad.select) bad.select(); }
     return false;
   }
-  // key = "<legKey>|<shipmentNumber>" -> the group and the ONE shipment behind a price box.
-  // Always resolved against CURRENT state, so a post-refresh lookup sees fresh bid ids.
+  // Price boxes are keyed "<legKey>|<class>"; offers are keyed "<legKey>|<shipmentNumber>".
+  // Both resolve against CURRENT state, so a post-refresh lookup sees fresh bid ids.
+  const groupForLeg = (leg) => state.groups.find((x) => legKey(x) === leg) || null;
   function shipmentForKey(key) {
     const sep = key.lastIndexOf('|'), leg = key.slice(0, sep), num = key.slice(sep + 1);
     const g = state.groups.find((x) => legKey(x) === leg); if (!g) return { g: null, s: null };
@@ -332,22 +364,27 @@
 
   // Freeze exactly what was on the card when Enter was pressed. Editing without pressing Enter
   // does not enqueue anything; pressing Enter again replaces any waiting snapshot with this one.
+  // The typed per-VIN class prices fan out to EVERY shipment on the route carrying a typed class
+  // (already-bid ones included: one price per class per route); each offer is one shipment's total.
   function snapshotCard(cardEl) {
     const inputs = typedPriceInputs(cardEl);
     if (!inputs.length) return null;
-    const offers = [];
-    for (const inp of inputs) {
-      const { g } = shipmentForKey(inp.dataset.key);
-      if (!g) continue;
-      offers.push({
-        key: inp.dataset.key,
-        price: String(bidValue(inp.value)),
-        readyByDate: local16(pickupDate()),
-        neededByDate: local16(selectedEta(g)),
-      });
+    const route = inputRouteKey(inputs[0].dataset.key), g = groupForLeg(route);
+    if (!g) return null;
+    const prices = {};
+    for (const inp of inputs) prices[inp.dataset.key.slice(inp.dataset.key.lastIndexOf('|') + 1)] = bidValue(inp.value);
+    const offers = [], readyByDate = local16(pickupDate()), neededByDate = local16(selectedEta(g));
+    let skipped = 0;
+    for (const s of g.shipments) {
+      const counts = classCounts(s);
+      if (!Object.keys(counts).some((c) => prices[c] != null)) continue;     // no typed box covers it
+      const { total, missing } = shipmentTotal(s, prices);
+      if (missing.length) { skipped++; continue; }                          // mixed load, a class left blank
+      const vinPrices = Object.fromEntries(Object.keys(counts).map((c) => [c, prices[c]]));
+      offers.push({ key: route + '|' + s.shipmentNumber, price: String(total), vinPrices, readyByDate, neededByDate });
     }
-    if (!offers.length) return null;
-    return { route: inputRouteKey(offers[0].key), cardEl, offers };
+    if (!offers.length && !skipped) return null;
+    return { route, cardEl, offers, skipped };
   }
 
   function markCardSending(snapshot) {
@@ -362,11 +399,15 @@
     const card = currentCard(snapshot.route, snapshot.cardEl);
     if (!card) return;
     const oldTag = card.querySelector('.subtag'); if (oldTag) oldTag.remove();
+    const skipped = snapshot.skipped || 0;
     card.classList.remove('sending', 'submitted', 'submit-err', 'bid-invalid');
-    card.classList.add(failed ? 'submit-err' : 'submitted');
-    if (failed) {
+    card.classList.add(failed || skipped ? 'submit-err' : 'submitted');
+    if (failed || skipped) {
       const tag = document.createElement('div'); tag.className = 'subtag'; card.appendChild(tag);
-      tag.textContent = `⚠ ${failed} bid${failed === 1 ? '' : 's'} failed`;
+      const parts = [];
+      if (failed) parts.push(`${failed} bid${failed === 1 ? '' : 's'} failed`);
+      if (skipped) parts.push(`${skipped} mixed shipment${skipped === 1 ? '' : 's'} skipped — price every model on it`);
+      tag.textContent = '⚠ ' + parts.join(' · ');
     }
   }
 
@@ -392,7 +433,8 @@
         vin: s.shipmentNumber, bid_id: s.shipmentId,
         model: modelBits(s).map((b) => b.n + 'x' + b.letter).join('+') || null,   // e.g. "1x3+3xY"
         vclass: vclassOf(s),
-        price: offer.price, currency: 'USD',
+        price: offer.price, currency: 'USD',            // the shipment total sent to Tesla
+        vin_prices: offer.vinPrices || null,              // the per-VIN class prices it was built from
         list_price: null,                    // the planner API exposes no list price
         prev_counter: prevBid, verb: 'UpsertBid',
         pickup_date: offer.readyByDate, eta_date: offer.neededByDate,
@@ -712,16 +754,30 @@
     return groups;
   }
 
-  function priceBox(key, s) {
-    const k = key + '|' + s.shipmentNumber;
+  // Most common current PER-VIN price on a class (bidboard's existingMajority), from shipments
+  // that carry only that class (a mixed load's total cannot be split back per class).
+  function classMajority(shipments, cls) {
+    const c = {}; let best = null, bn = 0;
+    for (const s of shipments) {
+      if (!hasActiveBid(s)) continue;
+      const counts = classCounts(s), keys = Object.keys(counts);
+      if (keys.length !== 1 || keys[0] !== cls) continue;
+      const per = Math.round(Number(s.bid.bidAmount) / counts[cls] * 100) / 100;
+      c[per] = (c[per] || 0) + 1; if (c[per] > bn) { bn = c[per]; best = per; }
+    }
+    return best;
+  }
+  // One per-VIN box per class on the route: "<n> VINs" (3/S/X/Y), "<n> [CT]", or "<n> <MODEL>".
+  function priceBox(key, g, cls, n) {
+    const k = key + '|' + cls;
     const local = state.prices[k] != null ? state.prices[k] : '';
-    const cur = hasActiveBid(s) ? s.bid.bidAmount : null;   // existing bid -> faded placeholder
-    const ph = cur != null ? String(cur) : '';
-    const done = hasActiveBid(s);                           // skip on Enter when already bid
-    // Bidboard cap style: "<n> VINs", or "<n> [CT]" when the load carries a badge-worthy model.
-    const n = s.noOfVins != null ? s.noOfVins : '?';
-    const hasCT = modelBits(s).some((b) => b.letter === 'CT');
-    const cap = `<span class="num">${n}</span> ` + (hasCT ? '<span class="badge ct">CT</span>' : `VIN${n === 1 ? '' : 's'}`);
+    const covered = g.shipments.filter((s) => classCounts(s)[cls]);
+    const maj = classMajority(covered, cls);                 // current per-VIN price -> faded placeholder
+    const ph = maj != null ? String(maj) : '';
+    const done = covered.length > 0 && covered.every(hasActiveBid);   // skip on Enter only when ALL its shipments carry a bid
+    const label = cls === 'std' ? `VIN${n === 1 ? '' : 's'}` : cls === 'ct' ? '<span class="badge ct">CT</span>'
+      : (cls === 'm:?' ? 'VINs (no model)' : cls.slice(2).replace(/^model /, '').toUpperCase());
+    const cap = `<span class="num">${n}</span> ` + label;
     return `<div class="price-col"><div class="pcap">${cap}</div>`
       + `<div class="pin${local !== '' ? ' filled' : ''}"><span class="cur">$</span>`
       + `<input class="price" type="text" inputmode="decimal" placeholder="${esc(ph)}" value="${esc(local)}" data-key="${esc(k)}" data-priced="${done ? 1 : 0}"></div></div>`;
@@ -807,13 +863,13 @@
     });
     body.left.innerHTML = ''; body.left.appendChild(lf);
 
-    // RIGHT — one card per route; ONE PRICE BOX PER SHIPMENT
+    // RIGHT — one card per route; one per-VIN price box per model class
     const rf = document.createDocumentFragment();
     gs.forEach((g, ri) => {
       const key = legKey(g);
       const O = shortLoc(g.origin && g.origin.name), D = shortLoc(g.destination && g.destination.name);
       const card = document.createElement('div'); card.className = 'fcard'; card.dataset.ri = ri; card.dataset.leg = key;
-      const boxes = g.shipments.map((s) => priceBox(key, s)).join('');
+      const boxes = routeClasses(g).map(([cls, n]) => priceBox(key, g, cls, n)).join('');
       card.innerHTML = `<div class="froute"><span>${O}</span><span class="arrow">→</span><span>${D}</span></div>`
         + `<div class="fmeta"><div class="fneed">Need by <b>${needByLabel(g.shipments)}</b></div></div>`
         + dateSelector(g)
